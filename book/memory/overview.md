@@ -1,442 +1,443 @@
-# 内存子系统总览
+# 内存子系统总览：从一段内存的使用过程开始
 
-本章以仓库中 [Linux 顶层 Makefile](../../linux/Makefile) 标记的 **6.18.52** 源码为依据，梳理内存子系统的职责、关键数据结构和主要执行路径。分析以 `CONFIG_MMU` 下的普通系统内存为主；架构相关流程以 x86 为例，NUMA、内存控制组、大页等功能按配置分别说明。源码中存在某个实现，并不表示当前运行的内核已经启用它。
+程序拿到一段地址后，内核需要回答三个问题：**这段地址能不能访问，数据实际放在哪里，内存不够时怎么办。** 本章围绕这三个问题，逐步连接 Linux 内存管理中的概念和源码。
 
-阅读这一子系统，需要同时跟踪三个问题：**物理页在哪里，虚拟地址如何访问它，内存紧张时如何收回它。** Linux 分别通过 node/zone 与页分配器、进程地址空间与页表、反向映射与回收机制回答这些问题；`struct page` 和 `struct folio` 是贯穿这些机制的基础对象。
+读完本章，先争取能解释四件事：申请地址为什么不等于立即分配数据页；VMA、页表和物理页各自负责什么；内核怎样提供页和小对象；为什么还有空闲内存，某次分配却仍会失败。
 
-## 1. 整体职责与源码分布
+本文依据仓库 [Linux 顶层 Makefile](../../linux/Makefile) 中标记的 **6.18.52** 版本，只讨论本地源码。主线采用启用 `CONFIG_MMU`（内存管理单元支持）的普通系统内存，缺页入口以 x86 为例。文中的调用链省略了部分中间函数和错误处理；配置相关机制是否启用，需要结合构建选项判断，见 [mm/Makefile](../../linux/mm/Makefile)。
 
-内存管理并不只发生在 `mm/` 中。通用算法主要位于该目录，数据结构主要位于 `include/linux/`；启动、进程复制、架构异常和文件系统回调共同组成完整的执行路径。
+**建议分两遍读。** 第一遍读第 1、2 节，建立“地址 → 映射 → 数据”的认识；第二遍读第 3～6 节，理解分配、共享和回收。第 7 节留作进阶查阅，第 8 节提供源码阅读路线和自测题。
 
-| 层次 | 解决的问题 | 主要源码入口 |
-| --- | --- | --- |
-| 启动与物理内存描述 | 识别内存范围，保留启动期内存，建立 node、zone 和页描述符 | [memblock.c](../../linux/mm/memblock.c)、[mm_init.c](../../linux/mm/mm_init.c) |
-| 页分配 | 根据大小、用途、节点和水位分配、释放物理页 | [page_alloc.c](../../linux/mm/page_alloc.c)、[mmzone.h](../../linux/include/linux/mmzone.h) |
-| 内核内存分配 | 分配小对象，或建立连续的内核虚拟地址区间 | [slub.c](../../linux/mm/slub.c)、[slab.h](../../linux/mm/slab.h)、[vmalloc.c](../../linux/mm/vmalloc.c) |
-| 进程地址空间 | 管理虚拟地址区间、权限、页表、映射和解除映射 | [mmap.c](../../linux/mm/mmap.c)、[vma.c](../../linux/mm/vma.c)、[memory.c](../../linux/mm/memory.c) |
-| 内容与共享 | 管理文件页缓存、匿名页、共享内存以及反向映射 | [filemap.c](../../linux/mm/filemap.c)、[shmem.c](../../linux/mm/shmem.c)、[rmap.c](../../linux/mm/rmap.c) |
-| 内存压力处理 | 选择回收对象，换出、写回、迁移、规整，必要时处理 OOM | [vmscan.c](../../linux/mm/vmscan.c)、[compaction.c](../../linux/mm/compaction.c)、[oom_kill.c](../../linux/mm/oom_kill.c) |
-| 策略与资源约束 | NUMA 放置策略、memcg 记账与限额 | [mempolicy.c](../../linux/mm/mempolicy.c)、[memcontrol.c](../../linux/mm/memcontrol.c) |
+## 1. 先分清地址、数据和管理信息
 
-[mm/Makefile](../../linux/mm/Makefile) 给出了这些模块的实际构建关系。例如，MMU 与 NOMMU 使用不同实现，交换、透明大页和 memcg 由配置控制，而本版本的 slab 分配实现直接构建 `slub.o`。
+### 1.1 虚拟地址与物理地址
 
-从本版本源码可明确看到几项组织方式：
+程序访问一个指针时，使用的是它所在地址空间中的**虚拟地址**。在本章讨论的普通映射中，CPU 根据页表将虚拟地址转换为物理地址，再访问内存里的数据。两个进程中的同一个虚拟地址，不一定对应同一个物理位置。
 
-- `mm_struct.mm_mt` 使用 Maple Tree 索引 VMA，不能再用旧版本的 `mm_rb` 和 VMA 双向链表解释当前进程地址空间。
-- 文件页缓存、匿名内存和回收路径大量以 folio 为处理单位，但基础页、页表以及部分接口仍使用 `struct page`。
-- `struct slab` 和 `struct ptdesc` 为不同用途的内存页提供专门的元数据视图，当前布局仍与 `struct page` 重叠。
-- 回收同时保留传统 LRU 和多代 LRU 分支；SLUB 除每 CPU slab 状态外，还支持按 cache 启用的 sheaf 批量对象缓存。
-
-对应定义见 [mm_types.h](../../linux/include/linux/mm_types.h)、[mmzone.h](../../linux/include/linux/mmzone.h)、[mm/slab.h](../../linux/mm/slab.h) 和 [slub.c](../../linux/mm/slub.c)。
-
-## 2. 物理内存：从地址范围到可分配页
-
-### 2.1 先区分地址、页帧和页描述符
-
-物理地址描述内存中的字节位置；PFN（页帧号）以基础页为单位标识物理位置，满足 `PFN = 物理地址 >> PAGE_SHIFT`。`struct page` 则是内核维护的元数据，记录对应页帧的用途、状态和引用关系，它本身不是该页的数据内容。
-
-`pfn_to_page()` 和 `page_to_pfn()` 在不同内存模型下有不同实现：
-
-| 内存模型 | PFN 与页描述符的组织关系 |
-| --- | --- |
-| `CONFIG_FLATMEM` | 通过 `mem_map` 和架构 PFN 偏移换算 |
-| `CONFIG_SPARSEMEM`，未启用 VMEMMAP | 通过 `mem_section` 找到相应范围的页描述符 |
-| `CONFIG_SPARSEMEM_VMEMMAP` | 将页描述符组织为虚拟连续的 `vmemmap`，通过 `vmemmap + pfn` 换算 |
-
-这三种实现见 [memory_model.h](../../linux/include/asm-generic/memory_model.h)，`mem_section` 见 [mmzone.h](../../linux/include/linux/mmzone.h)。`vmemmap` 连续的是**页描述符所在的虚拟地址**，不表示机器的物理内存没有空洞，也不表示进程的数据页连续。下文使用 `PAGE_SIZE` 表示基础页大小，不把某一架构的页大小当作通用常量。
-
-### 2.2 启动阶段：memblock 向页分配器交接
-
-常规分配器尚未建立时，内核使用 `memblock` 管理物理地址范围。其关系是：
+内核以**基础页**为单位管理许多内存操作，页大小用 `PAGE_SIZE` 表示，`PAGE_SHIFT` 表示页大小对应的二进制位移量。描述一个物理页的位置时，常用 PFN（Page Frame Number，页帧号）：
 
 ```text
-struct memblock
-├── memory   : memblock_type → memblock_region[]
-└── reserved : memblock_type → memblock_region[]
-                                  ├── base / size
-                                  ├── flags
-                                  └── nid（CONFIG_NUMA）
+PFN = 物理地址 >> PAGE_SHIFT
+物理页的起始地址 = PFN << PAGE_SHIFT
 ```
 
-`memory` 记录内存范围，`reserved` 记录其中需要保留的范围。两者可以重叠，不能将它们的容量直接相加；早期可释放范围需要结合保留信息和区域属性确定。数据结构见 [memblock.h](../../linux/include/linux/memblock.h)，遍历与释放逻辑见 [memblock.c](../../linux/mm/memblock.c) 的 `free_low_memory_core_early()`。
+只为方便计算，假设基础页大小为 4 KiB，那么物理地址 `0x5000` 位于 PFN 为 5 的页中。实际阅读源码时应使用 `PAGE_SIZE`，不要把 4 KiB 当作所有架构的固定值。换算宏见 [pfn.h](../../linux/include/linux/pfn.h)。
 
-初始化的大体依赖关系如下，省略架构和调试分支：
+### 1.2 `page` 与 `folio`：内核怎样描述数据页
 
-1. `start_kernel()` 调用 `setup_arch()`，完成架构相关的内存识别与早期准备。
-2. 架构初始化与通用 `free_area_init()` 等代码建立节点、zone 和页描述符；例如 x86-64 的 `initmem_init()` 调用 `x86_numa_init()`，`paging_init()` 调用 `sparse_init()`，`zone_sizes_init()` 调用 `free_area_init()`。
-3. `mm_core_init()` 构建 zonelist，准备页分配器，并调用 `memblock_free_all()` 将符合条件的空闲页交给伙伴系统。
-4. 随后执行 `mem_init()`、`kmem_cache_init()`，再完成 `vmalloc_init()` 等初始化。
+物理页里保存数据，`struct page` 保存内核管理这个页所需的信息，例如状态和引用计数。**页描述符与页里的数据是两回事。** 对于这里讨论的普通物理页，可以通过 `pfn_to_page()`、`page_to_pfn()` 在页帧号与描述符之间转换，具体实现见 [memory_model.h](../../linux/include/asm-generic/memory_model.h)。
 
-这个顺序以 [init/main.c](../../linux/init/main.c)、[x86/mm/init.c](../../linux/arch/x86/mm/init.c)、[x86/mm/init_64.c](../../linux/arch/x86/mm/init_64.c) 和 [mm_init.c](../../linux/mm/mm_init.c) 为准。尤其要注意，本版本通用 `mm_core_init()` 已经在 `mem_init()` **之前**调用 `memblock_free_all()`，不应直接套用其他版本的启动调用链。
-
-### 2.3 node、zone、伙伴系统与 PCP
-
-物理内存的主要组织关系如下。这里的层次表示管理关系，不是说每个结构都直接包含下一层的全部描述符。
+阅读新一些的内存代码，还会频繁遇到 `struct folio`。它表示作为一个整体管理的一组物理连续页，可以只包含一个基础页，也可以包含多个基础页。它的大小是二次幂，并按自身大小对齐。
 
 ```text
-pg_data_t / struct pglist_data                 每个内存节点
-├── node_zones[MAX_NR_ZONES]                  本节点的 zone
-│   └── struct zone
-│       ├── zone_pgdat                       指回所属节点
-│       ├── free_area[order]
-│       │   └── free_list[migratetype]        伙伴系统的空闲块链表
-│       ├── per_cpu_pageset                  每 CPU 页缓存 PCP
-│       ├── _watermark[]                     分配与回收水位
-│       └── managed_pages / present_pages / spanned_pages
-├── node_zonelists[]                          分配候选 zone 的有序引用
-├── kswapd                                   节点后台回收线程
-└── kcompactd                                节点后台规整线程（按配置）
+一个基础页：     数据页                         ← struct page 描述
+一个大 folio： [基础页][基础页][基础页][基础页]   ← 作为整体管理的示意
 ```
 
-相关定义集中在 [mmzone.h](../../linux/include/linux/mmzone.h) 的 `pglist_data`、`zone`、`free_area`、`per_cpu_pages` 和 `zonelist`。
+folio 没有另外复制一份数据。使用 `page_folio()`、`folio_page()` 等接口，可以在整体与其中的页之间转换。它也不意味着一定使用硬件大页映射：一个大 folio 可以通过多个普通页表项映射。定义及布局说明见 [mm_types.h](../../linux/include/linux/mm_types.h)。
 
-node 表达内存的节点归属，NUMA 策略决定优先或允许使用哪些节点。zone 则在节点内进一步表达分配约束：`ZONE_DMA`、`ZONE_DMA32` 处理特定寻址范围，`ZONE_NORMAL` 提供常规可寻址内存，`ZONE_HIGHMEM` 按配置处理不能永久直接映射的内存，`ZONE_MOVABLE` 主要容纳可迁移页。`ZONE_DEVICE` 属于设备内存管理场景，不能视为普通伙伴系统的又一个通用空闲池。并非每个节点都具有所有类型的 zone。
+第一遍阅读时，先记住：**page 让我们定位基础页，folio 让内核按一页或多页的整体处理内容。**
 
-`node_zones` 与 `node_zonelists` 的区别尤其重要：前者是节点拥有的 zone 实体，后者是分配时遍历的引用序列，可以引用其他节点的 zone。是否允许跨节点回退，还取决于 GFP、nodemask、cpuset 和 NUMA 策略。[get_page_from_freelist()](../../linux/mm/page_alloc.c) 展示了实际筛选过程。
+### 1.3 `mm`、VMA 与页表：三者分别回答什么
 
-zone 的三个容量字段也不是同一个计数：
+进程的地址空间由 `struct mm_struct` 描述。`task_struct.mm` 指向它，多个任务也可以共享同一个 mm。共享与复制的选择可在 [fork.c](../../linux/kernel/fork.c) 的 `copy_mm()` 中看到。
 
-- `spanned_pages`：覆盖的 PFN 范围，包含空洞。
-- `present_pages`：实际存在的物理页。
-- `managed_pages`：交由页分配器管理的页，包含已分配页和空闲页，不等于当前空闲量。
+一个地址空间里有代码、堆、栈、文件映射等不同用途的范围。内核用 **VMA（Virtual Memory Area，虚拟内存区域）** 描述一段具有共同属性的地址范围，用页表保存具体映射。下文先以普通基础页映射为例，把末级页表项记作 PTE（Page Table Entry）。
 
-伙伴系统以 `order` 表示块大小：一个块包含 `2^order` 个物理连续的基础页。`free_area[order].free_list[migratetype]` 同时按阶数和迁移类型组织空闲块；`nr_free` 统计该阶的空闲块数。分配时，`__rmqueue_smallest()` 从目标阶向上寻找并拆分较大块；释放时，`__free_one_page()` 检查伙伴块并在满足条件时合并。实现见 [page_alloc.c](../../linux/mm/page_alloc.c)。
-
-迁移类型用于降低不同用途混放造成的碎片，包括 `MIGRATE_UNMOVABLE`、`MIGRATE_MOVABLE`、`MIGRATE_RECLAIMABLE` 等。它与 zone 是不同维度，`MIGRATE_MOVABLE` 也不等于 `ZONE_MOVABLE`。PCP 缓存则为 CPU 提供页分配和释放的快捷路径，减少争用 `zone->lock`；本版本 `pcp_allowed_order()` 支持多个低阶及配置相关的 THP 阶数，不能概括为“PCP 只保存 order-0 页”。
-
-### 2.4 `struct page`、`struct folio` 与专用描述符
-
-[mm_types.h](../../linux/include/linux/mm_types.h) 中 `struct page` 的多个字段通过 union 复用。解读一个字段前，必须先确认该页当前属于哪种用途。
-
-| 对象或字段 | 含义与使用边界 |
-| --- | --- |
-| `page.flags` | 页状态以及编码的管理信息；本版本字段类型为 `memdesc_flags_t` |
-| `page.lru` / `buddy_list` / `pcp_list` | 同一存储位置在不同状态下用于回收、伙伴系统或 PCP 链接，并非同时位于三类链表 |
-| `page.mapping` / `folio.mapping` | 普通文件 folio 指向 `address_space`；匿名 folio 带有类型编码，需要专用辅助函数解释 |
-| `_refcount` | 对象存活所需的引用计数；应通过引用操作接口访问 |
-| `_mapcount` 及 folio 扩展计数 | 跟踪用户页表映射，与引用计数含义不同；大 folio 还有整页映射等计数 |
-| `folio.index` | 在所属映射中的基础页索引，不是字节偏移 |
-| `page.private` | 按用途复用；伙伴系统空闲块用它保存 order 等信息 |
-| `struct slab` | slab 用途的元数据视图，包括 cache、对象空闲链表和对象数量 |
-| `struct ptdesc` | 页表页的元数据视图，包括页表锁等字段；不是 PTE 条目本身 |
-
-folio 表示作为整体管理的一组物理连续、大小为二次幂且按自身大小对齐的内存，至少包含一个基础页。order-0 folio 只有一页，大 folio 包含多页；基础页仍有自己的 `struct page`，通过 `page_folio()`、`folio_page()` 等接口在两者间转换。
-
-folio 不是独立于物理页的另一份数据缓冲区，也不等同于 PMD 大页映射。一个大 folio 可以通过多个 PTE 映射；本版本 `do_anonymous_page()` 的 `folio_nr_pages()` 与 `set_ptes()` 就展示了这种情况。定义和布局校验见 [mm_types.h](../../linux/include/linux/mm_types.h) 的 `FOLIO_MATCH`、`TABLE_MATCH`，slab 的布局校验见 [mm/slab.h](../../linux/mm/slab.h) 的 `SLAB_MATCH`。
-
-## 3. 进程地址空间：VMA 描述规则，页表记录当前映射
-
-### 3.1 `task_struct`、`mm_struct` 和 VMA
-
-`task_struct.mm` 指向任务使用的用户地址空间。多个任务可以共享同一个 `mm_struct`：`copy_mm()` 在 `CLONE_VM` 分支增加引用并共享旧 mm，否则通过 `dup_mm()` 创建新 mm。内核线程通常没有自己的用户 mm，`active_mm` 则服务于活动地址空间上下文。字段与分支见 [sched.h](../../linux/include/linux/sched.h) 和 [kernel/fork.c](../../linux/kernel/fork.c)。
-
-| 数据结构 | 关键字段 | 职责 |
+| 对象 | 先回答的问题 | 第一遍只看这些字段 |
 | --- | --- | --- |
-| `mm_struct` | `mm_mt`、`pgd`、`mmap_lock`、`mm_users`、`mm_count`、`total_vm`、`rss_stat` | 表示整个用户地址空间，维护 VMA 索引、页表根、同步与记账 |
-| `vm_area_struct` | `vm_start`、`vm_end`、`vm_flags`、`vm_page_prot`、`vm_mm` | 表示 `[vm_start, vm_end)` 内具有共同映射属性的一段地址 |
-| `vm_area_struct` 的后备关系 | `vm_file`、`vm_pgoff`、`anon_vma`、`anon_vma_chain` | 指定文件来源和偏移，或连接匿名页反向映射 |
-| `vm_operations_struct` | `fault`、`map_pages`、`page_mkwrite` 等回调 | 将通用 VM 流程连接到文件系统或其他映射提供者 |
-| `vm_fault` | `vma`、`address`、`pgoff`、`flags`、页表指针等 | 保存一次缺页处理的临时上下文 |
+| `mm_struct` | 整个用户地址空间由谁管理？ | `mm_mt` 索引 VMA，`pgd` 指向页表根 |
+| `vm_area_struct` | 这段地址允许怎样访问，内容从哪里来？ | `vm_start`、`vm_end`、`vm_flags`、`vm_file` |
+| 页表项 | 这个地址当前有没有映射，映射到哪里，硬件允许怎样访问？ | 普通 PTE 中的物理页帧和访问属性 |
 
-结构定义见 [mm_types.h](../../linux/include/linux/mm_types.h) 和 [mm.h](../../linux/include/linux/mm.h)。
-
-`total_vm` 统计虚拟映射覆盖的基础页数，`rss_stat` 跟踪驻留内存的分类计数，`pgtables_bytes` 记录页表本身的开销。这些数值回答不同问题：虚拟映射扩大不意味着立即消耗同等数量的数据页，页表元数据也有独立的物理内存成本。
-
-VMA 说明“这段地址允许怎样使用、内容从何而来”；页表说明“此刻这个虚拟地址映射到哪里、具有什么硬件访问权限”。二者不能相互替代：一个有效 VMA 可以尚未分配数据页，一个可写的私有 VMA 也可以暂时使用只读 PTE 来实现写时复制。
+VMA 覆盖的范围是 `[vm_start, vm_end)`，包含起点，不包含终点。本版本使用 Maple Tree（`mm_mt`）索引 VMA。先把它理解成“按虚拟地址寻找 VMA 的索引”即可，暂时不必研究树的内部算法。结构定义见 [mm_types.h](../../linux/include/linux/mm_types.h)，页表处理见 [memory.c](../../linux/mm/memory.c)。
 
 ```mermaid
 flowchart TD
-    task["task_struct：一个或多个任务"] -->|mm| mm["mm_struct"]
-    mm -->|mm_mt：按虚拟地址索引| vma["vm_area_struct：VMA"]
-    vma -->|vm_mm| mm
-    mm -->|pgd| pt["页表：PGD → P4D → PUD → PMD → PTE"]
-    pt -->|present 的普通内存映射| page["物理页 / folio"]
-    vma -->|vm_ops| ops["缺页等回调"]
-    vma -->|vm_file| file["struct file"]
-    file -->|f_mapping| mapping["address_space"]
-    mapping -->|i_pages：XArray| cached["文件页缓存 folio"]
-    mapping -->|i_mmap：按文件页偏移索引| vma
-    vma -->|anon_vma_chain| chain["anon_vma_chain"]
-    chain -->|vma| vma
-    vma -->|anon_vma| anon["anon_vma"]
-    chain -->|anon_vma| anon
-    anon -->|rb_root：区间树| chain
+    task["任务 task_struct"] -->|mm| mm["用户地址空间 mm_struct"]
+    mm -->|mm_mt| vma["VMA：范围、用途、权限"]
+    mm -->|pgd| pt["页表：当前地址映射"]
+    pt -->|普通有效映射| data["物理页中的数据"]
 ```
 
-图中的页表是 `mm_struct` 的另一条索引，不是挂在每个 VMA 下面的独立页表。单个 mm 的 VMA 按虚拟地址组织，而一个文件的 `i_mmap` 可以连接来自多个 mm 的 VMA。图中物理页与文件页缓存 folio 是不同观察视角，同一实际 folio 可以同时被页表映射、被页缓存索引。
+注意图中从 mm 分出的两条路径：**VMA 与页表分别组织在 mm 下，并不是每个 VMA 自带一套独立页表。** 一个有效 VMA 可以还没有对应的数据页；一个允许写入的私有 VMA，也可以暂时使用只读页表项，以便实现后面要讲的写时复制。
 
-### 3.2 页表、映射粒度与 TLB
+## 2. 跟踪一段内存：申请、访问、共享、释放
 
-`mm->pgd` 是页表遍历入口。通用 `__handle_mm_fault()` 按 PGD、P4D、PUD、PMD、PTE 层次处理地址；架构可以折叠未使用的层次，因此这五个名称不代表所有机器都进行五级硬件遍历。P4D 折叠示例见 [pgtable-nop4d.h](../../linux/include/asm-generic/pgtable-nop4d.h)。
+现在用一个贯穿全章的例子：程序通过 `mmap()` 申请一段**私有、匿名、可读写**的内存，随后写入数据，调用 `fork()`，最后解除映射。
 
-普通 present PTE 编码物理页帧和访问属性；非 present 条目还可能编码交换位置、迁移状态等信息。大页路径可在 PMD 或受支持的 PUD 层处理映射，未必走到 PTE。具体分支见 [memory.c](../../linux/mm/memory.c) 的 `__handle_mm_fault()`、`handle_pte_fault()` 和 `do_swap_page()`。
+“匿名”表示这段映射没有普通文件作为内容来源；“私有”表示后续写入不要求对其他进程共享可见。这里先讨论普通的按需映射，不展开预填充、锁页和大页等分支。
 
-CPU 使用 TLB 缓存地址翻译。修改或删除页表时，不仅要保护内存中的页表条目，还要让旧翻译失效，并协调物理页和页表页的释放。`exit_mmap()` 中的 `tlb_gather_mmu_fullmm()`、`unmap_vmas()`、`free_pgtables()` 与 `tlb_finish_mmu()` 展示了这种依赖，见 [mmap.c](../../linux/mm/mmap.c)；相关批量处理实现位于 [mmu_gather.c](../../linux/mm/mmu_gather.c)。
+### 2.1 申请地址：先登记一段可以使用的范围
 
-## 4. 内容归属与反向映射
-
-### 4.1 文件页缓存：`address_space`
-
-`address_space` 表示可缓存、可映射对象的内容空间，不是一个进程的虚拟地址空间。对于普通文件，`file->f_mapping` 连接到它，`host` 关联宿主 inode。[fs.h](../../linux/include/linux/fs.h) 定义了两个作用不同的核心索引：
-
-- `i_pages` 是 XArray，按文件页索引寻找缓存 folio，也可能包含影子等特殊条目。
-- `i_mmap` 是区间树，按文件页偏移寻找映射该文件范围的 VMA，用于反向映射等操作。
-
-对文件 VMA 中的地址 `addr`，相应的基础页索引可理解为：
+内核处理 `mmap()` 时，会检查参数、选择地址，再建立或合并 VMA。相关主干是：
 
 ```text
-文件页索引 = vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT)
+do_mmap()              检查参数并确定地址范围
+  → mmap_region()      建立或合并 VMA，设置映射属性
 ```
 
-`filemap_fault()` 使用 `vmf->pgoff` 查找页缓存，缺失时触发预读或创建 folio，再保证内容就绪。普通 buffered I/O 与文件 mmap 可以复用同一页缓存；具体文件系统通过 `address_space.a_ops` 和 VMA 回调接入。`filemap_add_folio()` 则串起 memcg 记账、页缓存插入和加入 LRU 的操作。源码见 [filemap.c](../../linux/mm/filemap.c)。
+本版本的 `do_mmap()` 位于 [mmap.c](../../linux/mm/mmap.c)，`mmap_region()` 位于 [vma.c](../../linux/mm/vma.c)。
 
-因此，一个文件 folio 可以存在于页缓存中而没有任何用户 PTE 映射；解除某个进程的文件映射，也不必立即把该 folio 从页缓存中删除。DAX、设备映射等特殊路径不适合直接套用上述普通页缓存模型。
+此时，内核已经知道“这段地址可以怎样使用”，但通常还没有为整个范围准备好数据页。因此，**申请了多大的虚拟地址范围，与当前实际驻留多少数据，是两个问题。** 这也解释了 `mm_struct` 为什么分别记录虚拟映射大小 `total_vm`、驻留内存统计 `rss_stat` 和页表开销 `pgtables_bytes`，见 [mm_types.h](../../linux/include/linux/mm_types.h)。
 
-### 4.2 匿名内存：`anon_vma` 与 `anon_vma_chain`
+### 2.2 首次写入：缺页处理把地址与数据连接起来
 
-匿名页没有普通文件页偏移作为持久内容来源，但回收和迁移同样需要找到映射它的地址空间。Linux 通过 `anon_vma` 及其区间树建立这条反向路径。
+当程序第一次写入这段范围中的某个地址时，如果页表还没有相应映射，CPU 会触发缺页异常。**缺页异常不一定是程序错误。** 内核先根据 VMA 判断访问是否合法；合法的按需访问，可以由缺页处理补齐映射后继续执行。
 
-`anon_vma_chain` 同时保存 `vma` 和 `anon_vma` 指针：`same_vma` 将一个 VMA 关联的多个 chain 串联起来，`rb` 将 chain 放入相应 `anon_vma.rb_root`。这种多对多关系支持 fork 后的页共享、VMA 拆分及后续写时复制；不能把它简化为“一个 VMA 只对应一个匿名页集合”。定义与设计注释见 [rmap.h](../../linux/include/linux/rmap.h)。
-
-`folio.mapping` 在匿名场景下包含 `FOLIO_MAPPING_ANON` 等标记，不能始终当作 `struct address_space *` 直接使用。标记见 [page-flags.h](../../linux/include/linux/page-flags.h)，实际解释和遍历见 [rmap.c](../../linux/mm/rmap.c)。KSM 合并页还有独立的反向映射分支。
-
-### 4.3 正向映射与反向映射如何闭合
-
-| 查询方向 | 起点 | 主要路径 |
-| --- | --- | --- |
-| 查询地址的合法范围和属性 | `mm + 虚拟地址` | `mm_mt → VMA` |
-| 查询当前地址翻译 | `mm + 虚拟地址` | `pgd → 各级页表 → 物理页或非 present 状态` |
-| 查询文件缓存内容 | `address_space + 文件页索引` | `i_pages → folio` |
-| 寻找文件 folio 的用户映射 | 文件 folio | `mapping → i_mmap → 候选 VMA → 检查页表` |
-| 寻找匿名 folio 的用户映射 | 匿名 folio | `anon_vma → chain 区间树 → 候选 VMA → 检查页表` |
-
-反向映射索引先给出可能相关的 VMA，再检查实际页表；VMA 覆盖某段范围并不表示其中每一页已经映射。`rmap_walk()` 负责按 folio 类型选择遍历方式，`try_to_unmap()` 利用这些关系撤销映射。源码见 [rmap.c](../../linux/mm/rmap.c)。这是回收和迁移能够从物理内存对象反查用户地址空间的关键。
-
-`MAP_PRIVATE` 文件映射进一步连接了两种内容来源：读取时可使用文件页缓存，写时复制后出现匿名页，因此同一个 VMA 可以同时关联 `address_space.i_mmap` 和 `anon_vma`。这一点在 [vm_area_struct 的注释](../../linux/include/linux/mm_types.h) 中有直接说明。
-
-## 5. 内核分配接口：页、对象与虚拟连续区域
-
-### 5.1 三种主要分配需求
-
-| 接口 | 主要保证 | 核心实现与释放方式 |
-| --- | --- | --- |
-| `alloc_pages(gfp, order)` | 返回 `2^order` 个物理连续基础页，以 `struct page *` 表示；不是任意内核虚拟地址接口 | [page_alloc.c](../../linux/mm/page_alloc.c)；按接口约定使用 `__free_pages()` 等 |
-| `kmem_cache_alloc()` | 从指定 cache 分配固定布局对象 | [slub.c](../../linux/mm/slub.c)；`kmem_cache_free()` |
-| `kmalloc()` / `kzalloc()` | 返回可直接访问的连续内核对象内存；对象范围物理连续，`kzalloc()` 额外清零 | 小对象使用 kmalloc caches，大对象走页分配；见 [slub.c](../../linux/mm/slub.c)，使用 `kfree()` |
-| `vmalloc()` | 返回虚拟连续区域，不要求整个后备物理范围连续 | [vmalloc.c](../../linux/mm/vmalloc.c)；`vfree()` |
-| `kvmalloc()` | 先尝试 kmalloc，满足条件时回退到 vmalloc，调用者不能假定物理连续 | 本版本实现位于 [slub.c](../../linux/mm/slub.c) 的 `__kvmalloc_node_noprof()`；`kvfree()` |
-
-这些接口最终会消耗物理内存，但分配粒度和连续性要求不同。`vmalloc()` 还需要虚拟地址空间和页表资源，所以不能把它理解为“不会失败的大块分配”。
-
-### 5.2 SLUB：cache、slab 和对象
-
-`kmem_cache` 描述对象的大小、对齐、分配属性和管理状态，一个 cache 管理多个 slab。`struct slab` 描述作为对象容器的一组页，通过 `slab_cache` 指回 cache，使用 `freelist`、`inuse`、`objects` 等字段维护对象状态。
+以 x86 的普通匿名缺页为例，沿下列主干阅读：
 
 ```text
-kmem_cache
-├── size / object_size / align            对象布局
-├── cpu_slab → kmem_cache_cpu             每 CPU 的 slab、freelist、tid
-├── node[nid] → kmem_cache_node           节点 partial slabs 等状态
-├── cpu_sheaves（启用时）                 每 CPU 的 main / spare 等 sheaf
-└── slab → 多个对象
-    └── slab_cache → 原 kmem_cache
+do_user_addr_fault()                 查找 VMA，检查访问权限
+  → handle_mm_fault()                进入通用缺页处理
+      → __handle_mm_fault()          检查或建立各级页表
+          → handle_pte_fault()       处理普通页表项
+              → do_pte_missing()     当前尚无 PTE 映射
+                  → do_anonymous_page()
 ```
 
-这里 `object_size` 是对象自身大小，`size` 可以包含分配器元数据和对齐开销。定义见 [mm/slab.h](../../linux/mm/slab.h)，每 CPU 和节点状态见 [slub.c](../../linux/mm/slub.c)。需要新的 slab 时，`allocate_slab()` 经 `alloc_slab_page()` 获取物理页，因而 SLUB 建立在页分配器之上。
+架构入口见 [x86/mm/fault.c](../../linux/arch/x86/mm/fault.c)，通用处理见 [memory.c](../../linux/mm/memory.c)。上面只列出本例分支，文件映射和大页会有其他路径。
 
-本版本还定义了 `slab_sheaf`、`slub_percpu_sheaves` 和 `node_barn`：sheaf 保存一批对象指针，每 CPU 缓存与节点上的 barn 交换这些批次。`slab_alloc_node()` 在 cache 配有 `cpu_sheaves` 时先尝试 `alloc_from_pcs()`；启用还受 `sheaf_capacity`、`CONFIG_SLUB_TINY` 和调试标志约束。它是可选的对象缓存层，不能用它取代对 slab 与伙伴系统关系的理解。
+在本例的写入分支中，内核需要准备匿名 folio、完成相应记账、建立页表映射，并维护以后回收所需的关系。理解时可以先分成三个问题：
 
-### 5.3 vmalloc 的另一套地址管理结构
+1. **内容在哪里？** 分配并准备物理内存。
+2. **程序怎样访问？** 将虚拟地址映射到这些物理页。
+3. **以后怎样管理？** 记录资源归属、映射关系和回收状态。
 
-`vmalloc` 使用 `vmap_area` 管理内核虚拟地址区间，使用 `vm_struct` 保存分配区域、后备 `pages[]`、页数和属性。这两个结构定义于 [vmalloc.h](../../linux/include/linux/vmalloc.h)，与用户地址空间的 `vm_area_struct` 不是同一种对象。
+这些工作在 `do_anonymous_page()` 及其辅助函数中相互配合，并非只调用一次页分配器就结束。若首次访问是读取，允许使用共享零页时可以先映射零页，无需立刻新分配匿名数据 folio；读和写应分开分析。
 
-`__vmalloc_node_range_noprof()` 申请虚拟区域，`__vmalloc_area_node()` 分配后备页，随后用 `vmap_pages_range()` 建立内核页表映射。实现也支持配置相关的大粒度映射，但并不承诺整个分配物理连续。流程见 [vmalloc.c](../../linux/mm/vmalloc.c)。
+映射建立后，返回用户态重试触发异常的指令，写入才得以完成。只要映射仍然有效且权限允许，后续访问通常无需再次进入缺页处理。
 
-### 5.4 GFP 是分配策略的一部分
+### 2.3 `fork()`：先共享，写入时再决定是否复制
 
-GFP 不只是选择一个内存池，它还约束调用过程中允许采取的动作。[gfp_types.h](../../linux/include/linux/gfp_types.h) 定义了以下典型组合：
+普通 `fork()` 为子进程建立新的 mm 和 VMA 等管理信息。对于本例中已经写入的匿名页，常见做法是父子进程暂时共享物理内容，并对双方的相关页表项设置写保护。这就是 **COW（Copy-on-Write，写时复制）** 的准备阶段。
 
-| 标志 | 对执行路径的主要影响 |
-| --- | --- |
-| `GFP_KERNEL` | 允许直接回收、I/O 和文件系统相关回收，分配可能阻塞 |
-| `GFP_NOWAIT` | 不进行直接回收；可请求后台回收，可能很快失败 |
-| `GFP_ATOMIC` | 不进行直接回收，带有高优先级储备访问属性；不保证成功，也不是所有严格上下文的通用许可 |
-| `GFP_NOFS` / `GFP_NOIO` | 限制回收进入文件系统或发起 I/O，避免分配与资源释放之间的递归依赖 |
-| `__GFP_MOVABLE` | 表达可迁移属性，参与迁移类型和 zone 选择 |
-| `__GFP_ACCOUNT` | 要求相应内核分配纳入 memcg 记账 |
+```text
+fork 后，尚未再次写入：      子进程写入并需要复制后：
 
-因此，“分配一次内存”可能隐含回收、文件系统操作、迁移和等待。追踪分配调用链时，应同时查看 GFP、order、节点约束与调用上下文。
-
-## 6. 回收与资源约束：`lruvec`、memcg、swap
-
-### 6.1 回收组织单位是 node 与 memcg 的组合
-
-`lruvec` 管理一组 folio 的回收状态。传统 LRU 区分匿名/文件、active/inactive，并保留 unevictable 类别；开启多代 LRU 时，`lruvec.lrugen` 以代际记录可回收 folio，辅助区分冷热。结构见 [mmzone.h](../../linux/include/linux/mmzone.h) 的 `lruvec`、`lru_gen_folio` 和 `enum lru_list`。
-
-```mermaid
-flowchart TD
-    cg["mem_cgroup"] -->|nodeinfo：按 nid| pn["mem_cgroup_per_node"]
-    pn -->|lruvec| lru["lruvec：该组在该节点的回收状态"]
-    node["pg_data_t"] -->|memcg 禁用时使用 __lruvec| lru
-    folio["可纳入 LRU 的 folio"] -->|物理归属| node
-    folio -->|memcg 记账归属| cg
-    folio -->|由 node 与 memcg 共同确定| lru
-    lru -->|传统 LRU 或多代 LRU| scan["回收选择与扫描"]
+父进程地址 → 数据页 A       父进程地址 → 数据页 A
+子进程地址 → 数据页 A       子进程地址 → 数据页 B
+            暂时共享                     独立副本
 ```
 
-这一关系由 [mem_cgroup_lruvec()](../../linux/include/linux/memcontrol.h) 直接给出：memcg 禁用时返回 `pgdat->__lruvec`，启用时返回 `memcg->nodeinfo[nid]->lruvec`。因此不能把当前回收架构概括成“每个 zone 各有一套完整 LRU”。zone 仍影响水位、回收范围和统计，但不是这条组织关系的唯一维度。
+复制地址空间的阅读主干为 `copy_mm()` → `dup_mm()` → `dup_mmap()` → `copy_page_range()`，分别见 [fork.c](../../linux/kernel/fork.c)、[mmap.c](../../linux/mm/mmap.c) 和 [memory.c](../../linux/mm/memory.c)。这里的“共享”是常见行为，并不表示所有情况下都绝不提前复制数据页。
 
-`CONFIG_LRU_GEN` 决定是否构建多代 LRU，`CONFIG_LRU_GEN_ENABLED` 影响默认启用状态，执行时还通过 `lru_gen_enabled()` 选择分支。配置与实际分派见 [mm/Kconfig](../../linux/mm/Kconfig) 和 [vmscan.c](../../linux/mm/vmscan.c) 的 `shrink_node()`、`shrink_lruvec()`。内核对象和普通空闲页并不会全部加入这套 folio LRU。
+后续写入只读 PTE 时，`do_wp_page()` 会判断是否需要复制：如果已经满足匿名页独占复用的条件，可以恢复可写权限；否则通过 `wp_page_copy()` 等路径创建副本。因此，“写缺页”也不等于“一定复制一页”。
 
-### 6.2 memcg：记账、限额与定向回收
+### 2.4 `munmap()`：先解除这个地址空间的使用关系
 
-`mem_cgroup` 通过 `css` 接入 cgroup 层次，通过 `page_counter memory`、swap 等字段记录资源用量，通过 `nodeinfo[]` 连接各节点的回收状态。定义见 [memcontrol.h](../../linux/include/linux/memcontrol.h)。
+程序不再需要这段范围时，可以调用 `munmap()`。用户态调用在本版本经 `__vm_munmap()` 进入 `do_vmi_munmap()`，处理必要的 VMA 拆分、移除及解除映射，见 [mmap.c](../../linux/mm/mmap.c) 和 [vma.c](../../linux/mm/vma.c)。整个用户地址空间被释放时，则进入 `exit_mmap()`。
 
-申请物理页成功后，memcg charge 仍可能失败。例如，`filemap_add_folio()` 在插入页缓存之前进行记账，匿名 folio 分配也进行记账检查；`try_charge_memcg()` 在超限时进入回收、重试及可能的组内 OOM 处理。源码见 [filemap.c](../../linux/mm/filemap.c)、[memory.c](../../linux/mm/memory.c) 和 [memcontrol.c](../../linux/mm/memcontrol.c)。
+解除映射还需要处理 **TLB（CPU 缓存的地址翻译）**：页表已经改变后，CPU 不能继续使用旧翻译访问已经撤销的映射。批量解除映射、失效处理与释放的配合可从 `exit_mmap()` 和 [mmu_gather.c](../../linux/mm/mmu_gather.c) 阅读。
 
-因此，memcg 管理的是资源归属与限制，不是为每组建立独立的物理内存池。某个组超限时，整机仍可能有空闲内存；组内 OOM 也不等价于全局物理内存耗尽。
+**解除一个映射，不代表对应物理页立即空闲。** 例如父进程解除映射后，子进程仍可能使用共享页。只有其他映射、引用等生命周期条件也满足，页才可以归还底层分配器。
 
-### 6.3 不同内容采用不同的回收方式
+到这里，可以把本例归纳为：登记地址范围 → 访问时落实数据和映射 → 共享时按需复制 → 解除映射并检查是否可以释放。下面再看这些步骤背后的具体机制。
 
-| 内存内容 | 典型处理方式 |
+## 3. 物理页从哪里来
+
+### 3.1 node 与 zone：先确定从哪里分配
+
+内核不会把所有物理页当成一个没有区别的大池子。不同内存位置可能有不同的访问成本，有些设备还只能访问特定物理地址范围，因此分配之前需要筛选来源。
+
+| 概念 | 作用 | 对应结构 |
+| --- | --- | --- |
+| node（节点） | 表达内存的节点归属，是 NUMA 放置策略的基础 | `pg_data_t`，即 `struct pglist_data` |
+| zone（内存区域） | 在节点内区分寻址范围、可迁移性等分配约束 | `struct zone` |
+| zonelist | 按顺序列出分配时可以考虑的 zone | `struct zonelist` |
+
+NUMA 表示访问不同节点的内存，代价可能不同。先理解“内核需要选择节点”，后面再研究具体策略。zone 中常见的 `ZONE_NORMAL` 用于常规可寻址内存，`ZONE_DMA`、`ZONE_DMA32` 处理特定寻址范围，`ZONE_MOVABLE` 主要容纳可迁移页；具体有哪些 zone 取决于架构和配置。定义见 [mmzone.h](../../linux/include/linux/mmzone.h)。
+
+```text
+node：pg_data_t
+├── node_zones[]               本节点实际拥有的 zone
+│   └── zone
+│       ├── free_area[]        伙伴系统的空闲块
+│       ├── per_cpu_pageset    每 CPU 页缓存
+│       └── _watermark[]       分配和回收使用的水位
+└── node_zonelists[]           分配候选列表，可以引用其他节点的 zone
+```
+
+水位可以先理解为判断内存余量是否充足的阈值。`get_page_from_freelist()` 会综合候选 zone、水位、允许节点等条件选择内存，见 [page_alloc.c](../../linux/mm/page_alloc.c)。因此，机器上有空闲页，并不代表这次申请允许使用那些页。
+
+### 3.2 伙伴系统：按二次幂管理连续空闲块
+
+伙伴系统按 `order`（阶）组织空闲块：
+
+| order | 一个块包含的基础页数 |
 | --- | --- |
-| 可重新读取的干净文件 folio | 在处理映射并满足引用等条件后，从页缓存移除并释放 |
-| 脏文件 folio | 通常需要写回或等待写回完成，不能直接丢弃仍需保留的数据 |
-| 需要保留内容的匿名 folio | 通常通过 swap 保存内容；没有可用交换空间时，这条回收路径受限 |
-| 可丢弃的匿名内容 | 如符合条件的 lazyfree 页，可走直接丢弃路径，不能一概认为所有匿名页都必须换出 |
-| 可回收内核缓存 | 调用对应 shrinker 释放对象，之后才可能进一步释放 slab 页 |
-| mlock、额外引用或 pin 限制的内存 | 回收可能跳过或失败，需要检查具体限制与生命周期 |
+| 0 | 1 |
+| 1 | 2 |
+| 2 | 4 |
+| 3 | 8 |
 
-这些判断主要位于 [vmscan.c](../../linux/mm/vmscan.c) 的 `shrink_folio_list()`。文件写回还涉及 [page-writeback.c](../../linux/mm/page-writeback.c) 和文件系统的 `a_ops`；内核缓存回收通过 [shrinker.h](../../linux/include/linux/shrinker.h) 的 `count_objects`、`scan_objects` 接口接入 [shrinker.c](../../linux/mm/shrinker.c)。不能仅凭对象来自 SLUB 就判断它可以被自动回收。
+这些页在物理地址上连续。假设申请一个 order-1 块，而合适的空闲块只有 order-3，分配器可以逐步拆分：
 
-交换涉及三个相关对象：
+```text
+8 页块 → 4 页块 + 4 页块
+          ↓
+         2 页块 + 2 页块
+          ↓
+         取出需要的 2 页，其余块继续保持空闲
+```
 
-- `swp_entry_t` 编码交换类型和偏移；`swp_type()`、`swp_offset()` 负责拆解。
-- `swap_info_struct` 描述交换区域，维护使用计数、cluster、交换文件或块设备等信息。
-- swap cache 保存与交换条目关联的驻留 folio，缺页时可能直接命中，而不必每次读取设备。
+释放时则反过来：如果对应的伙伴块也空闲，并且满足合并条件，就合并为更高阶的块。不是任意两个相邻空闲块都能合并，它们还必须符合伙伴关系。分配与合并分别见 [page_alloc.c](../../linux/mm/page_alloc.c) 的 `__rmqueue_smallest()`、`__free_one_page()`。
 
-定义与路径见 [swapops.h](../../linux/include/linux/swapops.h)、[swap.h](../../linux/include/linux/swap.h)、[swap_state.c](../../linux/mm/swap_state.c) 和 [page_io.c](../../linux/mm/page_io.c)。非 present PTE 不一定表示真正的磁盘交换：`do_swap_page()` 还区分迁移条目、设备内存条目等特殊状态。
+空闲块还按 `migratetype`（迁移类型）分类，尽量减少可迁移页与不可迁移页混放带来的碎片。它与 zone 是不同维度；`MIGRATE_MOVABLE` 和 `ZONE_MOVABLE` 不能混为一谈。
 
-## 7. 用主要执行路径连接各层
+### 3.3 PCP：让常见页分配少争用共享锁
 
-以下路径是理解调用关系的主干，省略统计、错误恢复和配置分支；它们不是每次操作都会完整执行的固定步骤。
+如果每次申请或释放页都修改 zone 的公共空闲链表，多 CPU 会频繁争用锁。PCP（Per-CPU Pages，每 CPU 页缓存）缓存一部分空闲页，让常见操作先在当前 CPU 的缓存中完成。
 
-### 7.1 页分配：快速路径与慢速路径
+`rmqueue()` 对支持的 order 先尝试 `rmqueue_pcplist()`，必要时使用 `rmqueue_buddy()`。PCP 与伙伴系统共同提供物理页，并不是额外多出来的一份内存。本版本 PCP 支持多个低阶及配置相关的大页阶数，具体见 [page_alloc.c](../../linux/mm/page_alloc.c) 的 `pcp_allowed_order()`。
 
-本版本普通页分配的底层主干位于 [page_alloc.c](../../linux/mm/page_alloc.c)：
+普通页分配的底层主干可以压缩为：
 
 ```text
 __alloc_pages_noprof()
   → __alloc_frozen_pages_noprof()
-      → prepare_alloc_pages()                 准备 zone、节点和迁移类型约束
-      → get_page_from_freelist()              遍历候选 zone，检查水位
-          → rmqueue()
-              → rmqueue_pcplist()             支持该 order 时先尝试 PCP
-              → rmqueue_buddy()               必要时从伙伴系统分配
-      → __alloc_pages_slowpath()              首次尝试失败后进入
-  → 成功后 set_page_refcounted()
+      → prepare_alloc_pages()          整理分配约束
+      → get_page_from_freelist()       尝试从合适的 zone 取得页
+          → rmqueue()                  使用 PCP 或伙伴系统
+      → __alloc_pages_slowpath()       前面的尝试失败后，按条件处理
 ```
 
-慢速路径根据 GFP、order 和进展情况选择唤醒 kswapd、调整条件重试、直接规整、直接回收及 OOM 等动作。某些高阶申请会先尝试规整；不允许直接回收或要求快速失败的申请可能直接返回失败。因此不能把它画成无条件执行的“回收 → 规整 → 杀进程”直线。
+这些函数均位于 [page_alloc.c](../../linux/mm/page_alloc.c)。先读成功返回的路径，再研究慢速路径，容易看清主干。
 
-空闲总量足够也可能失败：申请可能要求某个节点、特定 zone 或较大的连续物理块，也可能受到水位储备和 memcg 限额约束。物理分配约束可沿 `get_page_from_freelist()` 与 `__alloc_pages_slowpath()` 追踪；带有 `__GFP_ACCOUNT` 的内核页分配，还需要通过 `__alloc_frozen_pages_noprof()` 中的记账检查。
+### 3.4 启动时：谁先建立这些管理结构
 
-### 7.2 mmap 与首次访问：先建立范围，再按需落实内容
+前面的分配器本身也需要内存。它们尚未准备好时，内核使用 `memblock` 记录物理地址范围和保留范围。`memory` 与 `reserved` 可以重叠，早期可用范围要结合两者判断，结构见 [memblock.h](../../linux/include/linux/memblock.h)。
 
-`do_mmap()` 校验并选择地址，再调用 `mmap_region()` 建立或合并 VMA，关联文件及回调。前者位于 [mmap.c](../../linux/mm/mmap.c)，后者在本版本位于 [vma.c](../../linux/mm/vma.c)。普通按需映射不要求在 mmap 返回时就分配全部数据页；预填充、锁页和特殊映射等分支另行处理。
+初始化逐步建立 node、zone 和页描述符，随后把符合条件的空闲页交给伙伴系统。在本版本中，[mm_init.c](../../linux/mm/mm_init.c) 的 `mm_core_init()` 先调用 `memblock_free_all()`，再执行 `mem_init()`、`kmem_cache_init()`，稍后执行 `vmalloc_init()`。早期释放过程见 [memblock.c](../../linux/mm/memblock.c)。
 
-以 x86 用户地址访问为例，主干为：
+先记住这个交接关系即可：**启动早期按范围管理，常规运行时由页分配器等机制接管。**
+
+## 4. 内核为什么还需要多种分配接口
+
+页分配器解决了物理页供应，但调用者的需求并不相同：一个小结构体用不了整页，一个大数组可能只要求虚拟地址连续。接口差异首先来自这些需求。
+
+### 4.1 按需求比较接口
+
+| 需求 | 接口 | 主要保证 | 对应释放接口 |
+| --- | --- | --- | --- |
+| 一块物理连续的页 | `alloc_pages(gfp, order)` | `2^order` 个连续基础页，返回 `struct page *` | `__free_pages()` 等 |
+| 固定类型、反复分配的对象 | `kmem_cache_alloc()` | 从指定对象缓存分配 | `kmem_cache_free()` |
+| 按字节数申请内核内存 | `kmalloc()` / `kzalloc()` | 对象范围虚拟、物理均连续；后者额外清零 | `kfree()` |
+| 虚拟连续的大块区域 | `vmalloc()` | 虚拟连续，不要求整个物理范围连续 | `vfree()` |
+| 可以接受 vmalloc 回退 | `kvmalloc()` | 先尝试 kmalloc，满足条件时回退；不能假定物理连续 | `kvfree()` |
+
+接口实现分别见 [page_alloc.c](../../linux/mm/page_alloc.c)、[slub.c](../../linux/mm/slub.c)、[vmalloc.c](../../linux/mm/vmalloc.c)。本版本 `kvmalloc` 的实现入口 `__kvmalloc_node_noprof()` 位于 `slub.c`。
+
+### 4.2 SLUB：把页组织成可复用的小对象
+
+假设内核反复需要一种小结构体，每次都分配整页会浪费空间。SLUB 从页分配器取得页，把空间组织成多个对象，再提供对象级分配和释放。
 
 ```text
-do_user_addr_fault()
-  → 查找并稳定 VMA，检查访问权限
-  → handle_mm_fault()
-      → HugeTLB VMA：hugetlb_fault()
-      → 普通 VMA：__handle_mm_fault()
-          → 检查/创建上层页表，处理大页分支
-          → handle_pte_fault()
+kmem_cache：规定这一类对象的大小、对齐和管理方式
+  ├── slab：一组作为对象容器的页 → 对象、对象、对象……
+  └── slab：另一组页             → 对象、对象、对象……
 ```
 
-架构入口见 [x86/mm/fault.c](../../linux/arch/x86/mm/fault.c)，通用分派见 [memory.c](../../linux/mm/memory.c)。进入 PTE 层后，典型情况如下：
+`struct slab` 通过 `slab_cache` 指回所属 cache。需要补充新 slab 时，`allocate_slab()` 经 `alloc_slab_page()` 获取物理页。小尺寸 `kmalloc()` 使用相应的 kmalloc caches，较大的请求可直接进入页分配路径。结构和实现见 [mm/slab.h](../../linux/mm/slab.h)、[slub.c](../../linux/mm/slub.c)。
 
-| 现场 | 处理入口 | 内容如何得到落实 |
+这也意味着，释放一个对象后，其所在 slab 仍可能留给后续对象分配使用，不一定立即把底层页交还伙伴系统。
+
+### 4.3 vmalloc：用页表连接分散的物理页
+
+`vmalloc()` 先管理一段连续的内核虚拟地址，再准备后备物理页，最后建立页表映射：
+
+```text
+内核虚拟地址： [第 0 页][第 1 页][第 2 页]    地址连续
+                  ↓        ↓        ↓
+物理页帧：       PFN 8    PFN 31   PFN 12     可以不连续
+```
+
+`vmap_area` 管理虚拟区间，`vm_struct` 保存区域信息和后备 `pages[]`；它们与用户 VMA 的 `vm_area_struct` 是不同结构。见 [vmalloc.h](../../linux/include/linux/vmalloc.h)。
+
+实现可沿 [vmalloc.c](../../linux/mm/vmalloc.c) 的 `__vmalloc_node_range_noprof()`、`__vmalloc_area_node()`、`vmap_pages_range()` 阅读。它仍需要物理页、虚拟地址空间及页表资源，因此也可能分配失败。
+
+### 4.4 GFP：分配过程中允许做什么
+
+`gfp` 参数不只影响从哪个 zone 取页，还决定内存不足时能否等待、发起 I/O 或进入回收。
+
+| 常见标志 | 第一遍需要理解的含义 |
+| --- | --- |
+| `GFP_KERNEL` | 允许直接回收、I/O 和文件系统相关操作，调用可能阻塞 |
+| `GFP_NOWAIT` | 不进行直接回收，可以请求后台回收，可能很快失败 |
+| `GFP_ATOMIC` | 不进行直接回收，并带有访问高优先级储备的属性，但不保证成功 |
+| `GFP_NOFS` / `GFP_NOIO` | 限制回收进入文件系统或发起 I/O，避免资源依赖造成问题 |
+| `__GFP_ACCOUNT` | 要求相应内核分配纳入内存控制组记账 |
+
+定义和使用约定见 [gfp_types.h](../../linux/include/linux/gfp_types.h)。这些标志仍有调用上下文限制，例如源码并不把 `GFP_ATOMIC` 视为所有严格上下文的通用许可。分析一次分配时，应一起查看**大小、连续性、允许节点、GFP 和调用上下文**。
+
+## 5. 文件映射与反向映射：怎样找到内容和使用者
+
+### 5.1 文件页缓存：相同文件内容可以复用
+
+前面的例子使用匿名内存。如果映射普通文件，内容已有文件来源，内核通常通过**页缓存**保存文件内容在内存中的副本。普通缓冲读写与文件 `mmap()` 可以复用这些缓存页。
+
+文件通过 `file->f_mapping` 关联 `struct address_space`。虽然名字带有 address，它描述的是文件等对象的内容空间，与进程的 `mm_struct` 不同。其 `i_pages` 使用 XArray 按文件页索引查找 folio，定义见 [fs.h](../../linux/include/linux/fs.h)。
+
+```text
+文件偏移 → 文件页索引 → address_space.i_pages → 缓存 folio
+用户虚拟地址 → 用户页表 ────────────────────────┘
+```
+
+普通文件缺页可通过 VMA 回调进入 `filemap_fault()`，查找缓存，必要时准备内容，再供缺页路径建立映射；缓存命中时不一定需要读取存储设备。入口见 [filemap.c](../../linux/mm/filemap.c)，通用分派见 [memory.c](../../linux/mm/memory.c) 的 `do_fault()`。
+
+一个 folio 可以保留在页缓存中，却没有任何用户页表映射。因此，解除一个文件映射，并不必然删除对应文件缓存。
+
+### 5.2 匿名与文件描述的是内容来源
+
+| 内容 | 典型来源 | 后续管理的关键区别 |
 | --- | --- | --- |
-| 普通私有匿名 VMA 尚无 PTE | `do_anonymous_page()` | 读访问在允许时映射零页；写访问或其他情况分配匿名 folio，建立 rmap、LRU 和 PTE |
-| 文件映射尚无 PTE | `do_fault()` → `vm_ops->fault` | 由映射提供者取得内容；普通文件可走 `filemap_fault()` |
-| PTE 编码交换等非 present 状态 | `do_swap_page()` | 区分特殊条目；普通交换路径查缓存或读取交换内容并恢复映射 |
-| 写入只读 PTE | `do_wp_page()` | 根据共享/私有及独占条件，执行共享写处理、复用或复制 |
+| 普通文件页 | 从文件读取的内容 | 干净且满足条件时可以丢弃，需要时重新读取 |
+| 私有匿名页 | 程序写入的数据 | 没有普通文件副本可重读，回收时通常要另行保存内容 |
 
-为私有匿名内存新分配 folio 时，`do_anonymous_page()` 及其辅助函数建立相互配套的状态：匿名内容、memcg 记账、映射计数、LRU 与页表条目。只跟踪“分配到了哪一页”不足以解释整个缺页处理；共享零页分支则不需要为这次读访问新分配匿名数据 folio。
+这种区分不能仅看 VMA 是否关联文件。`MAP_PRIVATE` 文件映射在发生写时复制后，可以同时包含仍由页缓存提供的内容和已经复制出的匿名页。[mm_types.h](../../linux/include/linux/mm_types.h) 中 `vm_area_struct` 的注释直接说明了它可同时关联文件映射索引和匿名反向映射的情况。
 
-### 7.3 fork 与 COW：共享内容，延后复制
+shmem/tmpfs 等内存文件系统还有自己的驻留与交换规则，不能直接套用普通磁盘文件的回收方式；相关入口保留在第 7 节。
 
-不带 `CLONE_VM` 的进程复制经 `dup_mm()` 复制地址空间；`copy_page_range()` 按 VMA 情况复制页表关系，对 COW 映射建立写保护，使父子进程可以暂时共享内容。它不会无条件复制所有数据页，部分 VMA 的页表也可以留待后续缺页重新建立。源码见 [kernel/fork.c](../../linux/kernel/fork.c) 和 [memory.c](../../linux/mm/memory.c)。
+### 5.3 反向映射：从一页内容找到谁在使用它
 
-后续写访问进入 `do_wp_page()`。若匿名页已满足独占复用条件，就可以恢复可写状态；否则调用 `wp_page_copy()` 创建副本并更新映射。共享文件映射则走自己的共享写入分支。COW 因而同时涉及 VMA 属性、PTE 权限、folio 的共享状态和 rmap，不能仅靠 `_refcount` 推断所有情况。
+普通访问沿“虚拟地址 → 页表 → 物理页”前进。回收和迁移面对的起点却可能是一个 folio：**如果要收回或搬动它，怎样找到需要修改的用户页表？** 反向映射（rmap）就是为这类问题提供查找关系。
 
-### 7.4 内存压力：回收、迁移、规整与 OOM
-
-直接回收从 `try_to_free_pages()` 开始，由发起分配的任务执行；后台回收由节点的 `kswapd()` 经 `balance_pgdat()` 执行。两者通过 `scan_control` 传递目标页数、目标 memcg、允许节点、是否允许换出/解除映射等条件，再进入相应扫描路径，见 [vmscan.c](../../linux/mm/vmscan.c)。
-
-回收减少仍需驻留的内容；规整则通过迁移调整已驻留页的位置，争取形成连续空闲块。`compact_control` 保存目标 zone、扫描 PFN、待迁移页和目标空闲页列表；`try_to_compact_pages()` 驱动规整，底层复用 `migrate_pages()`。见 [internal.h](../../linux/mm/internal.h)、[compaction.c](../../linux/mm/compaction.c) 和 [migrate.c](../../linux/mm/migrate.c)。规整本身不以增加全局空闲页总数为目标。
-
-迁移需要利用反向映射定位 PTE，协调旧页、新页和引用，并恢复映射，所以 pin、不可迁移对象和并发访问都会影响成功率。启用内存分层时，回收路径还可能先把 folio 降级到另一节点：这释放了源节点容量，却不等于消除了全局的数据驻留。
-
-当允许的回收、重试等措施无法取得进展，符合条件的路径才进入 OOM 处理，由 [oom_kill.c](../../linux/mm/oom_kill.c) 的 `out_of_memory()` 等函数处理。高阶分配失败、受限上下文分配失败和 memcg OOM 应分别分析，不能一律解释为“系统 RAM 用完了”。
-
-### 7.5 munmap 与退出：解除映射不等于立即释放所有物理页
-
-`do_munmap()` 经 `do_vmi_munmap()` 处理地址范围、必要的 VMA 拆分与解除映射；整个 mm 最后一个用户退出时，由 `mmput()` 的释放路径进入 `exit_mmap()`。入口见 [mmap.c](../../linux/mm/mmap.c)、[vma.c](../../linux/mm/vma.c) 和 [kernel/fork.c](../../linux/kernel/fork.c)。
-
-解除映射要协调 VMA 索引、反向映射、页表条目、TLB 以及引用计数。某个 PTE 被移除后，对应物理页仍可能由其他进程、页缓存或 pin 持有，只有相关生命周期条件满足后才可释放给底层分配器。
-
-## 8. 并发与生命周期：结构关系成立的前提
-
-内存子系统的锁按受保护对象分工。理解指针关系时，还需要确认指针在什么条件下稳定。
-
-| 保护对象 | 主要同步机制 | 阅读时要确认的问题 |
+| folio 类型 | 先找到哪些候选 VMA | 接下来做什么 |
 | --- | --- | --- |
-| mm 的映射布局 | `mmap_lock`；配置相关的 VMA 锁和 RCU | VMA 是否仍属于该 mm，边界与属性能否改变 |
-| 页表内容 | `page_table_lock`，以及拆分页表锁配置下的相应锁 | 条目在读取后是否已被另一 CPU 修改 |
-| 伙伴系统空闲链表 | `zone->lock` | 空闲块的阶数、链表和统计能否一致更新 |
-| PCP、SLUB 每 CPU 状态 | 各自的局部锁或原子操作 | 是否稳定访问当前 CPU 的缓存状态 |
-| folio 内容及相关操作 | folio lock、引用计数、写回状态等 | 内容是否就绪，是否正在回收、写回或迁移 |
-| 回收队列 | `lruvec->lru_lock` | folio 状态与队列操作是否一致 |
-| 反向映射索引 | `anon_vma` 锁、`address_space.i_mmap_rwsem` | 遍历期间 VMA 与索引关系是否稳定 |
+| 文件 folio | 经 `address_space.i_mmap` 查文件偏移相关的 VMA | 检查这些地址空间中的实际页表 |
+| 匿名 folio | 经 `anon_vma`、`anon_vma_chain` 找到相关 VMA | 检查这些地址空间中的实际页表 |
 
-字段与用法可在 [mm_types.h](../../linux/include/linux/mm_types.h)、[mmzone.h](../../linux/include/linux/mmzone.h)、[rmap.h](../../linux/include/linux/rmap.h)、[fs.h](../../linux/include/linux/fs.h) 和 [slub.c](../../linux/mm/slub.c) 中核对。这张表是职责索引，不是可任意嵌套的锁顺序。
+反向映射先找到候选范围，再检查实际映射，因为 VMA 内不一定每一页都已经建立 PTE。阅读入口是 [rmap.c](../../linux/mm/rmap.c) 的 `rmap_walk()`、`try_to_unmap()`，匿名索引结构见 [rmap.h](../../linux/include/linux/rmap.h)。
 
-两个引用层次需要单独区分：
+第一遍只需建立两个方向：**页表帮助地址找到页，反向映射帮助页找到相关用户映射。** `anon_vma_chain` 的多对多关系和区间树细节可以留到专门研究 fork 与回收时。
 
-- `mm_users` 表示包括用户空间在内的使用引用；归零时释放用户地址空间等资源，并释放其持有的 mm 引用。`mm_count` 管理 `mm_struct` 本体的生命周期，所有 `mm_users` 合起来在该计数中占一个引用。
-- folio 引用计数包含页表以外的持有者；映射计数跟踪页表映射。映射计数归零不意味着引用计数归零，大 folio 和 pin 还需要专用辅助函数解释。
+## 6. 内存紧张时，内核怎样继续工作
 
-对应约定见 [mm_types.h](../../linux/include/linux/mm_types.h) 和 [kernel/fork.c](../../linux/kernel/fork.c)。此外，`handle_mm_fault()` 的调用可能因等待或重试释放锁；其源码明确提醒调用者，返回后不能无条件继续解引用原 VMA。x86 也已经包含 `lock_vma_under_rcu()` 快速路径及向 mmap 锁路径回退的分支，见 [fault.c](../../linux/arch/x86/mm/fault.c)。
+### 6.1 先区分回收、迁移与规整
 
-## 9. 主干之外的重要分支
-
-这些机制扩展了上述对象和路径，应在建立主干认识后分别深入。
-
-| 机制 | 与主干的连接 | 阅读入口 |
+| 动作 | 要解决的问题 | 对数据的典型处理 |
 | --- | --- | --- |
-| NUMA 策略 | `mempolicy` 保存模式、节点集合等，影响 folio/page 的放置和回退 | [mempolicy.h](../../linux/include/linux/mempolicy.h)、[mempolicy.c](../../linux/mm/mempolicy.c) |
-| 透明大页与多尺寸匿名 folio | 缺页可申请较大 folio；PMD 映射与多个 PTE 映射是不同情况，还涉及合并和拆分 | [memory.c](../../linux/mm/memory.c)、[huge_memory.c](../../linux/mm/huge_memory.c)、[khugepaged.c](../../linux/mm/khugepaged.c) |
-| HugeTLB | 使用 `hstate` 管理页大小、空闲与预留等状态，缺页由 `hugetlb_fault()` 分派；不按普通匿名页 LRU 模型处理 | [hugetlb.h](../../linux/include/linux/hugetlb.h)、[hugetlb.c](../../linux/mm/hugetlb.c) |
-| shmem/tmpfs | 同时连接文件映射形式、内存驻留与交换，不能按普通磁盘文件的干净页丢弃规则解释 | [shmem.c](../../linux/mm/shmem.c) |
-| CMA | 管理连续内存区域，连接迁移类型与连续物理页分配 | [cma.c](../../linux/mm/cma.c)、[mmzone.h](../../linux/include/linux/mmzone.h) |
-| 内存热插拔与设备内存 | 改变物理内存的上线状态或用途，需要协调页描述符、zone 与迁移 | [memory_hotplug.c](../../linux/mm/memory_hotplug.c)、[memremap.c](../../linux/mm/memremap.c) |
-| GUP/pin | 为访问用户页或设备使用而取得引用、固定页，影响回收和迁移 | [gup.c](../../linux/mm/gup.c) |
-| zswap | 在换出路径中尝试把内容压缩保存在 RAM，换入时可命中该缓存 | [zswap.c](../../linux/mm/zswap.c)、[page_io.c](../../linux/mm/page_io.c) |
+| 回收 reclaim | 腾出当前占用的物理页 | 丢弃可重建内容，或保存内容后释放页 |
+| 迁移 migration | 改变内容所在的物理位置 | 搬到其他页，并更新相关映射 |
+| 规整 compaction | 获得更大的连续空闲块 | 利用迁移调整布局，让零散空闲页更集中 |
 
-## 10. 后续源码阅读顺序
+回收关注哪些内容可以不再占用当前物理页；规整关注空闲页能否组成需要的连续块。即使空闲页总数足够，如果分散在各处，高阶分配仍可能失败。规整本身不以增加全局空闲页总数为目标。
 
-建议按数据结构与执行路径交替推进，每一步都确认“对象由谁创建、由谁索引、由谁释放”。
+源码入口分别是 [vmscan.c](../../linux/mm/vmscan.c)、[migrate.c](../../linux/mm/migrate.c) 的 `migrate_pages()`、[compaction.c](../../linux/mm/compaction.c) 的 `try_to_compact_pages()`。被固定的页等限制可能使迁移失败。
 
-1. 阅读 [mm_types.h](../../linux/include/linux/mm_types.h) 与 [mmzone.h](../../linux/include/linux/mmzone.h)，建立 page/folio、mm/VMA、node/zone 三组基本关系。
-2. 沿 [memblock.c](../../linux/mm/memblock.c) 和 [mm_init.c](../../linux/mm/mm_init.c) 追踪启动交接，再读 [page_alloc.c](../../linux/mm/page_alloc.c) 的分配与释放主干。
-3. 结合 [mm/slab.h](../../linux/mm/slab.h)、[slub.c](../../linux/mm/slub.c) 和 [vmalloc.c](../../linux/mm/vmalloc.c)，区分页、对象和虚拟连续区域的分配。
-4. 从 [mmap.c](../../linux/mm/mmap.c)、[vma.c](../../linux/mm/vma.c) 进入 [memory.c](../../linux/mm/memory.c)，完整跟踪一次匿名写缺页，再跟踪文件缺页和 COW。
-5. 联读 [fs.h](../../linux/include/linux/fs.h)、[filemap.c](../../linux/mm/filemap.c)、[rmap.h](../../linux/include/linux/rmap.h) 和 [rmap.c](../../linux/mm/rmap.c)，闭合内容索引、页表映射和反向查找。
-6. 最后联读 [memcontrol.c](../../linux/mm/memcontrol.c)、[vmscan.c](../../linux/mm/vmscan.c)、[compaction.c](../../linux/mm/compaction.c) 与 [oom_kill.c](../../linux/mm/oom_kill.c)，解释分配失败时每个约束如何影响处理结果。
+### 6.2 哪些内容能够回收
 
-沿这些路径阅读时，应始终把虚拟地址范围、当前页表映射、内容归属、物理分配状态和资源记账分别确认，再通过源码中的指针、索引和回调把它们连接起来。
+回收必须先回答：“下次还需要这份数据时，能从哪里找回来？”
+
+| 内容 | 典型处理方式 |
+| --- | --- |
+| 干净文件 folio | 处理映射、引用等条件后可以移除缓存，需要时重新读文件 |
+| 脏文件 folio | 内存里有尚未保存的修改，通常需要写回或等待写回完成 |
+| 需要保留内容的匿名 folio | 通常通过 swap（交换）保存内容；缺少可用交换空间会限制这条路径 |
+| 被明确允许丢弃的匿名内容 | 例如符合条件的 lazyfree 页，可以直接丢弃 |
+| 可回收内核缓存 | 通过注册的 shrinker 回调释放对象，之后才可能归还 slab 页 |
+
+判断主干见 [vmscan.c](../../linux/mm/vmscan.c) 的 `shrink_folio_list()`，文件写回见 [page-writeback.c](../../linux/mm/page-writeback.c)，内核缓存回收见 [shrinker.c](../../linux/mm/shrinker.c)。来自 SLUB 的对象并不自动具备可回收性，仍在使用或被固定的内存也不能随意释放。
+
+交换后，页表可以记录交换条目；再次访问时，`do_swap_page()` 恢复映射。swap cache 保存与交换条目关联的驻留 folio，命中缓存时无需重新读取设备。见 [memory.c](../../linux/mm/memory.c)、[swap_state.c](../../linux/mm/swap_state.c)、[page_io.c](../../linux/mm/page_io.c)。非 present PTE 还可能表示迁移等特殊状态，不能一律理解为“数据在磁盘上”。
+
+### 6.3 谁执行回收，又怎样选择对象
+
+回收主要有两种执行方式：
+
+- **直接回收**：申请内存的任务自己尝试回收，入口是 `try_to_free_pages()`，因此这次分配可能等待更久。
+- **后台回收**：节点的 `kswapd` 线程通过 `balance_pgdat()` 等路径工作，尽量在压力增大时恢复可用余量。
+
+两者的实现都在 [vmscan.c](../../linux/mm/vmscan.c)。为了优先寻找较少使用的内容，内核通过 LRU（Least Recently Used，最近最少使用）相关机制跟踪 folio 的使用情况。传统 LRU 区分活跃、不活跃以及匿名、文件等类别，多代 LRU 则进一步按代际记录使用情况。
+
+这些状态由 `lruvec` 组织。在启用内存控制组（memcg）时，可以先把它理解为“某个组在某个节点上的回收状态”。memcg 禁用时使用 `pgdat->__lruvec`；启用时使用 `memcg->nodeinfo[nid]->lruvec`，具体见 [memcontrol.h](../../linux/include/linux/memcontrol.h) 的 `mem_cgroup_lruvec()`，结构见 [mmzone.h](../../linux/include/linux/mmzone.h)。
+
+多代 LRU 是否构建、默认是否开启，以及执行时选择哪个分支，需要分别看 `CONFIG_LRU_GEN`、`CONFIG_LRU_GEN_ENABLED` 和 `lru_gen_enabled()`，见 [mm/Kconfig](../../linux/mm/Kconfig) 与 [mm_inline.h](../../linux/include/linux/mm_inline.h)。入门时先理解“如何记录并选择较冷的内容”，再比较两种算法。
+
+### 6.4 memcg 与 OOM：为什么分配仍可能失败
+
+memcg（Memory Control Group，内存控制组）负责资源记账与限制。它限制某组使用多少资源，并不是给每组切出一个独立的物理内存池。因此，**整机还有空闲内存时，某个组也可能因为达到限额而无法继续分配。**
+
+`try_charge_memcg()` 在记账遇到限制时，会按条件尝试回收、重试或组内 OOM 处理，见 [memcontrol.c](../../linux/mm/memcontrol.c)。申请物理页成功，并不意味着后续资源记账一定成功；例如 [filemap.c](../../linux/mm/filemap.c) 的 `filemap_add_folio()` 会在插入页缓存前检查记账。
+
+OOM（Out Of Memory）处理是符合条件的分配路径在无法取得进展时的一种后续措施，可能通过选择并终止任务释放资源，入口见 [oom_kill.c](../../linux/mm/oom_kill.c) 的 `out_of_memory()`。它不是每次分配失败的必经步骤。
+
+分析失败时，按下面几个问题逐项检查，比只看“还剩多少 RAM”更有效：
+
+1. 允许使用哪些节点和 zone？它们是否满足水位要求？
+2. 需要多少页，是否要求连续？
+3. GFP 和当前上下文是否允许等待、回收或 I/O？
+4. 是否达到 memcg 限额？
+5. 是否存在可回收、可迁移的对象？
+
+这些条件共同决定 [page_alloc.c](../../linux/mm/page_alloc.c) 中 `__alloc_pages_slowpath()` 的行为。慢速路径会按条件选择重试、回收、规整等动作，不能固定画成“回收 → 规整 → 杀进程”的单一路线。
+
+## 7. 进阶查阅：主干建立后再展开
+
+### 7.1 几组容易混淆的字段与机制
+
+| 需要区分的概念 | 阅读时保留的边界 | 源码入口 |
+| --- | --- | --- |
+| 页描述符的存放方式 | FLATMEM、SPARSEMEM、VMEMMAP 的 PFN 换算不同；vmemmap 连续的是描述符所在的虚拟地址 | [memory_model.h](../../linux/include/asm-generic/memory_model.h) |
+| zone 的容量统计 | `spanned_pages` 含空洞；`present_pages` 是实际存在的页；`managed_pages` 含已分配和空闲页，不等于当前空闲量 | [mmzone.h](../../linux/include/linux/mmzone.h) |
+| 引用计数与映射计数 | 页表以外也有持有者；用户映射归零不表示所有引用归零，应使用相应辅助函数 | [mm_types.h](../../linux/include/linux/mm_types.h) |
+| `mm_users` 与 `mm_count` | 前者关系到用户地址空间资源释放，后者管理 mm 本体生命周期；所有 `mm_users` 合起来占一个 mm 引用 | [mm_types.h](../../linux/include/linux/mm_types.h)、[fork.c](../../linux/kernel/fork.c) |
+| `page`、`slab` 与 `ptdesc` | 描述符布局存在重叠，字段按用途解释；`ptdesc` 描述页表页，不是一个 PTE | [mm_types.h](../../linux/include/linux/mm_types.h)、[mm/slab.h](../../linux/mm/slab.h) |
+| `folio.mapping` | 文件与匿名场景解释不同，匿名场景含类型编码，不能始终当作 `address_space *` | [page-flags.h](../../linux/include/linux/page-flags.h)、[rmap.c](../../linux/mm/rmap.c) |
+| 页表层次与映射粒度 | 通用名称为 PGD → P4D → PUD → PMD → PTE；架构可折叠层次，大页也可能提前结束遍历 | [memory.c](../../linux/mm/memory.c)、[pgtable-nop4d.h](../../linux/include/asm-generic/pgtable-nop4d.h) |
+
+### 7.2 并发与生命周期
+
+前面的示意图展示了结构关系，但源码中的关系可能同时被其他 CPU 修改。深入某条路径时，再补上“谁保护它，持有到什么时候”的问题。
+
+| 保护对象 | 需要关注的机制 |
+| --- | --- |
+| VMA 的范围与属性 | `mmap_lock`，以及配置相关的 VMA 锁、RCU 路径 |
+| 页表项 | 页表锁；修改映射后还需协调 TLB 失效 |
+| 伙伴系统空闲链表 | `zone->lock` |
+| folio 内容与生命周期 | folio lock、引用计数、写回状态等 |
+| 回收队列 | `lruvec->lru_lock` |
+| 反向映射索引 | `anon_vma` 锁、`address_space.i_mmap_rwsem` |
+
+字段与调用见 [mm_types.h](../../linux/include/linux/mm_types.h)、[mmzone.h](../../linux/include/linux/mmzone.h)、[rmap.h](../../linux/include/linux/rmap.h)、[fs.h](../../linux/include/linux/fs.h)。这张表说明职责，不代表锁可以按表中顺序任意嵌套。
+
+一个具体例子是：`handle_mm_fault()` 可能在等待或重试过程中释放锁，调用者不能认为返回后原 VMA 指针一定仍可使用。相关注释见 [memory.c](../../linux/mm/memory.c)，实际调用与回退见 [x86/mm/fault.c](../../linux/arch/x86/mm/fault.c)。
+
+### 7.3 后续专题入口
+
+| 想继续回答的问题 | 对应机制与源码 |
+| --- | --- |
+| 为什么优先从某个节点分配？ | NUMA 策略：[mempolicy.c](../../linux/mm/mempolicy.c) |
+| 多页如何作为整体分配、映射和拆分？ | 透明大页与大 folio：[huge_memory.c](../../linux/mm/huge_memory.c)、[memory.c](../../linux/mm/memory.c) |
+| 显式大页的预留和分配有什么不同？ | HugeTLB：[hugetlb.c](../../linux/mm/hugetlb.c) |
+| 内存文件如何兼顾文件映射与交换？ | shmem/tmpfs：[shmem.c](../../linux/mm/shmem.c) |
+| 怎样为特定需求准备连续内存？ | CMA：[cma.c](../../linux/mm/cma.c) |
+| 内存怎样上线、下线或用于设备？ | [memory_hotplug.c](../../linux/mm/memory_hotplug.c)、[memremap.c](../../linux/mm/memremap.c) |
+| 固定用户页为什么影响回收和迁移？ | GUP/pin：[gup.c](../../linux/mm/gup.c) |
+| 交换内容怎样压缩保存在内存中？ | zswap：[zswap.c](../../linux/mm/zswap.c) |
+| 对象分配怎样利用 CPU 和节点缓存？ | SLUB 每 CPU 状态，以及可选的 sheaf 批量对象缓存：[slub.c](../../linux/mm/slub.c) |
+
+## 8. 带着问题读源码
+
+不必从头到尾通读一个巨大文件。每次先找一个结构或入口，只沿当前问题相关的分支前进。
+
+| 顺序 | 这一轮要回答的问题 | 阅读范围 |
+| --- | --- | --- |
+| 1 | VMA 与页表怎样分别连接到 mm？ | [mm_types.h](../../linux/include/linux/mm_types.h)：`mm_struct`、`vm_area_struct` |
+| 2 | 本例首次匿名写入怎样得到数据页？ | [memory.c](../../linux/mm/memory.c)：`handle_pte_fault()`、`do_pte_missing()`、`do_anonymous_page()` |
+| 3 | 缺页所需的物理页从哪里来？ | [mmzone.h](../../linux/include/linux/mmzone.h) 的 `zone`，再到 [page_alloc.c](../../linux/mm/page_alloc.c) 的 `get_page_from_freelist()`、`rmqueue()` |
+| 4 | fork 后为什么可以共享，又怎样分开？ | [fork.c](../../linux/kernel/fork.c) 的 `copy_mm()`，经 [mmap.c](../../linux/mm/mmap.c) 的 `dup_mmap()`，再到 [memory.c](../../linux/mm/memory.c) 的 `copy_page_range()`、`do_wp_page()` |
+| 5 | 文件内容和用户映射怎样连接？ | [fs.h](../../linux/include/linux/fs.h) 的 `address_space`，再到 [filemap.c](../../linux/mm/filemap.c) 的 `filemap_fault()` |
+| 6 | 如何从 folio 找到使用者并尝试回收？ | [rmap.c](../../linux/mm/rmap.c) 的 `rmap_walk()`，再到 [vmscan.c](../../linux/mm/vmscan.c) 的 `shrink_folio_list()` |
+
+每读完一条路径，写下三句话：**谁创建对象，谁持有或索引它，满足什么条件才能释放它。** 等这条主线连起来，再按第 7 节补充锁、配置和特殊分支。
+
+可以用下面五个问题检查理解；右列只给出提示，先尝试自己解释。
+
+| 自测问题 | 答案提示 |
+| --- | --- |
+| mmap 成功后，为什么首次写入还会缺页？ | VMA 已登记范围，数据页与 PTE 可以按需建立 |
+| VMA 允许写入，为什么 PTE 仍可能只读？ | 写时复制需要捕获后续写入 |
+| 释放一个进程的映射后，为什么物理页可能还在？ | 其他进程、页缓存或其他引用仍可能持有它 |
+| 有足够多的零散空闲页，为什么大块分配仍失败？ | 物理连续性、节点、zone、水位等约束仍需满足 |
+| 为什么整机有空闲内存，某个组仍会 OOM？ | memcg 限额与整机空闲量是不同约束 |
