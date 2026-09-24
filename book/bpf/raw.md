@@ -27,9 +27,35 @@
 
 BPF 程序最终是指令数组。公开的 `struct bpf_insn` 给每条指令定义操作码、源/目的寄存器、偏移和立即数；寄存器编号为 `R0` 到 `R10`。验证器把 `R1` 初始化为上下文指针，`R0` 是返回寄存器，`R10` 是只读帧指针。程序使用的具体上下文和返回值含义由程序类型与挂载点决定。[指令与寄存器定义](../../linux/include/uapi/linux/bpf.h#L61-L87) · [寄存器约定](../../linux/kernel/bpf/verifier.c#L74-L83) · [入口状态](../../linux/kernel/bpf/verifier.c#L23665-L23676)
 
-**程序类型决定能在哪里运行。**例如 XDP 面向收包路径，公开上下文类型为 `xdp_md`，内核对应 `xdp_buff`；tracepoint 面向跟踪事件，cgroup skb 面向 cgroup 网络路径。类型与上下文的对应关系集中列在 [`bpf_types.h`](../../linux/include/linux/bpf_types.h#L5-L46)，公开类型号在 [`enum bpf_prog_type`](../../linux/include/uapi/linux/bpf.h#L1040-L1075)。`expected_attach_type` 又为一些程序进一步指定预期挂载位置；创建 link 时内核会检查二者是否匹配。[程序字段](../../linux/include/linux/bpf.h#L1701-L1725) · [挂载类型检查](../../linux/kernel/bpf/syscall.c#L5708-L5713)
+**程序类型决定能在哪里运行。**例如 XDP 面向收包路径，公开上下文类型为 `xdp_md`，内核对应 `xdp_buff`；tracepoint 面向跟踪事件，cgroup skb 面向 cgroup 网络路径。类型与上下文的对应关系集中列在 [`bpf_types.h`](../../linux/include/linux/bpf_types.h#L5-L46)，公开类型号在 [`enum bpf_prog_type`](../../linux/include/uapi/linux/bpf.h#L1040-L1075)。对一些程序，`expected_attach_type` 还会进一步指定预期挂载类型，供加载验证和实际挂载时的兼容性检查使用。[程序字段](../../linux/include/linux/bpf.h#L1713-L1719) · [加载属性的用途说明](../../linux/include/uapi/linux/bpf.h#L1572-L1576)
 
 **程序类型也影响能调用什么。**普通 helper 有明确的参数和返回值原型。以 `bpf_map_lookup_elem` 为例，其返回类型是“map value 指针或 NULL”；验证器检查 helper 是否对当前程序类型开放、参数类型是否正确，以及调用是否违反可睡眠等约束。因而不能把 helper 当作任意内核函数调用。[map helper 原型](../../linux/kernel/bpf/helpers.c#L35-L72) · [helper 调用检查](../../linux/kernel/bpf/verifier.c#L11513-L11580)
+
+### 2.1. `expected_attach_type`：为什么加载时就要说明挂载类型
+
+**`expected_attach_type` 在 `BPF_PROG_LOAD` 时声明程序预期用于哪一类 hook，让内核提前按该 hook 的规则验证程序。**同一个 `prog_type` 可以覆盖多种挂载类型，而这些类型允许的上下文访问、helper 和返回值未必相同。加载属性中的注释直接说明：某些程序必须在加载时提供预期挂载类型，才能验证这些与挂载类型有关的操作。[字段定义与说明](../../linux/include/uapi/linux/bpf.h#L1560-L1576)
+
+以“在某个 cgroup 的 IPv4 connect 路径运行程序”为例，先分清下面四个信息：
+
+| 信息 | 提供阶段 | 本例中的含义 |
+| --- | --- | --- |
+| `prog_type` | 加载时 | `BPF_PROG_TYPE_CGROUP_SOCK_ADDR`，说明程序属于 cgroup socket 地址操作这一类 |
+| `expected_attach_type` | 加载时 | `BPF_CGROUP_INET4_CONNECT`，说明准备按 IPv4 connect hook 的规则验证 |
+| `attach_type` / `link_create.attach_type` | 直接挂载 / 创建 link 时 | 本次请求实际使用 `BPF_CGROUP_INET4_CONNECT` hook |
+| `target_fd` / `link_create.target_fd` | 直接挂载 / 创建 link 时 | 选择具体的 cgroup 对象 |
+
+`expected_attach_type` 与实际 `attach_type` 使用同一套 `enum bpf_attach_type` 值；`prog_type` 使用另一套程序类型枚举。**填写预期挂载类型不会完成挂载，也没有选定本例中的具体 cgroup。**目标 cgroup 仍由挂载请求的 `target_fd` 取得。[挂载类型枚举](../../linux/include/uapi/linux/bpf.h#L1077-L1089) · [cgroup socket 地址类型的合法组合](../../linux/kernel/bpf/syscall.c#L2712-L2734) · [直接挂载取得目标](../../linux/kernel/bpf/cgroup.c#L1395-L1397) · [link 挂载取得目标](../../linux/kernel/bpf/cgroup.c#L1540-L1552)
+
+沿着这个例子看，它在三个阶段发挥作用：
+
+1. **加载入口检查组合并保存声明。**`bpf_prog_load_check_attach()` 检查该程序类型接受哪些预期挂载类型；通过后，加载路径把属性复制到 `prog->expected_attach_type`，随后调用验证器。因此，该值在程序指令被验证之前就已确定。[组合检查及保存字段](../../linux/kernel/bpf/syscall.c#L2982-L3007) · [进入验证器](../../linux/kernel/bpf/syscall.c#L3083-L3094)
+2. **验证时选择具体规则。**对 `CGROUP_SOCK_ADDR`，`bpf_bind` helper 只向预期挂到 IPv4/IPv6 connect 的程序开放；上下文中的 `user_ip4` 也只允许相应 IPv4 挂载类型访问，预期为 IPv6 connect 时访问它会被拒绝。即使程序类型相同，修改预期挂载类型，也可能使同一段指令无法通过验证。[按预期类型开放 helper](../../linux/net/core/filter.c#L8139-L8156) · [按地址族限制上下文访问](../../linux/net/core/filter.c#L9270-L9298)
+3. **实际挂载时检查用途是否兼容。**`BPF_PROG_ATTACH` 和 `BPF_LINK_CREATE` 都会调用 `bpf_prog_attach_check_attach_type()`。本例的 `CGROUP_SOCK_ADDR` 要求实际类型与保存的预期类型严格相等：按 IPv4 connect 加载的程序，不能随后改挂到 IPv4 bind，即使二者属于同一个程序类型；检查会返回 `-EINVAL`。[直接挂载检查入口](../../linux/kernel/bpf/syscall.c#L4529-L4539) · [link 检查入口](../../linux/kernel/bpf/syscall.c#L5705-L5712) · [严格相等的程序类型](../../linux/kernel/bpf/syscall.c#L4398-L4408)
+
+还需要保留两个边界，避免把这个例子推广成所有 BPF 程序的统一规则：
+
+- **`0` 不是通用的“任意挂载类型”。**`enum bpf_attach_type` 的第一个值 `BPF_CGROUP_INET_INGRESS` 就是 `0`。部分程序类型又有历史兼容处理：例如 `CGROUP_SOCK` 加载时若填 `0`，内核会改为 `BPF_CGROUP_INET_SOCK_CREATE`；`SK_REUSEPORT` 也有自己的默认值。因此，是否需要显式填写、零值怎样解释，要结合程序类型看。[枚举起点](../../linux/include/uapi/linux/bpf.h#L1077-L1080) · [兼容性修正](../../linux/kernel/bpf/syscall.c#L2639-L2668)
+- **实际类型不总是要求与预期类型严格相等。**`CGROUP_SKB` 只有在 `enforce_expected_attach_type` 置位后才强制相等。例如，一个预期挂到 EGRESS 且常量返回 `2` 的程序，在返回值检查中使用 EGRESS 允许的 `[0, 3]` 范围，并触发该标志；之后不能挂到 INGRESS。若该标志未置位，挂载检查仍会检查权限和程序类型，但不会仅因预期方向与实际方向不同而拒绝。[EGRESS 返回值规则](../../linux/kernel/bpf/verifier.c#L17581-L17586) · [设置强制检查标志](../../linux/kernel/bpf/verifier.c#L17671-L17684) · [CGROUP_SKB 挂载检查](../../linux/kernel/bpf/syscall.c#L4409-L4422)
 
 ## 3. 加载：从 `bpf()` 到可运行程序
 
@@ -74,7 +100,103 @@ CO-RE 解决的一个问题是：同一份程序访问的内核结构在目标�
 
 最后要区分 fd 与对象本身。程序、map、link 都可由 fd 引用；map 和程序还可能被其他内核对象持有。`BPF_OBJ_PIN` / `BPF_OBJ_GET` 提供通过 BPF 文件系统保存与重新取得对象引用的路径。因而关闭一个 fd 不必然立即销毁对象；link 的最后引用释放时才会走拆除挂载和回收流程。[对象命令](../../linux/kernel/bpf/syscall.c#L3147-L3178) · [link 引用释放](../../linux/kernel/bpf/syscall.c#L3300-L3323) · [UAPI 生命周期说明](../../linux/include/uapi/linux/bpf.h#L920-L935)
 
-## 7. 建议的源码阅读顺序
+## 7. `BPF_OBJ_PIN` 与 `bpf_link` 有什么区别
+
+**`BPF_OBJ_PIN` 是保存对象引用的操作，`bpf_link` 是管理挂载关系的内核对象；link 本身也可以被 pin。**调用 `BPF_OBJ_PIN` 时，内核根据 `bpf_fd` 识别它指向的是 map、program 还是 link，取得相应引用，再让 bpffs 路径对应的 inode 保存对象指针。这个操作不会创建新的挂载关系。[识别对象并取得引用](../../linux/kernel/bpf/inode.c#L71-L94) · [pin 入口](../../linux/kernel/bpf/inode.c#L478-L493) · [inode 保存对象指针](../../linux/kernel/bpf/inode.c#L329-L367)
+
+沿用前面的 XDP 例子，把两件事放在一起比较：
+
+| 比较项 | `BPF_OBJ_PIN` | 创建 XDP `bpf_link` |
+| --- | --- | --- |
+| 解决的问题 | 给已有对象增加一个由 bpffs 路径持有的引用，便于以后重新取得 fd | 将程序挂到目标网卡，并用 link 对象管理这次挂载 |
+| 主要输入 | 被固定对象的 fd、bpffs 路径 | 程序 fd、目标网卡索引、挂载类型等 |
+| 成功结果 | 新路径引用原来的对象，系统调用返回 `0` | 完成挂载，返回 link fd |
+| 怎样重新访问 | 对路径调用 `BPF_OBJ_GET`，得到原对象的新 fd | 保留 link fd；如果已 pin，也可以通过路径取回 link fd |
+| 怎样撤销 | 删除 pin 路径，归还该路径持有的引用 | 最后一个 link 引用退出时拆除挂载，或通过支持的 `BPF_LINK_DETACH` 显式拆除 |
+
+表中的两条实现路径分别是 [`bpf_obj_do_pin()`](../../linux/kernel/bpf/inode.c#L436-L475) 和 [`bpf_xdp_link_attach()`](../../linux/net/core/dev.c#L10589-L10637)；按路径重新取得 fd 走 [`bpf_obj_get_user()`](../../linux/kernel/bpf/inode.c#L495-L553)。`BPF_OBJ_GET` 返回的是已有对象的句柄，不会重新加载程序或重新挂载。
+
+**pin 的 fd 指向谁，bpffs 就保留谁。**下面画的是一个已经建立 XDP 挂载的程序，实线表示持有对象，虚线表示挂载目标关联：
+
+```mermaid
+flowchart LR
+    PF["prog fd 对应的文件"] --> P["bpf_prog"]
+    PP["pin 程序的 bpffs 路径"] --> P
+    LF["link fd 对应的文件"] --> L["bpf_link"]
+    LP["pin link 的 bpffs 路径"] --> L
+    L -->|持有程序引用| P
+    L -.->|挂载关系| T["网卡 XDP 挂载点"]
+```
+
+这张图最关键的是引用方向：**link 持有程序，pin 程序不会反过来保住 link。**XDP link 创建时记录程序与设备；link 回收时先拆除设备上的挂载，再归还程序引用。[创建时的关联](../../linux/net/core/dev.c#L10611-L10623) · [XDP 拆挂载](../../linux/net/core/dev.c#L10469-L10485) · [link 归还程序引用](../../linux/kernel/bpf/syscall.c#L3241-L3251)
+
+因此，加载进程退出后的行为取决于它 pin 的对象。以下假定相关 fd 已全部关闭、对应文件已释放，没有其他 link 持有者，网卡仍存在，也没有显式 detach：
+
+| 退出前做了什么 | 退出后程序是否仍存在 | 退出后 XDP 挂载是否仍存在 |
+| --- | --- | --- |
+| 只创建 link，没有 pin | 若无其他程序引用，程序会进入回收流程 | link 最后引用退出，挂载被拆除 |
+| `BPF_OBJ_PIN` 传入 `prog_fd` | 存在，bpffs 持有程序引用 | link 仍会被回收，挂载被拆除 |
+| `BPF_OBJ_PIN` 传入 `link_fd` | 存在，存活的 link 持有程序引用 | 存在，bpffs 保留 link 引用 |
+
+上述区别来自同一条引用计数规则：link 文件释放时减少 link 引用，只有计数归零才进入 link 的释放流程；pin 留下的引用同样参与这个计数。[link 文件释放及引用归零](../../linux/kernel/bpf/syscall.c#L3306-L3329) · [最后引用的挂载清理](../../linux/kernel/bpf/syscall.c#L3270-L3293) · [pin 保存 link 引用](../../linux/kernel/bpf/inode.c#L87-L90)
+
+**删除 pin 路径与显式 detach 也有不同作用。**`unlink()` 取消路径对对象的固定，inode 销毁时归还对象引用；如果 link fd 或其他 pin 仍持有 link，挂载可以继续存在。如果这是最后一个 link 引用，引用归零才会触发拆挂载。显式 `BPF_LINK_DETACH` 则调用该 link 类型的 `detach` 回调：即使 link 仍被 pin，也能先拆除挂载；以后通过该路径取回的仍是已经脱离目标的 link。[unpin 语义](../../linux/include/uapi/linux/bpf.h#L275-L287) · [inode 归还引用](../../linux/kernel/bpf/inode.c#L778-L784) · [显式 detach](../../linux/kernel/bpf/syscall.c#L5887-L5905) · [XDP detach 回调](../../linux/net/core/dev.c#L10488-L10492)
+
+pin 保证的是对象有引用持有者。目标设备销毁时，XDP 仍会自动拆除挂载并清空 link 的设备指针；pin 也不会让对象跨系统重启保留。bpffs 在这里保存的是当前内核内存对象的引用，程序、map 数据和挂载关系没有被序列化为可在下次启动恢复的文件。[设备侧自动拆挂载](../../linux/net/core/dev.c#L10313-L10340) · [内存对象指针](../../linux/kernel/bpf/inode.c#L329-L343) · [bpffs 实例创建](../../linux/kernel/bpf/inode.c#L1019-L1048)
+
+## 8. `BPF_PROG_ATTACH` 与 `bpf_link`：谁管理挂载关系
+
+`BPF_PROG_ATTACH` 根据目标、程序和挂载类型，把已有程序登记到目标子系统，成功时返回 `0`，不产生独立的挂载 fd。`bpf_link` 则把一次挂载表示为独立对象；通过 `BPF_LINK_CREATE` 创建后，用户态得到管理这次挂载的 link fd。两者的核心区别是**挂载关系由目标直接保存，还是由一个有独立生命周期的 link 对象管理**。[直接挂载入口](../../linux/kernel/bpf/syscall.c#L4503-L4568) · [link 创建入口](../../linux/kernel/bpf/syscall.c#L5699-L5723) · [安装并返回 link fd](../../linux/kernel/bpf/syscall.c#L3470-L3479)
+
+下面选用同时支持两种方式的 cgroup 网络出口：程序类型为 `BPF_PROG_TYPE_CGROUP_SKB`，挂载类型为 `BPF_CGROUP_INET_EGRESS`。这里的替换和多程序规则都属于 cgroup 实现；其他挂载点需要看各自的分发与操作表。例如，前文的 XDP 就没有通过 `BPF_PROG_ATTACH` 挂载的分支。[挂载类型到程序类型的映射](../../linux/kernel/bpf/syscall.c#L4326-L4331) · [`BPF_PROG_ATTACH` 支持的分支](../../linux/kernel/bpf/syscall.c#L4538-L4561)
+
+### 8.1. 同一个挂载点，两种引用关系
+
+| 比较项 | cgroup `BPF_PROG_ATTACH` | cgroup `bpf_link` |
+| --- | --- | --- |
+| 主要输入 | `target_fd`、`attach_bpf_fd`、`attach_type`、`attach_flags` | `link_create.target_fd`、`prog_fd`、`attach_type`、`flags` |
+| 成功返回 | `0`，没有单独的挂载 fd | link fd |
+| cgroup 挂载条目保存什么 | `pl->prog` 指向程序，`pl->link` 为 NULL | `pl->link` 指向 cgroup link，`pl->prog` 为 NULL |
+| 谁持有程序引用 | cgroup 的直接挂载条目 | link 的 `prog` 字段 |
+| 关闭原来的 program fd | 挂载仍持有程序 | link 仍持有程序 |
+| 加载进程退出 | 目标仍存活且没有 detach/replace 时，直接挂载继续存在 | 取决于是否还有 link 引用；最后引用释放会拆除挂载 |
+| 解除挂载的入口 | `BPF_PROG_DETACH`，按目标和挂载类型查找直接程序条目 | `BPF_LINK_DETACH`，或释放最后一个 link 引用 |
+
+输入字段定义在 [`union bpf_attr`](../../linux/include/uapi/linux/bpf.h#L1639-L1653) 和 [link 创建属性](../../linux/include/uapi/linux/bpf.h#L1762-L1772)。引用关系可以直接从 [`struct bpf_prog_list`](../../linux/include/linux/bpf-cgroup.h#L100-L111) 以及 [`__cgroup_bpf_attach()` 保存条目](../../linux/kernel/bpf/cgroup.c#L887-L908) 的代码读出：
+
+```text
+BPF_PROG_ATTACH
+  → cgroup_bpf_prog_attach()
+  → cgroup_bpf_attach(..., prog, ..., link = NULL, ...)
+  → cgroup 挂载条目 ──持有──► bpf_prog
+
+BPF_LINK_CREATE
+  → cgroup_bpf_link_attach()
+  → cgroup_bpf_attach(..., prog = NULL, ..., link, ...)
+  → cgroup 挂载条目 ──关联──► bpf_cgroup_link ──持有──► bpf_prog
+                              ▲
+                         link fd / pin 引用
+```
+
+直接挂载入口把取得的程序引用交给 cgroup；系统调用只在挂载失败时归还该引用。link 路径则先初始化 `link->prog`，再把 link 登记到 cgroup。因此，关闭 program fd 对两种方式都不等于 detach；直接挂载后关闭 target cgroup fd，也不会撤销已经保存的条目。[直接挂载的引用取得与失败清理](../../linux/kernel/bpf/syscall.c#L4529-L4567) · [cgroup 直接挂载](../../linux/kernel/bpf/cgroup.c#L1388-L1415) · [cgroup link 创建](../../linux/kernel/bpf/cgroup.c#L1550-L1578)
+
+**两种条目最终进入同一套执行路径。**`prog_list_prog()` 从直接条目取 `pl->prog`，从 link 条目取 `pl->link->link.prog`；构建 cgroup 生效程序数组时统一使用这个函数。选择哪种挂载方式，改变的是引用和管理方式，并不要求程序换一套指令或运行时。[统一取得程序](../../linux/kernel/bpf/cgroup.c#L393-L399) · [构建生效程序数组](../../linux/kernel/bpf/cgroup.c#L474-L498)
+
+这也补充了上一节的 pin 语义：**cgroup 的直接挂载本身已经持有程序，不需要 pin 程序来维持进程退出后的挂载；link 方式则需要保留 link 引用。**如果加载进程持有最后一个 link fd，且没有 pin 或其他持有者，退出时关闭 fd 会触发 link 释放并移除 cgroup 条目。只 pin program 仍不能保住这个 link。[link 最后引用释放](../../linux/kernel/bpf/syscall.c#L3306-L3329) · [cgroup link 拆除挂载](../../linux/kernel/bpf/cgroup.c#L1440-L1470)
+
+### 8.2. 更新、解除挂载与两种方式共存
+
+**直接挂载通过再次 `BPF_PROG_ATTACH` 更换程序。**在 cgroup 单程序模式下，挂载标志兼容时，新程序替换已有条目；在 MULTI 模式下，使用 `BPF_F_ALLOW_MULTI | BPF_F_REPLACE`，并通过 `replace_bpf_fd` 指定被替换的直接挂载程序。省略替换标志的 MULTI 挂载用于添加条目，不能当作更新操作。[单程序与 MULTI 规则](../../linux/include/uapi/linux/bpf.h#L1185-L1201) · [查找待替换条目](../../linux/kernel/bpf/cgroup.c#L643-L679) · [取得替换目标程序](../../linux/kernel/bpf/cgroup.c#L1396-L1410)
+
+**cgroup link 通过 `BPF_LINK_UPDATE` 更换所持有的程序。**请求提供 link fd 和新程序 fd，也可用 `BPF_F_REPLACE` 配合 `old_prog_fd` 检查当前程序是否符合预期。cgroup 实现检查类型和存储兼容性，再更换 `link->prog`、更新生效数组并归还旧程序引用；link 对象本身继续存在，已有 fd 和 pin 路径仍指向它。其他 link 类型是否支持更新，要看其 `update_prog` 回调。[更新命令分发](../../linux/kernel/bpf/syscall.c#L5829-L5882) · [cgroup link 替换程序](../../linux/kernel/bpf/cgroup.c#L1053-L1112)
+
+**解除挂载也使用各自的身份。**cgroup 的 `BPF_PROG_DETACH` 提供目标与挂载类型；MULTI 模式还要指定程序，查找的是直接程序条目。link 方式通过 link fd 调用 `BPF_LINK_DETACH`，或等待 link 最后引用释放。直接 detach 路径传入的 link 为 NULL，不能通过同一个 program fd 移除 link 管理的条目。显式 detach 后，link 仍可能被 fd/pin 持有，程序引用直到 link 最终回收时才归还。[直接 detach 入口](../../linux/kernel/bpf/cgroup.c#L1418-L1437) · [按程序或 link 查找条目](../../linux/kernel/bpf/cgroup.c#L1115-L1144) · [link detach 回调](../../linux/kernel/bpf/cgroup.c#L1481-L1485) · [link 回收时归还程序引用](../../linux/kernel/bpf/syscall.c#L3241-L3251)
+
+两种方式可以在同一个 cgroup 的同一挂载类型下共存，前提是满足 MULTI 等挂载规则。cgroup link 在内核内部以 `BPF_F_ALLOW_MULTI` 加入列表；用户不能因此把该位填入 `link_create.flags`，本版本的允许掩码不接受它。已有单程序模式与新 link 的模式不匹配时会失败。仓库自测还展示了同一程序通过直接 MULTI 挂载和 link 各挂一次、被执行两次的情况。[link 标志检查及内部 MULTI 挂载](../../linux/kernel/bpf/cgroup.c#L1533-L1572) · [已有模式的兼容检查](../../linux/kernel/bpf/cgroup.c#L849-L854) · [两种方式共存的自测源码](../../linux/tools/testing/selftests/bpf/prog_tests/cgroup_link.c#L111-L123)
+
+最后，以上生命周期都以目标仍有效为前提。cgroup 销毁时会清理直接程序条目，也会使关联的 link 脱离目标；即使 pin 保住 link 对象，也不能保住已经失效的挂载。[cgroup 自动脱离 link](../../linux/kernel/bpf/cgroup.c#L314-L318) · [目标释放时清理挂载](../../linux/kernel/bpf/cgroup.c#L325-L360)
+
+## 9. 建议的源码阅读顺序
 
 1. 从 [`enum bpf_cmd`](../../linux/include/uapi/linux/bpf.h#L937-L978) 和 [`__sys_bpf()`](../../linux/kernel/bpf/syscall.c#L6165-L6298) 看用户态有哪些动作。
 2. 沿 [`bpf_prog_load()`](../../linux/kernel/bpf/syscall.c#L2872-L3124) 走到 [`bpf_check()`](../../linux/kernel/bpf/verifier.c#L24943-L25137)，弄清“加载前检查什么”。
