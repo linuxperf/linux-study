@@ -82,6 +82,34 @@ BPF 程序最终是指令数组。公开的 `struct bpf_insn` 给每条指令定
 
 `bpf_map_ops` 是理解各种 map 的分界线：公共层定义创建、查找、更新接口，具体语义由 array、hash、ring buffer 等实现决定。不能因为它们都叫 map，就假定每种都支持相同的 key/value 操作。[操作表](../../linux/include/linux/bpf.h#L83-L119) · [类型与实现对应](../../linux/include/linux/bpf_types.h#L87-L108)
 
+### 4.1. `bpf_map_offload_ops`：什么时候把 map 交给网卡
+
+设想一个绑定到网卡的 BPF 程序需要查询 hash map。用户态创建 map 时，可以在 `BPF_MAP_CREATE` 属性中填写 `map_ifindex`，指定要在哪个网络设备上创建。`map_create()` 先按 `map_type` 找到普通操作表并执行其 `map_alloc_check()`；只要 `map_ifindex` 非零，随后就把操作表换成 `bpf_map_offload_ops`，再调用新操作表的 `map_alloc()`。内核也用 `map->ops == &bpf_map_offload_ops` 判断一个 map 是否走了卸载路径。[创建属性](../../linux/include/uapi/linux/bpf.h#L1498) · [切换操作表](../../linux/kernel/bpf/syscall.c#L1413-L1429) · [分配并保存操作表](../../linux/kernel/bpf/syscall.c#L1507-L1513) · [识别卸载 map](../../linux/include/linux/bpf.h#L3270-L3273)
+
+这条路径有明确的创建条件：调用者需要 `CAP_SYS_ADMIN`，map 类型目前只接受 `ARRAY` 和 `HASH`。分配函数按 `map_ifindex` 在当前网络命名空间找到网卡，检查其卸载支持，再通过网卡驱动的 `ndo_bpf(BPF_OFFLOAD_MAP_ALLOC)` 请求创建设备侧 map。填写一个 ifindex 并不保证创建成功，权限、map 类型和设备支持检查都可能拒绝请求。[创建条件与查找网卡](../../linux/kernel/bpf/offload.c#L513-L544) · [请求驱动分配](../../linux/kernel/bpf/offload.c#L546-L555) · [`ndo_bpf` 调用](../../linux/kernel/bpf/offload.c#L121-L135)
+
+`bpf_map_offload_ops` 只填写卸载 map 所需的这五个回调；理解它们时可以按“创建、使用、销毁”的顺序看：[操作表定义](../../linux/kernel/bpf/syscall.c#L113-L119)
+
+| 回调 | 在卸载 map 中的作用 | 源码 |
+| --- | --- | --- |
+| `map_alloc` | 分配内核侧 `bpf_offloaded_map`，并请求网卡驱动创建 map | [`bpf_map_offload_map_alloc()`](../../linux/kernel/bpf/offload.c#L513-L555) |
+| `map_meta_equal` | 比较 map 类型、key/value 大小、标志及 BTF 记录；供 map-in-map 插入内层 map 时做元数据兼容性检查 | [`bpf_map_meta_equal()`](../../linux/kernel/bpf/map_in_map.c#L84-L93)、[回调用途](../../linux/include/linux/bpf.h#L160-L170) |
+| `map_check_btf` | 指向总是返回 `-ENOTSUPP` 的 `map_check_no_btf()`；创建时若要求检查 BTF 描述的 value 类型，就会拒绝 | [`map_check_no_btf()`](../../linux/kernel/bpf/syscall.c#L1238-L1244)、[创建时的调用条件](../../linux/kernel/bpf/syscall.c#L1551-L1555) |
+| `map_mem_usage` | 报告内核侧 `bpf_offloaded_map` 的大小；网卡驱动动态分配的内存不计入 | [`bpf_map_offload_map_mem_usage()`](../../linux/kernel/bpf/offload.c#L580-L584) |
+| `map_free` | 通知驱动释放设备侧 map，再释放内核侧对象 | [`bpf_map_offload_map_free()`](../../linux/kernel/bpf/offload.c#L566-L578)、[驱动释放命令](../../linux/kernel/bpf/offload.c#L137-L144) |
+
+**为什么表中没有 `map_lookup_elem`、`map_update_elem`？**用户态通过 map fd 查询、更新或删除卸载 map 时，系统调用先用 `bpf_map_is_offloaded()` 识别它，再调用专门的 `bpf_map_offload_*_elem()`；这些函数继续调用设备的 `dev_ops`。程序引用卸载 map 时，验证器还会检查程序与 map 的设备关联是否匹配；匹配逻辑接受同一个网卡，或属于同一个卸载设备的网卡。[查询与更新分流](../../linux/kernel/bpf/syscall.c#L247-L255) · [查询分流](../../linux/kernel/bpf/syscall.c#L305-L312) · [设备回调](../../linux/kernel/bpf/offload.c#L586-L627) · [验证器检查](../../linux/kernel/bpf/verifier.c#L20814-L20818) · [设备匹配条件](../../linux/kernel/bpf/offload.c#L697-L715)
+
+### 4.2. `obj_cgroup` 与 `memcg`：map 的内存记到谁名下
+
+创建 map 和增添 map 元素都可能分配内核内存。这里要分清两个对象：`memcg` 是执行内存额度检查与计费的 memory cgroup；`obj_cgroup`（下称 `objcg`）是内核对象持有的计费归属，内部有引用计数、指向当前所属 `memcg` 的指针，以及用于小对象计费的字节余额。实际向内存 cgroup 计费时，内核仍通过 `objcg` 找到 `memcg`，再调用 `try_charge_memcg()`。[`objcg` 结构](../../linux/include/linux/memcontrol.h#L167-L181) · [实际计费](../../linux/mm/memcontrol.c#L2807-L2825)
+
+以用户态创建 map 为例，`bpf_map_area_alloc()` 在 BPF 的 memcg 计费开启时给分配请求加上 `__GFP_ACCOUNT`；分配 map 后、返回 fd 前，`bpf_map_save_memcg()` 调用 `get_obj_cgroup_from_current()`，把当前计费归属及其引用保存在 `map->objcg`。`current_obj_cgroup()` 在任务上下文优先使用显式设置的 `active_memcg`，否则读取任务缓存的 `objcg`；非任务上下文则读取当前 CPU 的 `int_active_memcg`。它返回的指针只在当前作用范围内有效，`get_obj_cgroup_from_current()` 才为长期持有增加引用。根 memcg 的 map 可能没有 `objcg`，因此相关代码会检查 NULL。[分配标志](../../linux/kernel/bpf/syscall.c#L369-L408) · [BPF 计费开关](../../linux/include/linux/bpf.h#L3753-L3758) · [map 保存归属](../../linux/kernel/bpf/syscall.c#L483-L505) · [创建时调用](../../linux/kernel/bpf/syscall.c#L1598-L1605) · [按执行环境选择归属](../../linux/mm/memcontrol.c#L2691-L2734) · [取得长期引用](../../linux/include/linux/memcontrol.h#L1725-L1743)
+
+map 创建后，如果通过 `bpf_map_kmalloc_node()` 等封装函数再分配内存，代码会由 `map->objcg` 取得 `memcg`，用 `set_active_memcg()` 临时指定这次 `__GFP_ACCOUNT` 分配的计费目标，然后恢复原来的目标。这样，即使执行分配的任务与创建 map 的任务不同，这些分配仍按 map 保存的归属计费；没有 `objcg` 时使用根 memcg。map 回收时会归还保存的 `objcg` 引用。[由 `objcg` 取得 memcg](../../linux/kernel/bpf/syscall.c#L500-L506) · [map 后续分配](../../linux/kernel/bpf/syscall.c#L508-L520) · [`set_active_memcg()` 的作用范围](../../linux/include/linux/sched/mm.h#L474-L503) · [map 回收](../../linux/kernel/bpf/syscall.c#L913-L922)
+
+为什么让对象保存 `objcg`？一个 map 或 slab 对象可能在创建它的 cgroup 下线后继续存活。下线时，内核将该 cgroup 的 `objcg->memcg` 改指父 memcg，并把已有 `objcg` 接到父 cgroup 的链表；存活对象保留原来的 `objcg` 引用，无需逐个修改对象。slab 对象释放时也通过保存的 `objcg` 扣账。此外，小对象从按页预先计费的余额中按字节扣取，释放时再按字节返还余额；余额由 `objcg` 和每 CPU 的缓存记录。`objcg` 因而同时提供了稳定的对象归属和小对象计费所需的中间层。[设计说明](../../linux/include/linux/memcontrol.h#L167-L171) · [下线时迁移归属](../../linux/mm/memcontrol.c#L206-L225) · [slab 保存与释放 `objcg`](../../linux/mm/memcontrol.c#L3203-L3234) · [按字节使用预先计费的余额](../../linux/mm/memcontrol.c#L2936-L2957) · [按页补充余额](../../linux/mm/memcontrol.c#L3080-L3123)
+
 ## 5. 挂载和执行：以 XDP 收包为例
 
 `BPF_LINK_CREATE` 先根据程序 fd 取得程序，检查挂载类型，再把请求交给相应子系统。XDP 分支走 `bpf_xdp_link_attach()`：它根据网卡索引找到设备，建立 XDP link，调用设备挂载路径，成功后安装 link fd。link 结构保存程序、类型和挂载类型；关闭最后一个 link 引用时，其 `release` 回调负责拆除挂载关系。[link 分发](../../linux/kernel/bpf/syscall.c#L5699-L5778) · [XDP link 挂载](../../linux/net/core/dev.c#L10589-L10642) · [link 释放](../../linux/kernel/bpf/syscall.c#L3258-L3323)
