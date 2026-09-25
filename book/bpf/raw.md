@@ -196,6 +196,67 @@ BPF_LINK_CREATE
 
 最后，以上生命周期都以目标仍有效为前提。cgroup 销毁时会清理直接程序条目，也会使关联的 link 脱离目标；即使 pin 保住 link 对象，也不能保住已经失效的挂载。[cgroup 自动脱离 link](../../linux/kernel/bpf/cgroup.c#L314-L318) · [目标释放时清理挂载](../../linux/kernel/bpf/cgroup.c#L325-L360)
 
+### 8.3. 哪些挂载点支持这两种机制
+
+以下按本仓库 Linux 6.18.52 的挂载实现汇总。“支持”表示源码提供了相应路径，使用时仍需启用对应配置，并满足权限、目标和挂载模式检查；它不表示两种方式可以在同一目标上任意混用。表中的 `bpf_link` 指**内核 link 对象**，除特别注明外，创建入口都是 `BPF_LINK_CREATE`。[直接挂载分发](../../linux/kernel/bpf/syscall.c#L4503-L4568) · [link 创建分发](../../linux/kernel/bpf/syscall.c#L5694-L5796) · [配置与 link 类型注册](../../linux/include/linux/bpf_types.h#L137-L156)
+
+#### cgroup 挂载点
+
+下表两种方式的目标都是 cgroup fd。普通 cgroup 类型与 `BPF_LSM_CGROUP` 都能进入直接挂载路径；link 路径也分别为它们提供了 cgroup link 分支。[直接路径的类型判断](../../linux/kernel/bpf/syscall.c#L4469-L4485) · [直接挂载分发](../../linux/kernel/bpf/syscall.c#L4538-L4540) · [普通 cgroup link](../../linux/kernel/bpf/syscall.c#L5715-L5723) · [cgroup LSM link](../../linux/kernel/bpf/syscall.c#L5731-L5743)
+
+| 挂载点 | `attach_type` | `BPF_PROG_ATTACH` | 内核 `bpf_link` | 源码 |
+| --- | --- | --- | --- | --- |
+| cgroup 数据包入口、出口 | `BPF_CGROUP_INET_INGRESS`、`BPF_CGROUP_INET_EGRESS` | 支持 | 支持 | [类型映射](../../linux/kernel/bpf/syscall.c#L4329-L4331) |
+| socket 创建、释放、绑定后检查 | `BPF_CGROUP_INET_SOCK_CREATE`、`BPF_CGROUP_INET_SOCK_RELEASE`、`BPF_CGROUP_INET4_POST_BIND`、`BPF_CGROUP_INET6_POST_BIND` | 支持 | 支持 | [类型映射](../../linux/kernel/bpf/syscall.c#L4332-L4336) |
+| socket bind、connect | `BPF_CGROUP_INET4_BIND`、`BPF_CGROUP_INET6_BIND`、`BPF_CGROUP_INET4_CONNECT`、`BPF_CGROUP_INET6_CONNECT`、`BPF_CGROUP_UNIX_CONNECT` | 支持 | 支持 | [地址操作类型](../../linux/kernel/bpf/syscall.c#L4337-L4354) |
+| socket 地址查询 | `BPF_CGROUP_INET4_GETPEERNAME`、`BPF_CGROUP_INET6_GETPEERNAME`、`BPF_CGROUP_UNIX_GETPEERNAME`、`BPF_CGROUP_INET4_GETSOCKNAME`、`BPF_CGROUP_INET6_GETSOCKNAME`、`BPF_CGROUP_UNIX_GETSOCKNAME` | 支持 | 支持 | [地址操作类型](../../linux/kernel/bpf/syscall.c#L4342-L4354) |
+| UDP / UNIX socket 消息收发 | `BPF_CGROUP_UDP4_SENDMSG`、`BPF_CGROUP_UDP6_SENDMSG`、`BPF_CGROUP_UNIX_SENDMSG`、`BPF_CGROUP_UDP4_RECVMSG`、`BPF_CGROUP_UDP6_RECVMSG`、`BPF_CGROUP_UNIX_RECVMSG` | 支持 | 支持 | [地址操作类型](../../linux/kernel/bpf/syscall.c#L4348-L4354) |
+| socket 协议事件 | `BPF_CGROUP_SOCK_OPS` | 支持 | 支持 | [类型映射](../../linux/kernel/bpf/syscall.c#L4355-L4356) |
+| 设备访问控制 | `BPF_CGROUP_DEVICE` | 支持 | 支持 | [类型映射](../../linux/kernel/bpf/syscall.c#L4357-L4358) |
+| sysctl 访问 | `BPF_CGROUP_SYSCTL` | 支持 | 支持 | [类型映射](../../linux/kernel/bpf/syscall.c#L4369-L4370) |
+| socket 选项读取、设置 | `BPF_CGROUP_GETSOCKOPT`、`BPF_CGROUP_SETSOCKOPT` | 支持 | 支持 | [类型映射](../../linux/kernel/bpf/syscall.c#L4371-L4373) |
+| cgroup 范围的 LSM hook | `BPF_LSM_CGROUP`；具体 LSM hook 由加载时的 `attach_btf_id` 指定 | 支持 | 支持 | [按 BTF ID 选择槽位](../../linux/kernel/bpf/cgroup.c#L181-L200)、[共同挂载实现](../../linux/kernel/bpf/cgroup.c#L887-L900) |
+
+这些路径需要 `CONFIG_CGROUP_BPF`，cgroup LSM 还需要 `CONFIG_BPF_LSM`；网络相关 hook 也依赖对应网络功能。`BPF_LSM_CGROUP` 与后表的全局 `BPF_LSM_MAC` 是不同挂载类型。[cgroup 配置关闭时的入口](../../linux/include/linux/bpf-cgroup.h#L432-L449) · [LSM 配置关闭时的处理](../../linux/kernel/bpf/cgroup.c#L232-L239) · [程序类型的配置条件](../../linux/include/linux/bpf_types.h#L4-L30)
+
+#### 其他网络挂载点
+
+| 挂载点及 `attach_type` | `BPF_PROG_ATTACH` | 内核 `bpf_link` | 目标与实现 |
+| --- | --- | --- | --- |
+| sockmap / sockhash 消息判决：`BPF_SK_MSG_VERDICT` | 支持 | 支持 | 两者均使用 map fd。[允许的 map 与挂载类型](../../linux/net/core/sock_map.c#L1463-L1517)、[link 创建](../../linux/net/core/sock_map.c#L1844-L1882) |
+| sockmap / sockhash 流解析及包判决：`BPF_SK_SKB_STREAM_PARSER`、`BPF_SK_SKB_STREAM_VERDICT`、`BPF_SK_SKB_VERDICT` | 支持 | 支持 | 两者均使用 map fd；parser 需 `CONFIG_BPF_STREAM_PARSER`，两个 verdict 槽位不能同时使用。[类型与互斥检查](../../linux/net/core/sock_map.c#L1463-L1517)、[直接更新入口](../../linux/net/core/sock_map.c#L68-L83) |
+| flow dissector：`BPF_FLOW_DISSECTOR` | 支持 | 支持 | 直接命令要求 `target_fd=0`，挂到当前 netns；link 使用 netns fd。同一 netns 的这两种方式互斥。[直接挂载](../../linux/kernel/bpf/net_namespace.c#L291-L322)、[link 检查](../../linux/kernel/bpf/net_namespace.c#L425-L446)、[取得 netns](../../linux/kernel/bpf/net_namespace.c#L471-L498) |
+| socket lookup：`BPF_SK_LOOKUP` | 不支持 | 支持 | link 使用 netns fd。[link 类型分发](../../linux/kernel/bpf/syscall.c#L5751-L5754)、[目标取得](../../linux/kernel/bpf/net_namespace.c#L471-L498) |
+| TCX：`BPF_TCX_INGRESS`、`BPF_TCX_EGRESS` | 支持 | 支持 | 当前 netns 的网络设备 ifindex；这是 TCX 路径。[直接挂载](../../linux/kernel/bpf/tcx.c#L10-L41)、[link 挂载](../../linux/kernel/bpf/tcx.c#L310-L342) |
+| netkit：`BPF_NETKIT_PRIMARY`、`BPF_NETKIT_PEER` | 支持 | 支持 | 两者都传 primary 设备的 ifindex，再由挂载类型选择 primary / peer。[目标检查](../../linux/drivers/net/netkit.c#L495-L524)、[直接挂载](../../linux/drivers/net/netkit.c#L527-L553)、[link 挂载](../../linux/drivers/net/netkit.c#L782-L816) |
+| 网络设备 XDP：`BPF_XDP` | 不支持 | 支持 | link 使用当前 netns 的设备 ifindex。[XDP link 创建](../../linux/net/core/dev.c#L10589-L10623) |
+| Netfilter：`BPF_NETFILTER` | 不支持 | 支持 | 当前 netns，通过 `pf`、`hooknum`、`priority` 选择位置；本实现支持 IPv4/IPv6 的 PRE_ROUTING、LOCAL_IN、FORWARD、LOCAL_OUT、POST_ROUTING。[范围检查](../../linux/net/netfilter/nf_bpf_link.c#L180-L207)、[hook 枚举](../../linux/include/uapi/linux/netfilter.h#L42-L49)、[实际注册](../../linux/net/netfilter/nf_bpf_link.c#L210-L266) |
+
+其中“不支持 `BPF_PROG_ATTACH`”的判断来自该命令的实际分发：除 cgroup 外，它只接收 sockmap、LIRC、flow dissector 和 TCX/netkit 对应的程序类型，其余走错误分支。不能仅因某个值出现在 `enum bpf_attach_type` 中，就认为这个命令支持它。[直接挂载的完整目标分发](../../linux/kernel/bpf/syscall.c#L4538-L4563)
+
+#### 跟踪、安全及其他挂载点
+
+| 挂载点及类型 | `BPF_PROG_ATTACH` | 内核 `bpf_link` | 创建入口与目标 |
+| --- | --- | --- | --- |
+| perf event、普通 tracepoint、经 perf event 建立的 kprobe / uprobe：`BPF_PERF_EVENT` | 不支持 | 支持 | `BPF_LINK_CREATE`，目标为 perf event fd。[程序类型分发](../../linux/kernel/bpf/syscall.c#L5774-L5780)、[perf link 创建](../../linux/kernel/bpf/syscall.c#L4178-L4217) |
+| 函数入口、出口、修改返回值：`BPF_TRACE_FENTRY`、`BPF_TRACE_FEXIT`、`BPF_MODIFY_RETURN` | 不支持 | 支持 | `BPF_LINK_CREATE`，使用加载阶段确定的 BTF / trampoline 目标。[类型检查与 link 对象](../../linux/kernel/bpf/syscall.c#L3571-L3643)、[分发](../../linux/kernel/bpf/syscall.c#L5731-L5749) |
+| 全局 LSM hook：`BPF_LSM_MAC` | 不支持 | 支持 | `BPF_LINK_CREATE`，目标由 LSM hook 的 BTF 信息确定。[LSM 类型检查](../../linux/kernel/bpf/syscall.c#L3599-L3604)、[分发](../../linux/kernel/bpf/syscall.c#L5731-L5749) |
+| BTF raw tracepoint：`BPF_PROG_TYPE_TRACING` + `BPF_TRACE_RAW_TP` | 不支持 | 支持 | `BPF_LINK_CREATE`，从已加载程序的目标信息取得 tracepoint。[link 分发](../../linux/kernel/bpf/syscall.c#L5731-L5739)、[目标解析](../../linux/kernel/bpf/syscall.c#L4241-L4254) |
+| 按名称挂载的 raw tracepoint：`BPF_PROG_TYPE_RAW_TRACEPOINT`、`BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE` | 不支持 | 支持 | **入口是 `BPF_RAW_TRACEPOINT_OPEN`**，按名称找到 tracepoint，创建内核 raw tracepoint link 并返回 fd。[类型及名称处理](../../linux/kernel/bpf/syscall.c#L4256-L4269)、[link 创建](../../linux/kernel/bpf/syscall.c#L4271-L4294)、[命令入口](../../linux/kernel/bpf/syscall.c#L4303-L4322) |
+| BPF iterator：`BPF_TRACE_ITER` | 不支持 | 支持 | `BPF_LINK_CREATE`，按程序的 `attach_btf_id` 匹配迭代目标，必要时用 `iter_info` 进一步指定对象。[目标查找与挂载](../../linux/kernel/bpf/bpf_iter.c#L504-L573) |
+| kprobe multi / session：`BPF_TRACE_KPROBE_MULTI`、`BPF_TRACE_KPROBE_SESSION` | 不支持 | 支持 | `BPF_LINK_CREATE`，提供符号或地址集合；本实现要求 64 位且启用 `CONFIG_FPROBE`。[分发](../../linux/kernel/bpf/syscall.c#L5781-L5783)、[创建检查](../../linux/kernel/trace/bpf_trace.c#L2722-L2767)、[未启用时的入口](../../linux/kernel/trace/bpf_trace.c#L2877-L2881) |
+| uprobe multi / session：`BPF_TRACE_UPROBE_MULTI`、`BPF_TRACE_UPROBE_SESSION` | 不支持 | 支持 | `BPF_LINK_CREATE`，提供文件路径、偏移集合等；本实现要求 64 位且启用 `CONFIG_UPROBES`。[分发](../../linux/kernel/bpf/syscall.c#L5784-L5786)、[创建检查](../../linux/kernel/trace/bpf_trace.c#L3161-L3203)、[未启用时的入口](../../linux/kernel/trace/bpf_trace.c#L3311-L3315) |
+| BPF 函数替换 freplace：`BPF_PROG_TYPE_EXT` | 不支持 | 支持 | `BPF_LINK_CREATE`，使用加载时的替换目标，或提供目标程序 fd 与 BTF ID；该程序类型的 `expected_attach_type` 为 `0`。[EXT 分发](../../linux/kernel/bpf/syscall.c#L5724-L5729)、[目标及类型检查](../../linux/kernel/bpf/syscall.c#L3593-L3634) |
+| struct_ops 回调集合：`BPF_STRUCT_OPS` | 不支持 | 支持 | `BPF_LINK_CREATE`，传入 **`map_fd`**，注册 struct_ops map 中的回调集合。[独立分支](../../linux/kernel/bpf/syscall.c#L5702-L5703)、[取得 map 并注册](../../linux/kernel/bpf/bpf_struct_ops.c#L1342-L1389) |
+| LIRC 原始红外事件：`BPF_LIRC_MODE2` | 支持 | 不支持 | 直接命令使用 LIRC fd，目标必须是原始红外接收设备。[命令分发](../../linux/kernel/bpf/syscall.c#L4548-L4550)、[取得目标](../../linux/drivers/media/rc/bpf-lirc.c#L248-L264)、[设备类型检查](../../linux/drivers/media/rc/bpf-lirc.c#L135-L167) |
+
+阅读这些列表时，还要区分几类相近的接口：
+
+- **创建内核 link 的命令不止 `BPF_LINK_CREATE`。**除了表中的 raw tracepoint，`BPF_RAW_TRACEPOINT_OPEN` 还保留了部分 TRACING、EXT、LSM 程序的兼容入口，最终同样创建内核 link。[兼容入口分流](../../linux/kernel/bpf/syscall.c#L4241-L4255)
+- **struct_ops link 管理的是 map 所代表的回调集合。**传入的 map 必须是带 `BPF_F_LINK` 的 `BPF_MAP_TYPE_STRUCT_OPS`，且已准备好注册；该 link 初始化时 `prog` 为 NULL，后续保存 map 引用。[map 条件](../../linux/kernel/bpf/bpf_struct_ops.c#L1189-L1196) · [初始化与保存 map](../../linux/kernel/bpf/bpf_struct_ops.c#L1366-L1386)
+- **其他挂载接口仍然存在。**普通 socket filter 使用 `SO_ATTACH_BPF`，传统 TC `cls_bpf` 使用 netlink 的 `TCA_BPF_FD`，传统设备 XDP 使用 rtnetlink 的 `IFLA_XDP_FD`；它们都不是 `BPF_PROG_ATTACH`。`BPF_XDP_DEVMAP` / `BPF_XDP_CPUMAP` 程序则由 map 条目持有，也不属于表中的设备 XDP link。[socket filter](../../linux/net/core/sock.c#L1461-L1470) · [传统 TC](../../linux/net/sched/cls_bpf.c#L376-L390) · [传统 XDP](../../linux/net/core/rtnetlink.c#L3404-L3419) · [devmap 程序引用](../../linux/kernel/bpf/devmap.c#L919-L932) · [cpumap 程序引用](../../linux/kernel/bpf/cpumap.c#L410-L426)
+- **libbpf 返回的 `struct bpf_link *` 需要看其底层实现。**例如 perf 挂载既可能调用 `BPF_LINK_CREATE`，也可能回退到 `PERF_EVENT_IOC_SET_BPF` 后包装 perf fd；后者不因此变成内核 link。[libbpf 的两条 perf 挂载路径](../../linux/tools/lib/bpf/libbpf.c#L11005-L11042)
+
 ## 9. 建议的源码阅读顺序
 
 1. 从 [`enum bpf_cmd`](../../linux/include/uapi/linux/bpf.h#L937-L978) 和 [`__sys_bpf()`](../../linux/kernel/bpf/syscall.c#L6165-L6298) 看用户态有哪些动作。
