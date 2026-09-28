@@ -10,12 +10,12 @@
 
 ### 1.1 处理函数表、pending 位图与工作队列
 
-| 核心对象 | 组织方式 | 解决的问题 |
-| --- | --- | --- |
-| `softirq_vec[NR_SOFTIRQS]` | 全局数组，每项是一个 `struct softirq_action` | 某类软中断调用哪个函数？ |
-| `__softirq_pending` | 每 CPU 一份位图，通用定义位于 `irq_cpustat_t` | 本 CPU 哪些类别需要处理？ |
-| 子系统自己的工作队列 | 由网络、定时器、tasklet 等分别维护 | 具体有哪些包、定时器或任务？ |
-| `ksoftirqd` | 每 CPU 一个内核线程指针 | 需要交给调度器安排时，由谁继续处理？ |
+| 核心对象                   | 组织方式                                      | 解决的问题                           |
+| -------------------------- | --------------------------------------------- | ------------------------------------ |
+| `softirq_vec[NR_SOFTIRQS]` | 全局数组，每项是一个 `struct softirq_action`  | 某类软中断调用哪个函数？             |
+| `__softirq_pending`        | 每 CPU 一份位图，通用定义位于 `irq_cpustat_t` | 本 CPU 哪些类别需要处理？            |
+| 子系统自己的工作队列       | 由网络、定时器、tasklet 等分别维护            | 具体有哪些包、定时器或任务？         |
+| `ksoftirqd`                | 每 CPU 一个内核线程指针                       | 需要交给调度器安排时，由谁继续处理？ |
 
 源码中的处理函数结构很简单，**并没有通用的任务链表，也不携带每次触发的参数**：
 
@@ -59,18 +59,18 @@ flowchart LR
 
 本版本定义了 **10 类**软中断。序号固定，`open_softirq()` 只填写已有槽位，不会动态分配一种新类别。
 
-| 序号 | 类别 | 典型工作 / 注册入口 |
-| --- | --- | --- |
-| 0 | `HI_SOFTIRQ` | [高优先级 tasklet、BH workqueue](../../linux/kernel/softirq.c#L956) |
-| 1 | `TIMER_SOFTIRQ` | [普通内核定时器](../../linux/kernel/time/timer.c#L2579) |
-| 2 | `NET_TX_SOFTIRQ` | [网络发送侧延后处理](../../linux/net/core/dev.c#L13231) |
-| 3 | `NET_RX_SOFTIRQ` | [网络接收侧 NAPI 处理](../../linux/net/core/dev.c#L13232) |
-| 4 | `BLOCK_SOFTIRQ` | [块 I/O 完成处理](../../linux/block/blk-mq.c#L5261) |
-| 5 | `IRQ_POLL_SOFTIRQ` | [I/O 完成轮询](../../linux/lib/irq_poll.c#L214) |
-| 6 | `TASKLET_SOFTIRQ` | [普通 tasklet、BH workqueue](../../linux/kernel/softirq.c#L950) |
-| 7 | `SCHED_SOFTIRQ` | [调度域负载均衡等工作](../../linux/kernel/sched/fair.c#L14194) |
-| 8 | `HRTIMER_SOFTIRQ` | [需要在软中断执行的高精度定时器](../../linux/kernel/time/hrtimer.c#L2335) |
-| 9 | `RCU_SOFTIRQ` | [RCU 核心处理](../../linux/kernel/rcu/tree.c#L4879) |
+| 序号 | 类别               | 典型工作 / 注册入口                                                       |
+| ---- | ------------------ | ------------------------------------------------------------------------- |
+| 0    | `HI_SOFTIRQ`       | [高优先级 tasklet、BH workqueue](../../linux/kernel/softirq.c#L956)       |
+| 1    | `TIMER_SOFTIRQ`    | [普通内核定时器](../../linux/kernel/time/timer.c#L2579)                   |
+| 2    | `NET_TX_SOFTIRQ`   | [网络发送侧延后处理](../../linux/net/core/dev.c#L13231)                   |
+| 3    | `NET_RX_SOFTIRQ`   | [网络接收侧 NAPI 处理](../../linux/net/core/dev.c#L13232)                 |
+| 4    | `BLOCK_SOFTIRQ`    | [块 I/O 完成处理](../../linux/block/blk-mq.c#L5261)                       |
+| 5    | `IRQ_POLL_SOFTIRQ` | [I/O 完成轮询](../../linux/lib/irq_poll.c#L214)                           |
+| 6    | `TASKLET_SOFTIRQ`  | [普通 tasklet、BH workqueue](../../linux/kernel/softirq.c#L950)           |
+| 7    | `SCHED_SOFTIRQ`    | [调度域负载均衡等工作](../../linux/kernel/sched/fair.c#L14194)            |
+| 8    | `HRTIMER_SOFTIRQ`  | [需要在软中断执行的高精度定时器](../../linux/kernel/time/hrtimer.c#L2335) |
+| 9    | `RCU_SOFTIRQ`      | [RCU 核心处理](../../linux/kernel/rcu/tree.c#L4879)                       |
 
 依据：[类别枚举](../../linux/include/linux/interrupt.h#L547)。类别存在不代表所有定时器都走这条路径；高精度定时器区分了 [SOFT / HARD 模式](../../linux/include/linux/hrtimer.h#L30)，只有 SOFT 模式的回调进入 `HRTIMER_SOFTIRQ`。`RCU_SOFTIRQ` 是否注册取决于 [`use_softirq`](../../linux/kernel/rcu/tree.c#L115)，该参数默认开启，可用模块参数关掉；关掉后 [`invoke_rcu_core()`](../../linux/kernel/rcu/tree.c#L2907) 唤醒每 CPU 的 `rcuc/%u`。
 
@@ -78,14 +78,14 @@ flowchart LR
 
 ### 1.3 执行状态计数：不要与 pending 混淆
 
-`preempt_count` 的软中断字段用于记录执行状态和 BH 禁用嵌套层次：
+`preempt_count` 是每个 CPU 上的一个整数，记录这块 CPU 现在能不能被抢占，以及它正处在哪一层中断上下文。x86 上它是 per-CPU 变量 __preempt_count，不属于 task_struct：
 
-| 操作 / 状态 | 计数变化或判断 | 含义 |
-| --- | --- | --- |
-| 进入软中断处理 | 加 `SOFTIRQ_OFFSET = 0x100` | 正在执行软中断 |
-| `local_bh_disable()` | 加 `SOFTIRQ_DISABLE_OFFSET = 0x200` | 禁止本 CPU 在该临界区执行软中断，可嵌套 |
-| `in_serving_softirq()` | 检查 `SOFTIRQ_OFFSET` 位 | 是否正在处理软中断 |
-| `in_softirq()` | 检查整个软中断计数字段 | 正在处理，**或者仅仅禁用了 BH** |
+| 操作 / 状态            | 计数变化或判断                      | 含义                                    |
+| ---------------------- | ----------------------------------- | --------------------------------------- |
+| 进入软中断处理         | 加 `SOFTIRQ_OFFSET = 0x100`         | 正在执行软中断                          |
+| `local_bh_disable()`   | 加 `SOFTIRQ_DISABLE_OFFSET = 0x200` | 禁止本 CPU 在该临界区执行软中断，可嵌套 |
+| `in_serving_softirq()` | 检查 `SOFTIRQ_OFFSET` 位            | 是否正在处理软中断                      |
+| `in_softirq()`         | 检查整个软中断计数字段              | 正在处理，**或者仅仅禁用了 BH**         |
 
 因此，**`in_softirq()` 为真不能证明当前正在执行回调**。源码还把 `in_softirq()`、`in_interrupt()` 标为不建议新代码使用的旧接口；理解它们是为了读现有路径，不能拿它们笼统判断某个 API 是否可睡眠。
 
@@ -97,21 +97,21 @@ flowchart LR
 
 `open_softirq(nr, action)` 将函数写入 `softirq_vec[nr].action`。例如网络初始化分别注册 `net_tx_action` 和 `net_rx_action`。见 [注册实现](../../linux/kernel/softirq.c#L793)、[网络注册点](../../linux/net/core/dev.c#L13231)。
 
-| 触发接口 | 调用条件 | 实际作用 |
-| --- | --- | --- |
-| `__raise_softirq_irqoff(nr)` | 已关闭本地硬中断 | 记录 trace、设置 pending 位；不负责唤醒线程 |
-| `raise_softirq_irqoff(nr)` | 已关闭本地硬中断 | 置位，并在非中断 / 非 BH 禁用上下文等条件满足时唤醒 `ksoftirqd` |
-| `raise_softirq(nr)` | 自行保存并关闭本地硬中断 | 调用上一接口，再恢复中断状态 |
+| 触发接口                     | 调用条件                 | 实际作用                                                        |
+| ---------------------------- | ------------------------ | --------------------------------------------------------------- |
+| `__raise_softirq_irqoff(nr)` | 已关闭本地硬中断         | 记录 trace、设置 pending 位；不负责唤醒线程                     |
+| `raise_softirq_irqoff(nr)`   | 已关闭本地硬中断         | 置位，并在非中断 / 非 BH 禁用上下文等条件满足时唤醒 `ksoftirqd` |
+| `raise_softirq(nr)`          | 自行保存并关闭本地硬中断 | 调用上一接口，再恢复中断状态                                    |
 
 **raise 不直接调用处理函数。** 它表示“有工作待处理”，实际回调由后续执行入口调用。关闭本地硬中断可以保护本 CPU pending 的更新；它不是跨 CPU 的全局锁。源码：[三个触发接口](../../linux/kernel/softirq.c#L757)。
 
 ### 2.2 什么时候执行？
 
-| 时机 | 关键路径 | 条件 / 意义 |
-| --- | --- | --- |
-| 硬中断退出 | `__irq_exit_rcu()` → `invoke_softirq()` → `__do_softirq()` 或独立栈入口 | 退出硬中断计数后，`!in_interrupt()` 且有 pending；不是每次硬中断退出都执行 |
-| 重新允许 BH | `local_bh_enable()` → `__local_bh_enable_ip()` → `do_softirq()` | 最外层 BH 禁用解除后，满足上下文条件且有 pending，可以就地执行 |
-| 内核线程获得运行机会 | `run_ksoftirqd()` → `handle_softirqs(true)` | 消化待处理工作，并在批次结束后给调度器机会 |
+| 时机                 | 关键路径                                                                | 条件 / 意义                                                                |
+| -------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 硬中断退出           | `__irq_exit_rcu()` → `invoke_softirq()` → `__do_softirq()` 或独立栈入口 | 退出硬中断计数后，`!in_interrupt()` 且有 pending；不是每次硬中断退出都执行 |
+| 重新允许 BH          | `local_bh_enable()` → `__local_bh_enable_ip()` → `do_softirq()`         | 最外层 BH 禁用解除后，满足上下文条件且有 pending，可以就地执行             |
+| 内核线程获得运行机会 | `run_ksoftirqd()` → `handle_softirqs(true)`                             | 消化待处理工作，并在批次结束后给调度器机会                                 |
 
 源码：[硬中断退出检查](../../linux/kernel/softirq.c#L713)、[`invoke_softirq()`](../../linux/kernel/softirq.c#L487)、[BH enable 路径](../../linux/kernel/softirq.c#L427)、[`do_softirq()` 的入口检查](../../linux/kernel/softirq.c#L510)、[线程执行入口](../../linux/kernel/softirq.c#L1050)。
 
@@ -146,12 +146,12 @@ flowchart TD
 
 先看连接线程与软中断处理逻辑的 `softirq_threads` 描述符：
 
-| 字段 | 设置值 | 作用 |
-| --- | --- | --- |
-| `store` | `&ksoftirqd` | 将线程指针保存到相应 CPU 的变量中 |
-| `thread_should_run` | `ksoftirqd_should_run` | 判断本 CPU 是否有待处理软中断 |
-| `thread_fn` | `run_ksoftirqd` | 执行一批软中断处理 |
-| `thread_comm` | `"ksoftirqd/%u"` | 线程名中的编号对应 CPU |
+| 字段                | 设置值                 | 作用                              |
+| ------------------- | ---------------------- | --------------------------------- |
+| `store`             | `&ksoftirqd`           | 将线程指针保存到相应 CPU 的变量中 |
+| `thread_should_run` | `ksoftirqd_should_run` | 判断本 CPU 是否有待处理软中断     |
+| `thread_fn`         | `run_ksoftirqd`        | 执行一批软中断处理                |
+| `thread_comm`       | `"ksoftirqd/%u"`       | 线程名中的编号对应 CPU            |
 
 `early_initcall(spawn_ksoftirqd)` 在内核初始化阶段注册这个描述符。`smpboot_register_percpu_thread()` 为当时在线的 CPU 创建并解除线程的 park 状态；后续 CPU 上线时，由相应框架创建或恢复线程。**创建不要求 pending 非零，没有工作时线程会睡眠等待。**
 
@@ -159,11 +159,11 @@ flowchart TD
 
 **第二步：出现以下情况时，请求唤醒本 CPU 的线程。**
 
-| 场景 | 必须满足的条件 | 源码入口 |
-| --- | --- | --- |
-| 普通任务通过 `raise_softirq()` / `raise_softirq_irqoff()` 触发 | 置位后满足 `!in_interrupt()`。此时 `should_wake_ksoftirqd()` 恒为真 | [raise 路径](../../linux/kernel/softirq.c#L760)、[`should_wake_ksoftirqd()`](../../linux/kernel/softirq.c#L482) |
-| 当前批次不能继续处理 | **仍有 pending**，并且到达时间界限、`need_resched()` 为真、重启轮数用尽三者中至少一个成立 | [`handle_softirqs()` 批次尾部](../../linux/kernel/softirq.c#L637) |
-| 开启强制 IRQ 线程化，硬中断退出 | 退出检查满足 `!in_interrupt()` 且有 pending；进入 `invoke_softirq()` 后，`force_irqthreads()` 为真且本 CPU 线程已存在 | [中断退出检查](../../linux/kernel/softirq.c#L720)、[线程化分支](../../linux/kernel/softirq.c#L487) |
+| 场景                                                           | 必须满足的条件                                                                                                        | 源码入口                                                                                                        |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 普通任务通过 `raise_softirq()` / `raise_softirq_irqoff()` 触发 | 置位后满足 `!in_interrupt()`。此时 `should_wake_ksoftirqd()` 恒为真                                                   | [raise 路径](../../linux/kernel/softirq.c#L760)、[`should_wake_ksoftirqd()`](../../linux/kernel/softirq.c#L482) |
+| 当前批次不能继续处理                                           | **仍有 pending**，并且到达时间界限、`need_resched()` 为真、重启轮数用尽三者中至少一个成立                             | [`handle_softirqs()` 批次尾部](../../linux/kernel/softirq.c#L637)                                               |
+| 开启强制 IRQ 线程化，硬中断退出                                | 退出检查满足 `!in_interrupt()` 且有 pending；进入 `invoke_softirq()` 后，`force_irqthreads()` 为真且本 CPU 线程已存在 | [中断退出检查](../../linux/kernel/softirq.c#L720)、[线程化分支](../../linux/kernel/softirq.c#L487)              |
 
 表中的强制线程化是运行时条件，不是仅仅编译了 `CONFIG_IRQ_FORCED_THREADING`。启动参数 `threadirqs` 可以启用它，见 [参数解析](../../linux/kernel/irq/manage.c#L35)。启用后，`raise_timer_softirq()` 把定时器通知记入 `pending_timer_softirq`。硬中断退出时若该位图非零，且当前不在 NMI 或硬中断中，`__irq_exit_rcu()` 调用 `wake_timersd()` 唤醒本 CPU 的 `ktimers/%u`，线程指针名为 `ktimerd`。`run_ktimerd()` 再把这些位或回普通 pending，并调用 `__do_softirq()`，因此当时已经置位的其他类别也会在这个线程里一起执行。见 [定时器触发分流](../../linux/include/linux/interrupt.h#L641)、[线程处理](../../linux/kernel/softirq.c#L1128)、[退出时唤醒](../../linux/kernel/softirq.c#L725)。
 
@@ -255,13 +255,13 @@ snapshot = NET_RX，pending = 0
 
 ### 4.1 能否被打断、抢占、并行？
 
-| 问题 | 回答 | 原因 |
-| --- | --- | --- |
-| 硬中断能打断软中断吗？ | 能；回调通常在本地硬中断开启时运行 | 框架在扫描回调前执行 `local_irq_enable()`，回调内部可临时关中断 |
-| 普通任务能抢占正在执行的软中断吗？ | 不能 | 执行期间增加了软中断上下文计数；调度请求在处理退出后响应 |
-| 同一 CPU 会递归执行另一个软中断吗？ | 通用派发路径不会 | 嵌套硬中断返回时，软中断计数仍在，`!in_interrupt()` 不成立 |
-| 同一类软中断能在不同 CPU 同时执行吗？ | 能 | 每 CPU 独立 pending，但可以调用同一个全局处理函数 |
-| 软中断能再次触发自己吗？ | 能，但不会因 raise 立即递归调用 | 新通知保留在 pending，由后续轮次或执行入口处理 |
+| 问题                                  | 回答                               | 原因                                                            |
+| ------------------------------------- | ---------------------------------- | --------------------------------------------------------------- |
+| 硬中断能打断软中断吗？                | 能；回调通常在本地硬中断开启时运行 | 框架在扫描回调前执行 `local_irq_enable()`，回调内部可临时关中断 |
+| 普通任务能抢占正在执行的软中断吗？    | 不能                               | 执行期间增加了软中断上下文计数；调度请求在处理退出后响应        |
+| 同一 CPU 会递归执行另一个软中断吗？   | 通用派发路径不会                   | 嵌套硬中断返回时，软中断计数仍在，`!in_interrupt()` 不成立      |
+| 同一类软中断能在不同 CPU 同时执行吗？ | 能                                 | 每 CPU 独立 pending，但可以调用同一个全局处理函数               |
+| 软中断能再次触发自己吗？              | 能，但不会因 raise 立即递归调用    | 新通知保留在 pending，由后续轮次或执行入口处理                  |
 
 源码：[开中断执行回调](../../linux/kernel/softirq.c#L606)、[上下文计数](../../linux/kernel/softirq.c#L461)、[中断退出检查](../../linux/kernel/softirq.c#L720)、[并发设计说明](../../linux/kernel/softirq.c#L37)。
 
@@ -277,11 +277,11 @@ snapshot = NET_RX，pending = 0
 
 **关 BH、关硬中断、跨 CPU 加锁，分别解决不同的并发来源。**
 
-| 数据被谁共享 | 常见保护方式 | 说明 |
-| --- | --- | --- |
-| 普通任务与软中断 | 任务侧 `spin_lock_bh()` / `spin_unlock_bh()`；软中断侧使用同一把锁 | BH 禁用防本地打断后自锁，spinlock 防其他 CPU 并发 |
-| 多个 CPU 上的软中断 | spinlock、原子操作或合理的 per-CPU 设计 | 仅关本地 BH 不能保护全局共享对象 |
-| 软中断与硬中断 | 软中断侧使用 `spin_lock_irqsave()` 等 IRQ 安全方案，硬中断侧遵循同一锁协议 | 只关 BH 仍会被硬中断打断 |
+| 数据被谁共享        | 常见保护方式                                                               | 说明                                              |
+| ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| 普通任务与软中断    | 任务侧 `spin_lock_bh()` / `spin_unlock_bh()`；软中断侧使用同一把锁         | BH 禁用防本地打断后自锁，spinlock 防其他 CPU 并发 |
+| 多个 CPU 上的软中断 | spinlock、原子操作或合理的 per-CPU 设计                                    | 仅关本地 BH 不能保护全局共享对象                  |
+| 软中断与硬中断      | 软中断侧使用 `spin_lock_irqsave()` 等 IRQ 安全方案，硬中断侧遵循同一锁协议 | 只关 BH 仍会被硬中断打断                          |
 
 典型死锁：任务拿着普通 `spin_lock()` → 硬中断到来 → 返回时执行软中断 → 软中断争用同一把锁 → 任务无法恢复执行并解锁。任务侧 `spin_lock_bh()` 同时关闭本地 BH，才能阻止这条路径。
 
@@ -316,14 +316,14 @@ snapshot = NET_RX，pending = 0
 
 ## 6. 与 tasklet、workqueue、线程化 IRQ 怎么比较？
 
-| 机制 | 执行位置 | 回调能否睡眠 | 面试应抓住的区别 |
-| --- | --- | --- | --- |
-| 硬中断处理函数 | 硬中断上下文 | 不能 | 及时响应设备，把适合延后的工作交出去 |
-| softirq | 软中断上下文 | 不能按普通可睡眠回调使用 | 类别固定，同类可跨 CPU 并行，具体队列自行维护 |
-| tasklet | `TASKLET` / `HI` 软中断 | 不能 | 同一个 tasklet 实例不会跨 CPU 同时运行，不同实例可以并行 |
-| 普通线程型 workqueue | worker 内核线程 | 可以，在满足锁和上下文约束时 | 用 `work_struct` 表示具体工作，适合需要睡眠的延后处理 |
-| `WQ_BH` workqueue | 软中断上下文 | 不能 | 虽叫 workqueue，本版本通过 `TASKLET` / `HI` 路径执行 |
-| 显式线程化 IRQ 的 `thread_fn` | IRQ 内核线程 | 可以，在满足上下文约束时 | 线程执行与某个 IRQ 关联的处理；硬中断部分仍需尽量短 |
+| 机制                          | 执行位置                | 回调能否睡眠                 | 面试应抓住的区别                                         |
+| ----------------------------- | ----------------------- | ---------------------------- | -------------------------------------------------------- |
+| 硬中断处理函数                | 硬中断上下文            | 不能                         | 及时响应设备，把适合延后的工作交出去                     |
+| softirq                       | 软中断上下文            | 不能按普通可睡眠回调使用     | 类别固定，同类可跨 CPU 并行，具体队列自行维护            |
+| tasklet                       | `TASKLET` / `HI` 软中断 | 不能                         | 同一个 tasklet 实例不会跨 CPU 同时运行，不同实例可以并行 |
+| 普通线程型 workqueue          | worker 内核线程         | 可以，在满足锁和上下文约束时 | 用 `work_struct` 表示具体工作，适合需要睡眠的延后处理    |
+| `WQ_BH` workqueue             | 软中断上下文            | 不能                         | 虽叫 workqueue，本版本通过 `TASKLET` / `HI` 路径执行     |
+| 显式线程化 IRQ 的 `thread_fn` | IRQ 内核线程            | 可以，在满足上下文约束时     | 线程执行与某个 IRQ 关联的处理；硬中断部分仍需尽量短      |
 
 tasklet 的串行化来自实例的 `state`：`SCHED` 位合并重复调度。`RUN` 位在 `CONFIG_SMP` 或 `CONFIG_PREEMPT_RT` 下防止同一实例并行执行；两者都没开时 [`tasklet_trylock()`](../../linux/include/linux/interrupt.h#L747) 直接返回 1，单 CPU 上本来也不会跨 CPU 并行。这并非把整个 `TASKLET_SOFTIRQ` 全局串行化。源码：[结构和状态位](../../linux/include/linux/interrupt.h#L688)、[状态位注释](../../linux/include/linux/interrupt.h#L730)、[`tasklet_trylock()`](../../linux/include/linux/interrupt.h#L736)、[`tasklet_schedule()`](../../linux/include/linux/interrupt.h#L755)、[执行检查](../../linux/kernel/softirq.c#L920)。
 
@@ -335,13 +335,13 @@ tasklet 的串行化来自实例的 `state`：`SCHED` 位合并重复调度。`R
 
 先定位**哪个 CPU、哪一类软中断、哪个处理函数消耗时间**，再调查工作量为何集中或处理变慢。
 
-| 观察手段 | 要看什么 | 不能据此直接推断什么 |
-| --- | --- | --- |
-| 连续采样 `/proc/softirqs` | 各 CPU、各类别计数的增量是否集中 | 累计数高不等于当前负载高；回调次数不等于包数或耗时 |
-| `/proc/stat` 的 CPU softirq 时间字段 | 软中断时间占比与 CPU 分布 | 不要把文件末尾 `softirq` 次数行当成时间 |
-| `irq:softirq_entry` / `irq:softirq_exit` | 某类处理的持续时间、执行 CPU | 区间可能包含硬中断插入等影响，不必然等于纯回调 CPU 时间 |
-| `irq:softirq_raise` 与 entry | 通知到处理的延迟 | pending 位会合并，但每次 raise 仍打一个 trace，不能按条数一一配对 |
-| 网络热点时看 `/proc/net/softnet_stat` | `time_squeeze` 等指标是否持续增长 | 预算耗尽不直接等于丢包，也不证明应立即增大预算 |
+| 观察手段                                 | 要看什么                          | 不能据此直接推断什么                                              |
+| ---------------------------------------- | --------------------------------- | ----------------------------------------------------------------- |
+| 连续采样 `/proc/softirqs`                | 各 CPU、各类别计数的增量是否集中  | 累计数高不等于当前负载高；回调次数不等于包数或耗时                |
+| `/proc/stat` 的 CPU softirq 时间字段     | 软中断时间占比与 CPU 分布         | 不要把文件末尾 `softirq` 次数行当成时间                           |
+| `irq:softirq_entry` / `irq:softirq_exit` | 某类处理的持续时间、执行 CPU      | 区间可能包含硬中断插入等影响，不必然等于纯回调 CPU 时间           |
+| `irq:softirq_raise` 与 entry             | 通知到处理的延迟                  | pending 位会合并，但每次 raise 仍打一个 trace，不能按条数一一配对 |
+| 网络热点时看 `/proc/net/softnet_stat`    | `time_squeeze` 等指标是否持续增长 | 预算耗尽不直接等于丢包，也不证明应立即增大预算                    |
 
 源码：[softirqs 计数输出](../../linux/fs/proc/softirqs.c#L11)、[回调前增加计数](../../linux/kernel/softirq.c#L619)、[CPU 时间输出](../../linux/fs/proc/stat.c#L152)、[softirq 次数输出](../../linux/fs/proc/stat.c#L185)、[三个 tracepoint](../../linux/include/trace/events/irq.h#L121)、[网络统计字段输出](../../linux/net/core/net-procfs.c#L145)、[`time_squeeze` 增加条件](../../linux/net/core/dev.c#L7845)。
 
@@ -367,20 +367,20 @@ soft lockup 表示这个 CPU 在内核态里转太久，其他任务得不到运
 
 ## 9. 高频问答与口述模板
 
-| 面试追问 | 简洁回答 |
-| --- | --- |
-| 为什么需要软中断？ | 将适合延后的工作从硬中断处理移出，在保持较低延迟的同时支持批量处理和多 CPU 并行。 |
-| 触发一次就执行一次吗？ | 不保证。pending 按类别置位会合并通知；具体工作保存在子系统数据结构中。 |
-| 软中断一定紧接着硬中断执行吗？ | 不一定。要看上下文和 BH 状态，也可在 BH enable 或 `ksoftirqd` 中处理。 |
-| pending 是全局的吗？ | 每 CPU 独立；全局共享的是类别到处理函数的表。 |
-| 同类软中断能并发吗？ | 能在不同 CPU 并行，访问共享数据需要自行同步。 |
-| 高优先级软中断能抢占低优先级软中断吗？ | 编号只决定同一轮快照中的扫描顺序，不是软中断间的抢占优先级。 |
-| 为什么不能一直处理到 pending 清空？ | 持续有新工作时可能长期占用 CPU；框架限制重启，并让 `ksoftirqd` 接手。 |
-| 为什么有时间限制还要有轮数限制？ | 源码明确考虑了 `jiffies` 可能暂不推进的场景，轮数限制仍能终止重启。 |
-| `ksoftirqd` 什么时候启动？ | 启动阶段按 CPU 创建；普通任务触发、处理仍有积压但不能继续、`threadirqs` 强制线程化等情况会唤醒它。真正处理还要等调度，并检查本 CPU pending。 |
-| `ksoftirqd` 与普通 workqueue 有何本质差别？ | 前者承载软中断处理，回调保留相应上下文约束；普通线程型 workqueue 面向可睡眠工作。 |
-| 关 BH 后为何还要加锁？ | 关 BH 只处理本 CPU 的软中断执行；跨 CPU 共享数据仍需要同步。 |
-| soft lockup 怎么判定？ | 硬中断定时器仍会响，但本 CPU 约 20 秒没能调度 `migration/%u` 去刷新时间戳。 |
+| 面试追问                                    | 简洁回答                                                                                                                                     |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 为什么需要软中断？                          | 将适合延后的工作从硬中断处理移出，在保持较低延迟的同时支持批量处理和多 CPU 并行。                                                            |
+| 触发一次就执行一次吗？                      | 不保证。pending 按类别置位会合并通知；具体工作保存在子系统数据结构中。                                                                       |
+| 软中断一定紧接着硬中断执行吗？              | 不一定。要看上下文和 BH 状态，也可在 BH enable 或 `ksoftirqd` 中处理。                                                                       |
+| pending 是全局的吗？                        | 每 CPU 独立；全局共享的是类别到处理函数的表。                                                                                                |
+| 同类软中断能并发吗？                        | 能在不同 CPU 并行，访问共享数据需要自行同步。                                                                                                |
+| 高优先级软中断能抢占低优先级软中断吗？      | 编号只决定同一轮快照中的扫描顺序，不是软中断间的抢占优先级。                                                                                 |
+| 为什么不能一直处理到 pending 清空？         | 持续有新工作时可能长期占用 CPU；框架限制重启，并让 `ksoftirqd` 接手。                                                                        |
+| 为什么有时间限制还要有轮数限制？            | 源码明确考虑了 `jiffies` 可能暂不推进的场景，轮数限制仍能终止重启。                                                                          |
+| `ksoftirqd` 什么时候启动？                  | 启动阶段按 CPU 创建；普通任务触发、处理仍有积压但不能继续、`threadirqs` 强制线程化等情况会唤醒它。真正处理还要等调度，并检查本 CPU pending。 |
+| `ksoftirqd` 与普通 workqueue 有何本质差别？ | 前者承载软中断处理，回调保留相应上下文约束；普通线程型 workqueue 面向可睡眠工作。                                                            |
+| 关 BH 后为何还要加锁？                      | 关 BH 只处理本 CPU 的软中断执行；跨 CPU 共享数据仍需要同步。                                                                                 |
+| soft lockup 怎么判定？                      | 硬中断定时器仍会响，但本 CPU 约 20 秒没能调度 `migration/%u` 去刷新时间戳。                                                                  |
 
 一分钟口述：
 
