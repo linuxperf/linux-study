@@ -1,5 +1,6 @@
 Vagrant.configure('2') do |config|
-  config.vm.box = 'bento/ubuntu-22.04'
+  config.vm.box = "cloud-image/ubuntu-26.04"
+  config.vm.box_version = "20260927.0.0"
   config.vm.hostname = 'dev'
 
   config.vm.provider 'virtualbox' do |vb|
