@@ -58,7 +58,7 @@ flowchart TD
 - CPU 编号指**逻辑 CPU**。要独占物理核，应把 SMT 兄弟一起分配，见 [`topology_sibling_cpumask()`](../../linux/arch/x86/include/asm/topology.h#L196) 和 sysfs 的 [`thread_siblings_list`](../../linux/drivers/base/topology.c#L80)。分区不隔离共享缓存和内存带宽。
 - 读者只需知道 EEVDF 在每层队列中挑选一个实体；具体公式不在本文展开。
 
-阅读顺序：第 2 章建立两个控制器共用的 cgroup 骨架；第 3～5 章讲 cpu 控制器（数据结构 → 权重 → 配额）；第 6 章讲 cpuset；第 7 章用一个示例把三种机制叠在一起；第 8 章给出验证方法。第一次阅读可以跳过第 4.4～4.5、5.7～5.9 和 6.4 节。
+阅读顺序：第 2 章建立两个控制器共用的 cgroup 骨架；第 3～5 章讲 cpu 控制器（数据结构 → 权重 → 配额）；第 6 章讲 cpuset；第 7 章用一个示例把三种机制叠在一起；第 8 章给出验证方法。第一次阅读可以跳过第 4.4～4.5、5.7～5.9 节，以及 6.4 节的远端分区和 6.8 节。
 
 ## 2. 公共骨架：组、控制器状态与任务归属
 
@@ -966,198 +966,419 @@ A、B 自己还有额度，但 P 已耗尽，二者都要等待。父组不会�
 
 ## 6. cpuset：限定位置与建立独占分区
 
-cpu 控制器回答“在允许的 CPU 上怎样分时间”。cpuset 回答两个问题：**本组任务允许在哪些 CPU 上运行？哪些 CPU 从其他组手里划走、成为本组独占？** 结果分别落实到任务亲和性和调度域。
+cpu 控制器回答“在一颗 CPU 上怎样分时间”，cpuset 回答“任务可以在哪些 CPU 上运行”。它要满足两类需求：**把本组任务限制在一组 CPU 上**，以及**让一组 CPU 只给本组使用**。本章只讲 CPU 部分，不展开 `cpuset.mems` 的内存节点约束和 `SCHED_DEADLINE` 的带宽核算。
 
-### 6.1 `struct cpuset`：请求、有效结果与分区状态
+与本章有关的配置条件：
 
-**掩码**就是 CPU 集合的位图。cpuset 同时保存用户请求和内核计算的结果，摘自 [`struct cpuset`](../../linux/kernel/cgroup/cpuset-internal.h#L74)：
+- 未开启 `CPUSETS_V1`，[`cpuset_v2()`](../../linux/kernel/cgroup/cpuset.c#L335) 恒为真，源码中的 v1 分支不会执行，下文不再提及。
+- `CPUMASK_OFFSTACK` 不在 `.config` 中。x86 上它只能由 `MAXSMP` 选中，或在开启 `DEBUG_PER_CPU_MAPS` 后手动打开，见 [lib/Kconfig](../../linux/lib/Kconfig#L397) 与 [x86 Kconfig](../../linux/arch/x86/Kconfig#L989)，而 [`MAXSMP`](../../linux/.config#L427) 与 [`DEBUG_PER_CPU_MAPS`](../../linux/.config#L10598) 均未开启。因此 `cpumask_var_t` 是单元素数组，见 [类型定义](../../linux/include/linux/cpumask_types.h#L60)，下文的掩码都内嵌在所属结构体中。
+- 开启了 [`HOTPLUG_CPU`](../../linux/.config#L528)，6.8 节的热插拔路径可以在运行时触发。
+
+### 6.1 问题与概览：请求、结果与三处落实
+
+**用户写请求，内核算结果。** cpuset 在每个启用了它的非根组上提供三个可写文件：
+
+| 文件 | 用户表达的意思 |
+| ---- | -------------- |
+| `cpuset.cpus` | 本组任务希望使用哪些 CPU |
+| `cpuset.cpus.exclusive` | 本组希望独占哪些 CPU，可以不写 |
+| `cpuset.cpus.partition` | `member`、`root` 或 `isolated`：是否把本组变成分区根 |
+
+请求不一定能满足：父组没有的 CPU 给不了，已被兄弟独占的 CPU 拿不到，不在 active 状态的 CPU 用不上。**active CPU** 指已经可以接收普通任务的 CPU，热插拔过程中它与 online 不完全相同，见 [`top_cpuset` 前的说明](../../linux/kernel/cgroup/cpuset.c#L196)。内核据此为每个组算出**有效集合**，读 `cpuset.cpus.effective` 看到的就是它。
+
+**两种约束强度。** 只写 `cpuset.cpus` 得到的是**放置约束**：本组任务被限制在有效集合内，但这些 CPU 仍对其他组开放。把 `cpuset.cpus.partition` 写成 `root` 或 `isolated` 才建立**分区**（partition）：分区从父分区的有效集合中**划出**一组独占 CPU，分区外的普通任务从此不能再使用它们。8 颗 CPU 的机器上：
+
+| 组 A 的配置 | A 中任务可用 | 根组和其他组的任务可用 |
+| ----------- | ------------ | ---------------------- |
+| `cpuset.cpus = 4-7`，保持 `member` | 4-7 | 0-7 |
+| 再写 `cpuset.cpus.partition = root` | 4-7 | 0-3 |
+
+**结果落实到三处。**
+
+| 落实到 | 回答的问题 | 章节 |
+| ------ | ---------- | ---- |
+| 每个任务的 `cpus_mask` | 这个任务允许在哪些 CPU 上运行？ | 6.6 |
+| 调度域 `sched_domain` 与 `root_domain` | 调度器在哪些 CPU 之间做负载均衡？ | 6.7 |
+| 全局隔离集合 `isolated_cpus` | 哪些 CPU 不再承担 unbound 工作队列等内核工作？ | 6.7 |
+
+下面的概念图从左到右表示“事件 → 重算 → 落实”，箭头表示数据流向：
+
+```mermaid
+flowchart LR
+    W["写 cpuset.cpus<br/>cpuset.cpus.exclusive<br/>cpuset.cpus.partition"] --> CALC
+    HP["CPU 热插拔"] --> CALC
+    CALC["重算有效集合与分区状态"]
+    CALC --> AFF["任务 cpus_mask"]
+    CALC --> SD["调度域与 root_domain"]
+    CALC --> ISO["isolated_cpus"]
+    MV["任务迁入、fork"] -->|"读取有效集合"| AFF
+    SA["sched_setaffinity()"] -->|"与有效集合求交"| AFF
+```
+
+配置写入和热插拔会改变有效集合，因此要遍历受影响的组及其中的任务；任务迁入、fork 和用户设置亲和性只读取已经算好的结果。唤醒选核和负载均衡只看任务的 `cpus_ptr` 和 CPU 的调度域，不访问 cpuset；只有任务掩码中找不到可用 CPU 时，兜底的 [`select_fallback_rq()`](../../linux/kernel/sched/core.c#L3508) 才回头查询 cpuset。
+
+### 6.2 核心数据结构：每组四个掩码与全局账本
+
+**`struct cpuset`。** 摘自 [`struct cpuset`](../../linux/kernel/cgroup/cpuset-internal.h#L74)，只保留与 CPU 有关的成员，中文注释为阅读说明：
 
 ```c
 struct cpuset {
-    struct cgroup_subsys_state css;  /* 内嵌 cpuset 的 css */
-    unsigned long flags;             /* 负载均衡等标志 */
+    struct cgroup_subsys_state css;  /* 内嵌 css，css_cs() 由它找回外层对象 */
+    unsigned long flags;             /* CS_CPU_EXCLUSIVE、CS_SCHED_LOAD_BALANCE 等 */
     cpumask_var_t cpus_allowed;      /* 请求：cpuset.cpus */
     /* 省略内存节点 */
     cpumask_var_t effective_cpus;    /* 结果：本组任务可用的 CPU */
     /* 省略 */
-    cpumask_var_t effective_xcpus;   /* 结果：有效独占候选，可含离线 CPU */
+    cpumask_var_t effective_xcpus;   /* 结果：本组的有效独占集合 */
     cpumask_var_t exclusive_cpus;    /* 请求：cpuset.cpus.exclusive */
     /* 省略 */
-    int nr_subparts;                 /* 有效本地子分区数 */
-    int partition_root_state;        /* member / root / isolated 及 invalid */
+    int attach_in_progress;          /* 正在迁入本组的批次数 */
     /* 省略 */
+    int nr_subparts;                 /* 有效本地子分区的个数 */
+    int partition_root_state;        /* 分区状态 */
+    /* 省略 DEADLINE 统计 */
     enum prs_errcode prs_err;        /* 分区无效的原因 */
-    struct cgroup_file partition_file;
+    struct cgroup_file partition_file; /* 分区状态变化时通知用户态 */
+    struct list_head remote_sibling; /* 远端分区挂入全局 remote_children */
     /* 省略 */
 };
 ```
 
-字段位置见 [`effective_xcpus`](../../linux/kernel/cgroup/cpuset-internal.h#L119) 与 [分区成员](../../linux/kernel/cgroup/cpuset-internal.h#L158)。
+字段位置见 [四个掩码](../../linux/kernel/cgroup/cpuset-internal.h#L99)、[`attach_in_progress`](../../linux/kernel/cgroup/cpuset-internal.h#L149)、[分区成员](../../linux/kernel/cgroup/cpuset-internal.h#L158) 和 [`prs_err` 至 `remote_sibling`](../../linux/kernel/cgroup/cpuset-internal.h#L172)。四个掩码两两成对：
 
-| 字段 | 用户接口 | 含义 |
-| ---- | -------- | ---- |
-| `cpus_allowed` | `cpuset.cpus` | 放置请求；分区未设 exclusive 时也作独占请求 |
-| `effective_cpus` | `cpuset.cpus.effective` | 本组任务实际可用范围 |
-| `exclusive_cpus` | `cpuset.cpus.exclusive` | 独占请求 |
-| `effective_xcpus` | `cpuset.cpus.exclusive.effective` | 沿祖先约束计算出的独占候选 |
-| `partition_root_state` | `cpuset.cpus.partition` | 分区状态 |
+| 字段 | 接口文件 | 谁写 | 含义 |
+| ---- | -------- | ---- | ---- |
+| `cpus_allowed` | `cpuset.cpus` | 用户 | 放置请求；为空表示沿用父组 |
+| `exclusive_cpus` | `cpuset.cpus.exclusive` | 用户 | 显式的独占请求；为空时由 `cpus_allowed` 代替。代替后的结果本章称为**独占请求**，由 [`user_xcpus()`](../../linux/kernel/cgroup/cpuset.c#L573) 给出 |
+| `effective_cpus` | `cpuset.cpus.effective` | 内核 | 本组任务实际可用的 CPU，正常只含 active CPU |
+| `effective_xcpus` | `cpuset.cpus.exclusive.effective` | 内核 | 有效独占集合：分区实际拥有的、或可以继续向下传递的独占 CPU，可含离线 CPU |
 
-分区状态的定义见 [状态常量](../../linux/kernel/cgroup/cpuset.c#L129)：
+文件与字段的对应见 [`cpuset_common_seq_show()`](../../linux/kernel/cgroup/cpuset.c#L3466)。热插拔只改变结果，不改变请求，见 [v2 行为说明](../../linux/kernel/cgroup/cpuset.c#L341)。按 [字段注释](../../linux/kernel/cgroup/cpuset-internal.h#L116)，`effective_xcpus` 只在显式写了 `cpuset.cpus.exclusive`、或本组成为本地分区根时才设置；远端分区则在 [启用时](../../linux/kernel/cgroup/cpuset.c#L1617) 直接写入。
 
-| 状态 | 值 | 从父分区拿走 CPU？ | 自身 CPU 参加负载均衡？ |
-| ---- | -- | ------------------ | ----------------------- |
-| `member` | 0 | 否，只限制本组 | 随所属分区 |
-| `root` | 1 | 是 | 是，在分区内部均衡 |
-| `isolated` | 2 | 是 | 否 |
-| `root invalid` / `isolated invalid` | −1 / −2 | 否 | 按 member 处理 |
+**分区状态。** [`partition_root_state`](../../linux/kernel/cgroup/cpuset.c#L109) 的取值：
 
-这里的 `root` 是**分区根**，不是目录树的根。整棵树的根组在内部就是 `PRS_ROOT`，见 [`top_cpuset`](../../linux/kernel/cgroup/cpuset.c#L210)，但没有 `cpuset.cpus.partition` 文件，见 [`CFTYPE_NOT_ON_ROOT`](../../linux/kernel/cgroup/cpuset.c#L3595)。
+| 值 | 宏 | 读 `cpuset.cpus.partition` 显示 | 从父分区划出 CPU | 本组 CPU 的负载均衡 |
+| -- | -- | ------------------------------ | ---------------- | ------------------ |
+| 0 | `PRS_MEMBER` | `member` | 否 | 随所在分区 |
+| 1 | `PRS_ROOT` | `root` | 是 | 在本分区内部均衡 |
+| 2 | `PRS_ISOLATED` | `isolated` | 是 | 不均衡 |
+| −1 | `PRS_INVALID_ROOT` | `root invalid (原因)` | 否，按 member 计算有效集合 | 随父组 |
+| −2 | `PRS_INVALID_ISOLATED` | `isolated invalid (原因)` | 同上 | 同上 |
 
-**先看分区状态，再选计算方式。** member 的有效集合来自父组的 `effective_cpus`；有效分区的有效集合来自 `effective_xcpus`，再去掉不可用 CPU 和子分区占用。显式设置了 `exclusive_cpus` 的有效分区，其 `effective_cpus` 甚至不必是 `cpus_allowed` 的子集，见 [字段注释](../../linux/kernel/cgroup/cpuset-internal.h#L108)。下面依次讲两条路径。
+无效状态是有效状态取负，见 [`make_partition_invalid()`](../../linux/kernel/cgroup/cpuset.c#L176)。取负保留了用户想要的分区类型：条件恢复时把符号翻回即可，见 [有效性翻转](../../linux/kernel/cgroup/cpuset.c#L2052)。显示逻辑见 [`cpuset_partition_show()`](../../linux/kernel/cgroup/cpuset.c#L3499)。这里的“分区根”不是目录树的根：根组的 `top_cpuset` 内部恒为 `PRS_ROOT`，但没有 `cpuset.cpus.partition` 文件。
 
-任务找到 cpuset 的路径与第 2 章相同，只是外层对象换成 `struct cpuset`：
+**两个标志位。** `CS_CPU_EXCLUSIVE` 在建立分区时置位，分区失效或撤销时清除，见 [`update_partition_exclusive_flag()`](../../linux/kernel/cgroup/cpuset.c#L1252)；置位后，兄弟组的独占请求不得与本组重叠，检查见 [`cpus_excl_conflict()`](../../linux/kernel/cgroup/cpuset.c#L613)。`CS_SCHED_LOAD_BALANCE` 在建组时默认置位，见 [`cpuset_css_alloc()`](../../linux/kernel/cgroup/cpuset.c#L3654)；有效 isolated 分区清除它，其他有效分区置位，非分区组跟随父组，见 [`update_partition_sd_lb()`](../../linux/kernel/cgroup/cpuset.c#L1273)。v2 生成调度域时只看 `partition_root_state`（6.7 节），这个位用于让新组和非分区后代继承父组的均衡属性，见 [上线时继承](../../linux/kernel/cgroup/cpuset.c#L3681) 与 [重算时继承](../../linux/kernel/cgroup/cpuset.c#L2374)。
 
-```text
-task_struct.cgroups → css_set.subsys[cpuset_cgrp_id] → cpuset.css
-                                                      ↓ css_cs()
-                                                   struct cpuset → effective_cpus
+**全局状态。** 有些信息不属于任何一个组：
+
+| 对象 | 含义 | 依据 |
+| ---- | ---- | ---- |
+| `top_cpuset` | 根组的 cpuset，静态分配，状态恒为 `PRS_ROOT`，带 `CS_CPU_EXCLUSIVE` 与 `CS_SCHED_LOAD_BALANCE` | [定义](../../linux/kernel/cgroup/cpuset.c#L210) |
+| `subpartitions_cpus` | 根分区划给子分区（本地与远端）的全部独占 CPU | [定义](../../linux/kernel/cgroup/cpuset.c#L73) |
+| `isolated_cpus` | 处在 isolated 分区中的独占 CPU，另含启动时隔离的 CPU | [定义](../../linux/kernel/cgroup/cpuset.c#L79)、[启动初始化](../../linux/kernel/cgroup/cpuset.c#L3932) |
+| `remote_children` | 远端分区链表，节点是各组的 `remote_sibling` | [定义](../../linux/kernel/cgroup/cpuset.c#L90) |
+| `force_sd_rebuild` | 本次操作结束前是否要重建调度域 | [定义与说明](../../linux/kernel/cgroup/cpuset.c#L93) |
+
+根组的掩码由内核维护：`cpus_allowed` 与 `effective_xcpus` 是全部 possible CPU（本机可能出现的所有 CPU，含尚未上线的），见 [`cpuset_bind()`](../../linux/kernel/cgroup/cpuset.c#L3779)；`effective_cpus` 保持为“active CPU − `subpartitions_cpus`”，建立和撤销分区时由 6.4 节的 `partition_xcpus_add()/del()` 增删，热插拔时整体重算，见 [热插拔重算](../../linux/kernel/cgroup/cpuset.c#L4125)。根组没有可写的 cpuset 文件（`CFTYPE_NOT_ON_ROOT`），写入函数也对它直接返回 `-EACCES`，见 [`cpuset_write_resmask()`](../../linux/kernel/cgroup/cpuset.c#L3410)。
+
+**对象关系。** 下图中实线表示指针或链表连接，虚线表示由 css 换算外层对象或按值复制：
+
+```mermaid
+flowchart LR
+    TASK["task_struct"] -->|"cgroups"| CSET["css_set"]
+    CSET -->|"subsys[cpuset_cgrp_id]"| CSS["cpuset.css"]
+    CSS -.->|"css_cs()"| CS["struct cpuset"]
+    CS -->|"css.parent，经 parent_cs()"| PCS["父组 struct cpuset"]
+    CS -->|"remote_sibling，仅远端分区"| RC["全局 remote_children"]
+    CS -.->|"有效集合按值写入"| MASK["task_struct.cpus_mask"]
 ```
 
-cpuset 沿 `css.parent` 找父组，见 [`parent_cs()`](../../linux/kernel/cgroup/cpuset-internal.h#L196)。
+查找路径见 [`task_cs()`](../../linux/kernel/cgroup/cpuset-internal.h#L191) 与 [`parent_cs()`](../../linux/kernel/cgroup/cpuset-internal.h#L196)。要注意最后一条边：任务从 cpuset 得到的是**值的副本**，`cpus_mask` 内嵌在 `task_struct` 中，见 [`cpus_mask`](../../linux/include/linux/sched.h#L920)，并不指向 cpuset 的掩码。从结构上看，代价是有效集合一变就要遍历组内任务逐个改写；换来的是唤醒和选核只读任务自己的字段，不必经 `css_set` 找 cpuset，也不必获取 cpuset 的锁。
 
-### 6.2 `member`：有效集合 = 请求 ∩ 父组有效集合
+**锁。** [源码注释](../../linux/kernel/cgroup/cpuset.c#L218) 规定了两级锁协议，修改路径还要持 CPU 热插拔读锁：
 
-普通成员的有效集合由 [`compute_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1227) 计算：
+| 锁 | 类型 | 谁持有 | 作用 |
+| -- | ---- | ------ | ---- |
+| `cpus_read_lock()` | 热插拔锁的读端 | 所有修改路径 | 修改过程中 CPU 不会上下线 |
+| `cpuset_mutex` | 互斥锁 | 修改路径，以及 attach、fork | 串行化修改；持有时可以睡眠和分配内存 |
+| `callback_lock` | 关中断自旋锁 | 修改者真正写入掩码与状态的瞬间；只读者 | 让只读者看到一致的掩码 |
+
+修改者先用 [`cpuset_full_lock()`](../../linux/kernel/cgroup/cpuset.c#L276) 取前两把，做完检查和内存分配，再短暂持 `callback_lock` 写入。只读者只取 `callback_lock`，例如读文件的 [`cpuset_common_seq_show()`](../../linux/kernel/cgroup/cpuset.c#L3464) 和供 `sched_setaffinity()` 使用的 [`cpuset_cpus_allowed()`](../../linux/kernel/cgroup/cpuset.c#L4244)。改写任务亲和性要取任务的 `pi_lock` 与 rq 锁，还可能等待迁移完成（6.6 节），所以 cpuset 总是在**释放 `callback_lock` 之后**才更新任务。
+
+**不变量。** 后文的算法都在维护下面这些关系：
+
+| 不变量 | 依据 |
+| ------ | ---- |
+| member 与无效分区：`effective_cpus = cpus_allowed ∩ 父组 effective_cpus`，结果为空时取父组 `effective_cpus` | [`compute_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1227)、[空集继承](../../linux/kernel/cgroup/cpuset.c#L2284)、[`reset_partition_data()`](../../linux/kernel/cgroup/cpuset.c#L1330) |
+| 有效分区：`effective_cpus = (独占候选 ∩ active) − 各有效子分区的 effective_xcpus`，其中独占候选 = 独占请求 ∩ 父组 `effective_xcpus`（6.3 节） | [`compute_partition_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2158) |
+| 有效本地分区的独占 CPU 已从父分区的 `effective_cpus` 中删除 | [`partition_xcpus_add()`](../../linux/kernel/cgroup/cpuset.c#L1377) |
+| 同一父组下，有效分区的独占请求与每个兄弟的独占请求互不重叠 | [`cpus_excl_conflict()`](../../linux/kernel/cgroup/cpuset.c#L616) |
+| 有任务的父分区不能被划空；有任务的分区必须含 active CPU | [`tasks_nocpu_error()`](../../linux/kernel/cgroup/cpuset.c#L1303) |
+| 根组 `effective_cpus` = active CPU − `subpartitions_cpus` | 见上文“全局状态” |
+
+### 6.3 算法一：自上而下重算有效集合
+
+**目标与输入输出。** 某个组的请求或分区状态变化后，要重新算出它的子树中每个组的 `effective_cpus`，并更新组内任务。输入是各组的请求、分区状态和 `cpu_active_mask`，输出是新的有效集合和任务亲和性。实现是 [`update_cpumasks_hier()`](../../linux/kernel/cgroup/cpuset.c#L2227)。
+
+**先父后子。** 子组的结果依赖父组的 `effective_cpus`，所以遍历采用先序 [`cpuset_for_each_descendant_pre`](../../linux/kernel/cgroup/cpuset-internal.h#L266)：访问一个组时，它的父组已经算完。每个组按状态选择公式，见 [公式选择](../../linux/kernel/cgroup/cpuset.c#L2266)。下面是简化逻辑：
+
+```text
+（伪代码，省略远端分区、分区失效与恢复、锁）
+for cp in 先序遍历(起点组的子树):
+    if cp 是有效分区 且 父组也是有效分区:
+        new = compute_excpus(cp) ∩ active            # 分区公式
+        new -= cp 下各有效子分区的 effective_xcpus
+    else:
+        new = cp.cpus_allowed ∩ 父组.effective_cpus  # member 公式
+        if new 为空:
+            new = 父组.effective_cpus                # 空请求或无交集时继承
+    if cp 是 member 且 new 未变 且 未要求强制 且 均衡属性与父组相同:
+        跳过 cp 的整棵子树                            # 后代的结果不会变
+        continue
+    持 callback_lock：写入 cp.effective_cpus，按需更新 cp.effective_xcpus
+    cpuset_update_tasks_cpumask(cp)                  # 已释放 callback_lock
+```
+
+源码见 [空集继承](../../linux/kernel/cgroup/cpuset.c#L2284)、[跳过子树](../../linux/kernel/cgroup/cpuset.c#L2293)、[写回](../../linux/kernel/cgroup/cpuset.c#L2350) 与 [更新任务](../../linux/kernel/cgroup/cpuset.c#L2372)。“跳过子树”只对 member 生效：有效或无效分区总要继续检查，因为它们可能需要与父组交换 CPU，或改变有效性。
+
+**独占候选。** 分区公式中的 [`compute_excpus()`](../../linux/kernel/cgroup/cpuset.c#L1528)：
 
 ```c
-cpumask_and(new_cpus, cs->cpus_allowed, parent->effective_cpus);
+static int compute_excpus(struct cpuset *cs, struct cpumask *excpus)
+{
+    struct cpuset *parent = parent_cs(cs);
+
+    cpumask_and(excpus, user_xcpus(cs), parent->effective_xcpus);
+
+    if (!cpumask_empty(cs->exclusive_cpus))
+        return 0;
+
+    return rm_siblings_excl_cpus(parent, cs, excpus);
+}
 ```
 
-v2 中交集为空时，[继承父组的有效集合](../../linux/kernel/cgroup/cpuset.c#L2290)。所以 `cpuset.cpus` 只是请求，`cpuset.cpus.effective` 才是约束。
+独占候选 = 本组独占请求 ∩ 父组有效独占集合。没有显式写 `cpuset.cpus.exclusive` 时，还要去掉兄弟已申请或已占用的独占 CPU，见 [`rm_siblings_excl_cpus()`](../../linux/kernel/cgroup/cpuset.c#L1486)，返回值是发生重叠的兄弟个数。根组的有效独占集合是全部 possible CPU，所以根组的直接子组可以申请任意 possible CPU。
+
+**数值例子。** 8 颗 CPU 全部 active。中间一列是所有组都为 member 时的结果，右列是 A 成为有效 root 分区之后的结果：
 
 ```text
-根组 effective = 0-7
-├── A：cpus = 4-7，member → effective = 4-7，A 的任务只能跑 4-7
-└── B：cpus 未写        → effective = 0-7
-
-根组与 B 的任务仍然可以使用 4-7
+组               请求            全为 member         A 成为有效 root 分区后
+根组             —               0-7                 0-3
+├── A            cpus = 4-7      4-7                 4-7（分区公式）
+│   └── A1       cpus = 2-5      4-5（2-5 ∩ 4-7）    4-5
+└── B            未写            0-7（继承根组）      0-3（继承根组）
+    └── B1       cpus = 6-7      6-7                 0-3（6-7 ∩ 0-3 为空，继承 B）
 ```
 
-这叫**放置约束**：限制本组，不排斥别人。兄弟组的有效集合重叠时，任务会在同一颗 CPU 上排队，由 `cpu.weight` / `cpu.max` 继续约束时间。若父组后来只剩 0-3，A 的请求 4-7 与之交集为空，A 的有效集合就回退为 0-3。
+B1 体现了 member 公式最容易误解的一点：**请求落空不会报错，而是退回父组的集合**。`cpuset.cpus` 只是请求，`cpuset.cpus.effective` 才是任务实际受到的约束。
 
-“空交集会继承”不等于“随时可以清空配置”：对已有任务的非根组，把原本非空的 `cpuset.cpus` 改为空会返回 `-ENOSPC`，见 [`validate_change()`](../../linux/kernel/cgroup/cpuset.c#L679) 与 [`cpuset_is_populated()`](../../linux/kernel/cgroup/cpuset.c#L355)。
+**写入时的硬性检查。** 有两种请求会被直接拒绝：CPU 列表不是 possible CPU 的子集时返回 `-EINVAL`，见 [`parse_cpuset_cpulist()`](../../linux/kernel/cgroup/cpuset.c#L2461)；本组或其后代有任务、或正有任务迁入时，把非空的 `cpuset.cpus` 改为空返回 `-ENOSPC`，见 [`validate_change()`](../../linux/kernel/cgroup/cpuset.c#L679) 与 [`cpuset_is_populated()`](../../linux/kernel/cgroup/cpuset.c#L355)。
 
-### 6.3 `root`：从父分区划走 CPU
+**牵连兄弟。** 分区的建立、撤销和调整会改变**父组**的 `effective_cpus`，父组的其他子组随之要重算。[`update_sibling_cpumasks()`](../../linux/kernel/cgroup/cpuset.c#L2413) 对非分区兄弟先按 member 公式试算，结果不变就跳过；远端分区兄弟不依赖父组集合，直接跳过；其余兄弟以自己为起点调用 `update_cpumasks_hier()`。上例中 A 成为分区后，B 和 B1 就是经这条路径从 0-7、6-7 变成 0-3 的。
 
-把 A 的 `cpuset.cpus.partition` 写成 `root`。父组是根组（有效分区），所以建立的是**本地分区**：
+### 6.4 算法二：分区的建立、失效与撤销
 
-```text
-启用前：根组 effective = 0-7；A：cpus = 4-7，member
+**核心操作：划出与归还。** 分区的各种状态迁移最终都落到一对函数上：建立分区时把独占 CPU 从父分区的 `effective_cpus` 中删去，撤销或失效时再加回去。摘自 [`partition_xcpus_add()`](../../linux/kernel/cgroup/cpuset.c#L1358)，中文注释为阅读说明：
 
-A 成为有效 root 后：
-  A.effective_xcpus = 4-7
-  A.effective_cpus  = 4-7
-  根组 effective    = 0-3     ← 4-7 已从父分区拿走
-  根组普通任务的亲和性不再包含 4-7
+```c
+static bool partition_xcpus_add(int new_prs, struct cpuset *parent,
+                                struct cpumask *xcpus)
+{
+    bool isolcpus_updated;
+
+    WARN_ON_ONCE(new_prs < 0);
+    lockdep_assert_held(&callback_lock);
+    if (!parent)
+        parent = &top_cpuset;           /* 远端分区：直接向根分区要 CPU */
+
+    if (parent == &top_cpuset)           /* 根分区划出的 CPU 记入全局集合 */
+        cpumask_or(subpartitions_cpus, subpartitions_cpus, xcpus);
+
+    /* 子分区与父分区的隔离属性不同时，才调整 isolated_cpus */
+    isolcpus_updated = (new_prs != parent->partition_root_state);
+    if (isolcpus_updated)
+        isolated_cpus_update(parent->partition_root_state, new_prs,
+                             xcpus);
+
+    cpumask_andnot(parent->effective_cpus, parent->effective_cpus, xcpus);
+    return isolcpus_updated;
+}
 ```
 
-写入走 [`cpuset_partition_write()`](../../linux/kernel/cgroup/cpuset.c#L3530) → [`update_prstate()`](../../linux/kernel/cgroup/cpuset.c#L3050) → [`update_parent_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1811)，关键步骤是：
+[`partition_xcpus_del()`](../../linux/kernel/cgroup/cpuset.c#L1390) 做相反的操作，但只把其中的 active CPU 加回父组，见 [与 active 求交](../../linux/kernel/cgroup/cpuset.c#L1408)。
 
-1. [`compute_excpus()`](../../linux/kernel/cgroup/cpuset.c#L1528) 计算独占候选：`user_xcpus(cs) ∩ parent.effective_xcpus`；未显式写 exclusive 时，还要去掉兄弟已申请的独占 CPU。其中 [`user_xcpus()`](../../linux/kernel/cgroup/cpuset.c#L573) 在 `exclusive_cpus` 为空时取 `cpus_allowed`。
-2. 检查候选非空、不与兄弟冲突、不与启动隔离冲突，且不能把仍有任务的父分区抽空，见 [`tasks_nocpu_error()`](../../linux/kernel/cgroup/cpuset.c#L1303) 和 [`partition_is_populated()`](../../linux/kernel/cgroup/cpuset.c#L373)。
-3. [`partition_xcpus_add()`](../../linux/kernel/cgroup/cpuset.c#L1358) 从**父分区**的 `effective_cpus` 中删除这些 CPU；父分区是根组时还记入全局 `subpartitions_cpus`。
-4. [更新父组任务及受影响的兄弟子树](../../linux/kernel/cgroup/cpuset.c#L2125)，再更新本分区及后代。
-5. 标记需要重建调度域。
+这里有两处容易忽略：`subpartitions_cpus` 只记录**根分区**划出的 CPU，分区内部再嵌套的子分区不改变它；`isolated_cpus` 按“子分区与父分区状态是否不同”维护，见 [`isolated_cpus_update()`](../../linux/kernel/cgroup/cpuset.c#L1340)。例如 A 是根组下 CPU 4-7 的 root 分区，A 的子组 A2 申请 6-7 建 isolated 分区：A 的 `effective_cpus` 变为 4-5，`nr_subparts` 加一，6-7 进入 `isolated_cpus`，而 `subpartitions_cpus` 仍是 4-7。
 
-有效分区自己的 `effective_cpus` 由 [`compute_partition_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2158) 计算：独占集合 ∩ active CPU（已上线且进入调度可用状态的 CPU；热插拔过程中它与 online 不完全相同），再扣除子分区占用。A 若把 6-7 再划给子分区，A 自己只剩 4-5。
+**状态机。** 下图是 `partition_root_state` 的迁移。用户写入触发的是从 `member` 出发、两种有效状态互换和回到 `member` 这几条边；有效与无效之间的往返大多由其他事件触发：
 
-**独占候选不等于已经独占。** member 显式设置 `exclusive_cpus` 后也会有非空的 `effective_xcpus`，见 [`compute_trialcs_excpus()`](../../linux/kernel/cgroup/cpuset.c#L1554)，但只有有效分区才调用 `partition_xcpus_add()` 划走 CPU。不能仅凭 `.exclusive.effective` 非空判断隔离已生效。
+```mermaid
+stateDiagram-v2
+    state "member" as M
+    state "有效分区（root / isolated）" as V
+    state "无效分区（状态取负）" as I
+    [*] --> M
+    M --> V: 写 root / isolated，检查通过
+    M --> I: 写 root / isolated，检查失败
+    V --> V: root 与 isolated 互换
+    V --> I: 兄弟冲突、父组失效、CPU 不足、热插拔
+    I --> V: 被重算时条件已恢复
+    V --> M: 写 member 或删除目录
+    I --> M: 写 member
+```
 
-### 6.4 远端分区、invalid 状态与全局掩码
+**建立：检查什么。** [`update_prstate()`](../../linux/kernel/cgroup/cpuset.c#L3050) 先置 `CS_CPU_EXCLUSIVE`，再按父组状态选路径：父组是有效分区时建立**本地分区**，主要检查在 [`update_parent_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1811) 的 `partcmd_enable` / `partcmd_enablei` 分支中进行；否则尝试**远端分区**（本节末尾）。本地分区的检查依次为：
 
-**远端分区。** 父组本身不是有效分区时，可以走需要 `CAP_SYS_ADMIN` 的远端路径 [`remote_partition_enable()`](../../linux/kernel/cgroup/cpuset.c#L1584)，直接从根分区划 CPU。这要求沿祖先设置 `cpuset.cpus.exclusive`，把候选一路传下来，见 [本地与远端分区说明](../../linux/kernel/cgroup/cpuset.c#L118)。“远端”指目录父组与实际划出 CPU 的分区不在同一层：
+| 检查 | 失败码 | 读回时括号中的原因 | 依据 |
+| ---- | ------ | ------------------ | ---- |
+| 兄弟的独占请求与本组重叠 | `PERR_NOTEXCL` | Cpu list in cpuset.cpus not exclusive | [置位与检查](../../linux/kernel/cgroup/cpuset.c#L3069) |
+| `cpuset.cpus` 与 `cpuset.cpus.exclusive` 都为空 | `PERR_CPUSEMPTY` | cpuset.cpus and cpuset.cpus.exclusive are empty | [检查](../../linux/kernel/cgroup/cpuset.c#L3077) |
+| 父组是根组，而本组 exclusive 请求与根分区已划出的 CPU 重叠 | `PERR_REMOTE` | Have remote partition underneath | [检查](../../linux/kernel/cgroup/cpuset.c#L3082) |
+| 独占候选为空 | `PERR_INVCPUS` | Invalid cpu list in cpuset.cpus.exclusive | [检查](../../linux/kernel/cgroup/cpuset.c#L1878) |
+| 候选含启动时隔离的 CPU，却要建 root | `PERR_HKEEPING` | partition config conflicts with housekeeping setup | [`prstate_housekeeping_conflict()`](../../linux/kernel/cgroup/cpuset.c#L1763) |
+| 建 isolated 会用光 `nohz_full` 下的 housekeeping CPU | `PERR_HKEEPING` | 同上 | [`isolated_cpus_can_update()`](../../linux/kernel/cgroup/cpuset.c#L1425) |
+| 划出后有任务的父分区没有 CPU，或有任务的本组没有 active CPU | `PERR_NOCPUS` | Parent unable to distribute cpu downstream | [`tasks_nocpu_error()`](../../linux/kernel/cgroup/cpuset.c#L1303) |
+
+原因字符串见 [`perr_strings[]`](../../linux/kernel/cgroup/cpuset.c#L55)。表中的 **housekeeping CPU** 指仍承担普通内核工作的 CPU：启动参数 `isolcpus=` 默认把 CPU 移出 `HK_TYPE_DOMAIN` 类，`nohz_full=` 把 CPU 移出 `HK_TYPE_KERNEL_NOISE` 类，见 [`housekeeping_nohz_full_setup()`](../../linux/kernel/sched/isolation.c#L190) 与 6.7 节。第一项比较的是双方的 `user_xcpus()`：写过 `cpuset.cpus.exclusive` 就用它，否则用 `cpuset.cpus`。所以只要某个没写 `cpuset.cpus.exclusive` 的兄弟，其 `cpuset.cpus` 与本组重叠，本组就建不成分区；兄弟的两个请求都为空则不构成冲突。
+
+**失败不等于写入失败。** 检查失败时，[`update_prstate()`](../../linux/kernel/cgroup/cpuset.c#L3133) 把目标状态取负、清除 `CS_CPU_EXCLUSIVE`、记下 `prs_err`，然后照常[返回 0](../../linux/kernel/cgroup/cpuset.c#L3167)。写系统调用因此返回成功，只有读回 `cpuset.cpus.partition` 才能看到 `root invalid (...)`。[`cpuset_partition_write()`](../../linux/kernel/cgroup/cpuset.c#L3530) 只在写入的值不认识（`-EINVAL`）、组已下线（`-ENODEV`）或分配临时掩码失败（`-ENOMEM`）时让写入失败。
+
+**建立：改了什么。** 检查通过后，`update_parent_effective_cpumask()` 在 `callback_lock` 内写入新状态、调用 `partition_xcpus_add()` 从父分区划出候选、给父组的 `nr_subparts` 加一，见 [提交](../../linux/kernel/cgroup/cpuset.c#L2098)；释放锁后更新 unbound 工作队列，再让父组的任务和兄弟子树按新的父组集合重算，见 [更新父组与兄弟](../../linux/kernel/cgroup/cpuset.c#L2125)。回到 `update_prstate()` 后，用 `update_cpumasks_hier()` 按分区公式算出本组及后代的集合，见 [调用处](../../linux/kernel/cgroup/cpuset.c#L3153)，最后设置均衡标志、要求重建调度域并通知用户态。6.5 节按时间顺序画出这条路径。
+
+**root 与 isolated 互换。** 两种有效状态之间切换不移动 CPU，只改 `isolated_cpus` 和均衡标志，见 [切换分支](../../linux/kernel/cgroup/cpuset.c#L3107)。
+
+**撤销。** 写 `member` 时，本地分区走 `partcmd_disable` 分支，把有效独占集合还给父分区，见 [归还分支](../../linux/kernel/cgroup/cpuset.c#L1909)；远端分区走 [`remote_partition_disable()`](../../linux/kernel/cgroup/cpuset.c#L1640)。删除目录时，[`cpuset_css_killed()`](../../linux/kernel/cgroup/cpuset.c#L3756) 对有效分区做同样的事。撤销后本组按 member 公式重算；它下面的有效子分区因为“父组不再是分区”而失效，原因是 `PERR_NOTPART`，见 [子分区失效](../../linux/kernel/cgroup/cpuset.c#L2315)。
+
+**被动失效。** 分区建立后，以下事件可以让它失效。失效时 CPU 还给父分区，用户写入的请求保留：
+
+| 事件 | 结果 | 依据 |
+| ---- | ---- | ---- |
+| 兄弟写 `cpuset.cpus`，与有效分区重叠 | 兄弟的写入**成功**，冲突的分区失效，读回时不带原因 | [`cpus_allowed_validate_change()`](../../linux/kernel/cgroup/cpuset.c#L2504) |
+| 兄弟写 `cpuset.cpus.exclusive`，与有效分区重叠 | 兄弟的写入失败，返回 `-EINVAL`，分区不受影响 | [`update_exclusive_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2662) |
+| 本分区改 `cpuset.cpus` 或 `cpuset.cpus.exclusive` | 仍满足条件就按新集合与父分区交换 CPU，否则失效 | [`partition_cpus_change()`](../../linux/kernel/cgroup/cpuset.c#L2550) |
+| 父组撤销分区或自身失效 | 子分区失效 | [子分区失效](../../linux/kernel/cgroup/cpuset.c#L2315) |
+| 热插拔使分区失去可用 CPU | 见 6.8 节 | [`cpuset_hotplug_update_tasks()`](../../linux/kernel/cgroup/cpuset.c#L3978) |
+
+第一行是 v2 特有的宽松处理：[`validate_change()`](../../linux/kernel/cgroup/cpuset.c#L715) 发现独占冲突返回 `-EINVAL` 后，调用者把它改成“让冲突分区失效、写入继续”。失效走的 `partcmd_invalidate` 分支不写 `prs_err`，见 [失效分支](../../linux/kernel/cgroup/cpuset.c#L1836)，所以读回的只是 `root invalid` 或 `isolated invalid`。
+
+**自动恢复。** 无效分区仍记着用户想要的类型。它被重算时——例如父组重新成为有效分区后 `update_cpumasks_hier()` 遍历到它，或热插拔让 CPU 回来——若父组是有效分区、本组独占请求非空且是父组有效独占集合的子集、与每个兄弟的独占请求互不重叠，并且划出后有任务的父分区和本组都还有可用 CPU，`partcmd_update` 分支就把它转回有效状态，见 [恢复条件](../../linux/kernel/cgroup/cpuset.c#L2020) 与 [有效性翻转](../../linux/kernel/cgroup/cpuset.c#L2065)。分区状态每次变化都由 [`notify_partition_change()`](../../linux/kernel/cgroup/cpuset.c#L185) 通知用户态，管理程序可以 poll 或 inotify `cpuset.cpus.partition`，不必轮询读取。
+
+**远端分区。** 父组不是有效分区时，[`update_prstate()`](../../linux/kernel/cgroup/cpuset.c#L3095) 改走 [`remote_partition_enable()`](../../linux/kernel/cgroup/cpuset.c#L1584)：越过中间各层，直接向根分区要 CPU。条件有三条：
+
+1. 调用者具有 `CAP_SYS_ADMIN`，否则 `PERR_ACCESS`，见 [权限检查](../../linux/kernel/cgroup/cpuset.c#L1592)。
+2. 从根组到父组的每一层都写了 `cpuset.cpus.exclusive`。独占候选按“本组独占请求 ∩ 父组有效独占集合”计算，而 member 的有效独占集合只来自它自己写入的 exclusive 请求，见 [`compute_trialcs_excpus()`](../../linux/kernel/cgroup/cpuset.c#L1554)；中间有一层没写，候选就是空集。
+3. 候选至少含一颗 active CPU，且不能拿光根组的有效集合，否则 `PERR_INVCPUS`，见 [检查](../../linux/kernel/cgroup/cpuset.c#L1605)；建 isolated 时同样要通过 `isolated_cpus_can_update()`。
 
 ```text
-根组：effective = 0-3                 ← 实际把 4-7 划给了 B
+根组                       effective = 0-3      ← 4-7 记入 subpartitions_cpus
 └── A：member，cpus = 0-7，exclusive = 4-7
-    effective = 0-3                   ← A 内普通任务的范围
-    exclusive.effective = 4-7         ← 向后代传递的候选
-    └── B：root（远端），exclusive = 4-7，effective = 4-7
+    effective = 0-3                             ← A 中任务的可用范围
+    exclusive.effective = 4-7                   ← 只用于向下传递候选
+    └── B：root（远端），cpus = 4-7
+        effective = 4-7
 ```
 
-B 的有效集合走[远端分区的计算](../../linux/kernel/cgroup/cpuset.c#L2266)，不再与 A 的 `effective` 求交，见 [`remote_partition_enable()` 中的划出](../../linux/kernel/cgroup/cpuset.c#L1615)。
+B 挂入 `remote_children`，并以 `parent == NULL` 调用 `partition_xcpus_add()` 从根组划走 4-7，见 [划出与入链](../../linux/kernel/cgroup/cpuset.c#L1614)；随后根组任务和根组下的 member 子树按新集合重算，A 因此变成 0-3，见 [传播](../../linux/kernel/cgroup/cpuset.c#L1623)。B 的有效集合走分区公式，不与 A 的 `effective_cpus` 求交，见 [公式选择](../../linux/kernel/cgroup/cpuset.c#L2266)。
 
-**invalid 状态。** 分区条件不满足时，`update_prstate()` 通常把状态记成负值，**写入系统调用仍返回成功**，见 [错误状态落地](../../linux/kernel/cgroup/cpuset.c#L3133)。读回 `cpuset.cpus.partition` 会看到如 `root invalid (Parent unable to distribute cpu downstream)`，原因字符串见 [`perr_strings[]`](../../linux/kernel/cgroup/cpuset.c#L55)。热插拔或配置变化也可能让有效分区变为 invalid。
+### 6.5 实现：一次写入的完整路径
 
-**全局掩码。** [`subpartitions_cpus`](../../linux/kernel/cgroup/cpuset.c#L77) 记录从根组下发给子分区的 CPU；[`isolated_cpus`](../../linux/kernel/cgroup/cpuset.c#L82) 是 cpuset 维护的隔离集合，由根组只读文件 [`cpuset.cpus.isolated`](../../linux/kernel/cgroup/cpuset.c#L3622) 打印。**housekeeping 集合**指仍承担某类普通调度或内核工作的 CPU，启动参数可以把 CPU 从中移出。`isolated_cpus` 在 [`cpuset_init()`](../../linux/kernel/cgroup/cpuset.c#L3932) 中先纳入启动时不在 `HK_TYPE_DOMAIN` housekeeping 集合内的 CPU，之后由 [`isolated_cpus_update()`](../../linux/kernel/cgroup/cpuset.c#L1340) 随分区增删，使用的是独占集合而非 active 集合。所以它可能包含启动隔离 CPU 和离线 CPU，不等于各 isolated 分区 `effective_cpus` 的并集。
+**入口。** 三个可写文件注册在 [`dfl_files[]`](../../linux/kernel/cgroup/cpuset.c#L3559)：`cpuset.cpus` 与 `cpuset.cpus.exclusive` 由 [`cpuset_write_resmask()`](../../linux/kernel/cgroup/cpuset.c#L3403) 处理，`cpuset.cpus.partition` 由 [`cpuset_partition_write()`](../../linux/kernel/cgroup/cpuset.c#L3530) 处理。二者都在 `cpuset_full_lock()` 内工作并先确认组仍在线，整个过程在写文件进程的上下文中同步完成。
 
-### 6.5 `isolated` 与调度域
+**试算副本。** 改掩码时，`cpuset_write_resmask()` 先用 [`dup_or_alloc_cpuset()`](../../linux/kernel/cgroup/cpuset.c#L525) 复制出 `trialcs`，在副本上解析新请求、算独占候选、做检查，通过后才把结果写回真实对象。副本是整个结构体的拷贝，`css.parent` 仍指向真实的父组，所以能直接拿副本与父组和兄弟比较；但遍历兄弟必须以真实对象为游标，见 [`validate_change()` 的说明](../../linux/kernel/cgroup/cpuset.c#L648)。检查失败时只需丢弃副本，真实对象没有被改过。
 
-**调度域**（`sched_domain`）规定调度器在哪些 CPU 之间做负载均衡。分区除了改变任务亲和性，还会改变调度域集合：
-
-| A 拿到 CPU 4-7 后 | `root` | `isolated` |
-| ----------------- | ------ | ---------- |
-| 分区外普通任务能否使用 4-7 | 不能 | 不能 |
-| 4-7 是否组成独立的均衡域 | 是 | 否，不进入任何调度域 |
-| unbound 工作队列 | 不额外排除 | 通常排除这些 CPU |
-| 分区内线程分布 | 域内均衡持续调整 | 唤醒与迁移时仍会选核，但无后续均衡；需要确定布局应逐线程设亲和性 |
-
-差别由 [`update_partition_sd_lb()`](../../linux/kernel/cgroup/cpuset.c#L1273) 落实：有效 `root` 打开 `CS_SCHED_LOAD_BALANCE`，有效 `isolated` 关闭它，并置 `force_sd_rebuild`。unbound 工作队列通过 [`update_isolation_cpumasks()`](../../linux/kernel/cgroup/cpuset.c#L1452) 调整；若排除后掩码为空，或掩码分配更新失败，[`workqueue_unbound_exclude_cpumask()`](../../linux/kernel/workqueue.c#L7022) 可能保留原配置。
-
-重建时 [`rebuild_sched_domains_locked()`](../../linux/kernel/cgroup/cpuset.c#L1097) 调用 [`generate_sched_domains()`](../../linux/kernel/cgroup/cpuset.c#L831)，再交给 [`partition_sched_domains()`](../../linux/kernel/sched/topology.c#L2870)。v2 分支的规则可以简化为：
+**`cpuset.cpus` 的处理顺序。** 见 [`update_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2586)：
 
 ```text
-没有任何子分区时（单域快路径）：
-  一个域集合 = 根组 effective_cpus ∩ housekeeping(HK_TYPE_DOMAIN)
-否则遍历 cpuset 树：
-  只收集 partition_root_state == PRS_ROOT 且 effective_cpus 非空的组
-  isolated 分区自身不收集，但继续扫描其后代
-  根组的集合再与 HK_TYPE_DOMAIN 相交，其他有效 root 直接使用
+（调用链摘要，省略错误返回）
+update_cpumask(cs, trialcs, buf)
+  → parse_cpuset_cpulist()          解析到副本，必须是 possible CPU 的子集
+  → 与原值相同则直接返回
+  → compute_trialcs_excpus()        在副本上重算有效独占集合
+  → cpus_allowed_validate_change()  检查；兄弟独占冲突时让冲突分区失效，写入继续
+  → partition_cpus_change()         本组是分区时：与父分区交换 CPU，或失效
+  → 持 callback_lock：写回 cpus_allowed、effective_xcpus
+  → update_cpumasks_hier(cs)        重算本组及子树，更新任务
+  → update_partition_sd_lb()        本组是分区时：维护均衡标志
 ```
 
-见 [单域快路径](../../linux/kernel/cgroup/cpuset.c#L851)、[v2 分支](../../linux/kernel/cgroup/cpuset.c#L908) 和 [根组与 housekeeping 相交](../../linux/kernel/cgroup/cpuset.c#L976)。每个域集合内部仍按 SMT、缓存、NUMA 拓扑建多层 `sched_domain`，见 [逐拓扑层建域](../../linux/kernel/sched/topology.c#L2502)。**只设独占标志不会产生新的调度分区，v2 以有效 partition root 为准。**
+`cpuset.cpus.exclusive` 由 [`update_exclusive_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2646) 处理，步骤相同，区别是兄弟冲突直接返回 `-EINVAL`。
 
-isolated CPU 仍有运行队列，允许在上面运行的任务照常调度和轮转；亲和性变化时 [`cpumask_any_and_distribute()`](../../linux/kernel/sched/core.c#L3128) 也会分散迁移目标。关掉的只是这组 CPU 之间的持续负载均衡。per-CPU 内核线程、绑定工作队列、硬中断和 NMI 仍可能在上面执行；isolated 也不会打开 nohz_full 或修改 IRQ 亲和性。
+**调度域最后统一重建。** 一次写入可能多次改变分区和均衡标志。各函数只调用 [`cpuset_force_rebuild()`](../../linux/kernel/cgroup/cpuset.c#L3964) 置位 `force_sd_rebuild`，写入路径在释放锁之前统一检查一次，见 [掩码写入路径](../../linux/kernel/cgroup/cpuset.c#L3441) 与 [分区写入路径](../../linux/kernel/cgroup/cpuset.c#L3164)。
 
-**与启动隔离的关系。** `isolcpus=` 带 `domain` 标志（或省略标志取默认）时，相应 CPU 不在 `HK_TYPE_DOMAIN` 集合中，参数解析见 [`housekeeping_isolcpus_setup()`](../../linux/kernel/sched/isolation.c#L200)。启用本地 `root` 分区时，[`prstate_housekeeping_conflict()`](../../linux/kernel/cgroup/cpuset.c#L1763) 拒绝包含这些 CPU 的候选，只允许 isolated，调用点见 [本地启用检查](../../linux/kernel/cgroup/cpuset.c#L1885) 和 [`validate_partition()`](../../linux/kernel/cgroup/cpuset.c#L2494)。但远端启用路径和有效 isolated → root 的[状态切换分支](../../linux/kernel/cgroup/cpuset.c#L3107)不调用这项检查，因此不能泛化为“所有路径都禁止”。调度器判断 CPU 是否隔离时综合三者，见 [`cpu_is_isolated()`](../../linux/include/linux/sched/isolation.h#L73)：
+**完整时序。** 根组下有两个 member 子组：`system.slice` 的 `cpuset.cpus` 为 0-3，`pod-latency` 为 4-7（第 7 章沿用这个配置）。此时向 `pod-latency` 的 `cpuset.cpus.partition` 写入 `isolated`：
 
-```text
-cpu_is_isolated(cpu) = 不在 HK_TYPE_DOMAIN
-                    或 不在 HK_TYPE_TICK
-                    或 cpuset_cpu_is_isolated(cpu)
+```mermaid
+sequenceDiagram
+    participant U as 写文件的进程
+    participant C as cpuset 数据（持 cpuset_mutex）
+    participant T as 受影响的任务
+    participant S as 工作队列与调度域
+    U->>C: cpuset_partition_write("isolated")
+    Note over C: cpuset_full_lock()
+    C->>C: update_prstate()：置 CS_CPU_EXCLUSIVE，检查兄弟
+    C->>C: update_parent_effective_cpumask(partcmd_enablei)<br/>callback_lock 内：根组删去 4-7，<br/>4-7 记入 subpartitions_cpus 与 isolated_cpus
+    C->>S: update_isolation_cpumasks()：unbound 工作队列排除 4-7
+    C->>T: 根组任务改为 possible − 4-7，原先在 4-7 上的被迁走
+    C->>T: update_cpumasks_hier(pod-latency)：子树仍为 4-7
+    C->>C: update_partition_sd_lb()：清 CS_SCHED_LOAD_BALANCE，标记重建
+    C->>S: rebuild_sched_domains_locked()：只为 0-3 建域
+    Note over C: cpuset_full_unlock()
+    C-->>U: 返回写入的字节数
 ```
 
-### 6.6 落实到任务亲和性
+`system.slice` 的有效集合本来就是 0-3，`update_sibling_cpumasks()` 试算后跳过它。写系统调用返回时，任务掩码、unbound 工作队列和调度域都已更新完毕。
 
-调度器只认任务自己的亲和性字段。摘自 [`task_struct`](../../linux/include/linux/sched.h#L917)：
+### 6.6 落实一：任务亲和性
+
+**任务侧的字段。** 摘自 [`task_struct`](../../linux/include/linux/sched.h#L917)：
 
 ```c
 struct task_struct {
     /* 省略 */
     int nr_cpus_allowed;             /* cpus_mask 中的 CPU 数 */
     const cpumask_t *cpus_ptr;       /* 调度器读取允许集合的入口 */
-    cpumask_t *user_cpus_ptr;        /* 保存的用户亲和性请求 */
-    cpumask_t cpus_mask;             /* 实际生效的亲和性掩码 */
+    cpumask_t *user_cpus_ptr;        /* sched_setaffinity() 保存的用户原始请求 */
+    cpumask_t cpus_mask;             /* 内嵌：实际生效的亲和性 */
     /* 省略 */
 };
 ```
 
-通常 `cpus_ptr == &p->cpus_mask`；`migrate_disable()` 期间发生切换时，[`migrate_disable_switch()`](../../linux/kernel/sched/core.c#L2383) 会让它暂时指向单 CPU 掩码，[`___migrate_enable()`](../../linux/kernel/sched/core.c#L2402) 再接回。注意 cpuset 的 `cpus_allowed` 与任务的 `cpus_mask` 是不同对象的字段。
+通常 `cpus_ptr == &p->cpus_mask`。`migrate_disable()` 期间发生切换时，[`migrate_disable_switch()`](../../linux/kernel/sched/core.c#L2383) 让它暂时指向当前 CPU 的单 CPU 掩码，[`___migrate_enable()`](../../linux/kernel/sched/core.c#L2402) 再接回。cpuset 只改 `cpus_mask`。
 
-**配置更新后遍历任务。** [`cpuset_update_tasks_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1192) 对组内每个任务计算新掩码并调用 `set_cpus_allowed_ptr()`：
+**cpuset 何时改写任务。**
+
+| 时机 | 函数 | 新掩码 |
+| ---- | ---- | ------ |
+| 有效集合变化后遍历组内任务 | [`cpuset_update_tasks_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1192) | 根组：possible − `subpartitions_cpus`，跳过 `PF_NO_SETAFFINITY` 任务；其他组：possible ∩ `effective_cpus` |
+| 写 `cgroup.procs` 迁入 | [`cpuset_attach_task()`](../../linux/kernel/cgroup/cpuset.c#L3297) | 非根组：[`guarantee_active_cpus()`](../../linux/kernel/cgroup/cpuset.c#L420) 取有效集合中的 active CPU；根组同上一行 |
+| fork | [`cpuset_fork()`](../../linux/kernel/cgroup/cpuset.c#L3856) | 与父任务同在非根组：重新套用父任务的 `cpus_ptr`；用 `clone3()` 的 `CLONE_INTO_CGROUP` 直接进入别的组：同迁入 |
+
+根组任务的掩码包含离线 CPU，热插拔时也不更新，见 [函数说明](../../linux/kernel/cgroup/cpuset.c#L1185)。迁入之前，[`cpuset_can_attach()`](../../linux/kernel/cgroup/cpuset.c#L3193) 要求目标组有效集合非空（否则 `-ENOSPC`），拒绝 `PF_NO_SETAFFINITY` 任务（[`task_can_attach()`](../../linux/kernel/sched/core.c#L8079)），并给目标组的 `attach_in_progress` 加一，防止迁移完成前有人把它的 `cpuset.cpus` 清空。在父组的 `cgroup.subtree_control` 中开启 cpuset 时，子组任务换到新的 css 上，但有效集合不变，[`cpuset_attach()` 会跳过逐任务更新](../../linux/kernel/cgroup/cpuset.c#L3335)。
+
+**改写的过程：`set_cpus_allowed_ptr()`。** 上表三条路径最终都调用它：
 
 ```text
-根组：new = possible_mask & ~subpartitions_cpus（跳过 PF_NO_SETAFFINITY 任务）
-其他：new = possible_mask ∩ cs->effective_cpus
+（调用链摘要，省略内核线程、migrate_disable 与 SCA_* 标志的分支）
+set_cpus_allowed_ptr(p, new_mask)
+  → __set_cpus_allowed_ptr()         持 p->pi_lock 与 rq 锁；
+                                     有 user_cpus_ptr 且与 new_mask 有交集时，改用交集
+  → __set_cpus_allowed_ptr_locked()  new_mask 须是 possible 的子集；
+                                     dest_cpu = cpumask_any_and_distribute(active, new_mask)，
+                                     找不到则返回 -EINVAL
+  → __do_set_cpus_allowed()          出队，set_cpus_allowed_common() 写 cpus_mask 与
+                                     nr_cpus_allowed，再入队
+  → affine_move_task()               当前 CPU 仍被允许则结束；否则迁到 dest_cpu，
+                                     正在运行的任务交给 stopper 线程（migration/N）迁移，
+                                     调用者等待完成
 ```
 
-`PF_NO_SETAFFINITY` 的 per-CPU 内核线程（如 `ksoftirqd/4`）不会被赶出分区 CPU，这是独占不排除内核线程的直接原因。
+依据见 [与用户请求求交](../../linux/kernel/sched/core.c#L3168)、[选目标 CPU](../../linux/kernel/sched/core.c#L3128)、[`set_cpus_allowed_common()`](../../linux/kernel/sched/core.c#L2694)、[`affine_move_task()`](../../linux/kernel/sched/core.c#L2916)、[等待完成](../../linux/kernel/sched/core.c#L3050) 与 [stopper 线程名](../../linux/kernel/stop_machine.c#L563)。由此得到两个结论：
 
-**迁入任务。** [`cpuset_attach_task()`](../../linux/kernel/cgroup/cpuset.c#L3297) 对非根组使用 [`guarantee_active_cpus()`](../../linux/kernel/cgroup/cpuset.c#L420) 取有效集合中的 active CPU。v2 下只有有效 CPU 和有效内存节点都没变，attach 才跳过逐任务更新，见 [`cpuset_attach()`](../../linux/kernel/cgroup/cpuset.c#L3341)。
+- **同步生效。** 调用者可能睡眠等待迁移，这正是 cpuset 不在 `callback_lock` 内更新任务的原因。写入返回时，原先在被删 CPU 上运行或排队的任务已经迁走；睡眠中的任务只改了掩码，下次唤醒时由 [`select_task_rq()`](../../linux/kernel/sched/core.c#L3583) 在新掩码中选核。
+- **一次性分散。** [`cpumask_any_and_distribute()`](../../linux/lib/cpumask.c#L134) 用每 CPU 游标轮转挑选。一批任务同时被赶出某些 CPU 时，会大致分散到新集合中，不必等负载均衡，见 [源码注释](../../linux/kernel/sched/core.c#L3128)。
 
-**用户亲和性逃不出 cpuset。** [`__sched_setaffinity()`](../../linux/kernel/sched/syscalls.c#L1158) 先取 [`cpuset_cpus_allowed()`](../../linux/kernel/cgroup/cpuset.c#L4239)，与用户请求求交，交集为空则失败；之后 [`set_cpus_allowed_common()`](../../linux/kernel/sched/core.c#L2694) 更新 `cpus_mask`，[`__set_cpus_allowed_ptr_locked()`](../../linux/kernel/sched/core.c#L3070) 必要时把任务迁走。
+**用户亲和性逃不出 cpuset。** [`__sched_setaffinity()`](../../linux/kernel/sched/syscalls.c#L1158) 把用户掩码与 [`cpuset_cpus_allowed()`](../../linux/kernel/cgroup/cpuset.c#L4239) 求交，交集为空时上面的选核失败，返回 `-EINVAL`；设置之后再读一次 cpuset，若期间 cpuset 已经变化，就改用 cpuset 的集合并返回 `-EINVAL`，见 [复查](../../linux/kernel/sched/syscalls.c#L1185)。根组任务可用的是 possible − `subpartitions_cpus`，所以分区建立后，根组中的进程用 `taskset` 绑到分区 CPU 会失败。
 
-**保存的用户请求会在 cpuset 变化后重新生效。** cpuset 更新任务时，[`__set_cpus_allowed_ptr()`](../../linux/kernel/sched/core.c#L3158) 会与 `user_cpus_ptr` 求交：交集非空就保留用户的更窄约束，为空则暂用 cpuset 的掩码，但**不清除**保存的请求（只有带 `SCA_USER` 的调用才[替换它](../../linux/kernel/sched/core.c#L2704)）：
+**保存的用户请求。** `sched_setaffinity()` 把用户的**原始**掩码保存为 `user_cpus_ptr`，见 [保存](../../linux/kernel/sched/syscalls.c#L1246)。之后 cpuset 再改亲和性时取“cpuset 集合 ∩ 用户请求”，交集为空才只用 cpuset 集合，并且不清除保存的请求：
 
 | 操作后 | `user_cpus_ptr` | cpuset 有效集合 | 任务 `cpus_mask` |
 | ------ | --------------- | --------------- | ---------------- |
@@ -1165,29 +1386,86 @@ struct task_struct {
 | cpuset 改为 0-3 | 5 | 0-3 | 0-3 |
 | cpuset 改回 4-7 | 5 | 4-7 | 5 |
 
-热插拔使根组掩码中没有 active CPU 时，`cpuset_cpus_allowed()` 有[退回全部 possible CPU 的应急路径](../../linux/kernel/cgroup/cpuset.c#L4254)。父分区把所有 CPU 下发给子分区后，普通成员的有效集合可以为空，此时任务迁入会被 [`cpuset_can_attach_check()`](../../linux/kernel/cgroup/cpuset.c#L3178) 以 `-ENOSPC` 拒绝。
+**per-CPU 内核线程不受 cpuset 管理。** 内核线程被绑定到 CPU 时置上 `PF_NO_SETAFFINITY`，见 [`__kthread_bind_mask()`](../../linux/kernel/kthread.c#L563)；per-CPU 内核线程都带这个标志，[`kthread_set_per_cpu()`](../../linux/kernel/kthread.c#L641) 会对此做检查。这类线程不能迁入其他 cpuset，根组更新时又被跳过，所以 `ksoftirqd/4` 这样的线程会一直留在分区 CPU 上。
 
-### 6.7 一次配置更新的两条落实路径
+### 6.7 落实二：调度域与隔离
 
-把本章的函数放到一张图上。一次 cpuset 写入最终分成两路：一路改任务允许在哪运行，一路改 CPU 之间怎样均衡。
+**调度域决定均衡边界。** 每颗 CPU 的 `rq->sd` 指向一串由小到大的 `sched_domain`（SMT、缓存、NUMA 等拓扑层），负载均衡以及 fork、唤醒时的选核都只在这串域覆盖的 CPU 之间进行。cpuset 不负责域的内部层次，见 [逐拓扑层建域](../../linux/kernel/sched/topology.c#L2502)；它只决定**把哪些 CPU 分到同一组**：给出若干互不重叠的 CPU 集合，调度器为每个集合建一套域。
 
-```mermaid
-flowchart TD
-    CFG["写 cpuset.cpus / exclusive / partition"] --> PR["update_cpumask() / update_exclusive_cpumask()<br/>update_prstate()：校验并更新"]
-    PR --> MASK["重算本组及相关组的有效集合"]
-    PR -->|"分区建立、调整、撤销"| PARENT["partition_xcpus_add() / del()<br/>改父分区可用集合"]
-    PARENT --> MASK
-    PR -->|"有效 root ↔ isolated"| LB["update_partition_sd_lb()<br/>负载均衡标志、isolated_cpus"]
-    MASK --> TASK["cpuset_update_tasks_cpumask()<br/>更新任务 cpus_mask"]
-    TASK --> AFF["唤醒与迁移按 cpus_ptr 选核"]
-    MASK --> SD["rebuild_sched_domains_locked()"]
-    LB --> SD
-    SD --> DOM["有效 root：独立域<br/>isolated：不入域"]
-    USER["sched_setaffinity()"] --> AND["用户掩码 ∩ cpuset_cpus_allowed()"]
-    AND --> AFF
+**生成规则。** [`rebuild_sched_domains_locked()`](../../linux/kernel/cgroup/cpuset.c#L1097) 先确认没有与热插拔交错，即各有效分区的集合都在 active CPU 内，否则留给热插拔路径重建，见 [交错检查](../../linux/kernel/cgroup/cpuset.c#L1109)；然后调用 [`generate_sched_domains()`](../../linux/kernel/cgroup/cpuset.c#L831)。v2 的规则可以简化为：
+
+```text
+（简化逻辑）
+若根组没有划出任何 CPU：
+    只有一个集合 = 根组 effective_cpus ∩ housekeeping(HK_TYPE_DOMAIN)
+否则先序遍历 cpuset 树：
+    收集 partition_root_state == PRS_ROOT 且 effective_cpus 非空的组
+    既不是有效分区、也没写 cpuset.cpus.exclusive 的组，跳过其子树
+    若除根组外没有收集到任何组，退回上面的单集合
+    根组的集合 = effective_cpus ∩ housekeeping(HK_TYPE_DOMAIN)，其他组直接用 effective_cpus
 ```
 
-入口见 [`update_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2586)、[`update_exclusive_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L2646)、[`partition_xcpus_del()`](../../linux/kernel/cgroup/cpuset.c#L1390)。有效 `root` 与 `isolated` 之间的切换只改变隔离和均衡状态，不重新划分 CPU，见 [`update_prstate()` 的切换分支](../../linux/kernel/cgroup/cpuset.c#L3107)。
+见 [单集合快路径](../../linux/kernel/cgroup/cpuset.c#L851)、[v2 收集规则](../../linux/kernel/cgroup/cpuset.c#L908)、[退回单集合](../../linux/kernel/cgroup/cpuset.c#L926) 和 [生成集合](../../linux/kernel/cgroup/cpuset.c#L976)。isolated 分区不被收集，它的 CPU 不在任何集合中；但遍历会继续进入它的子树，嵌套在里面的 root 分区照样得到自己的集合。
+
+**调度器怎样应用。** [`partition_sched_domains_locked()`](../../linux/kernel/sched/topology.c#L2774) 比较新旧两组集合：旧集合不再出现就拆掉，其中的 CPU 先挂到空域和默认的 `def_root_domain`，见 [`detach_destroy_domains()`](../../linux/kernel/sched/topology.c#L2714)；新集合以前没有，就调用 [`build_sched_domains()`](../../linux/kernel/sched/topology.c#L2485) 建域，并为它[分配新的 `root_domain`](../../linux/kernel/sched/topology.c#L1561)、[挂到各 CPU 上](../../linux/kernel/sched/topology.c#L2612)；两边都有的集合保持不动。最终每颗 CPU 的状态是：
+
+| CPU 所在 | `rq->sd` | `rq->rd` | 负载均衡范围 |
+| -------- | -------- | -------- | ------------ |
+| 根分区剩下的 CPU | 覆盖这些 CPU 的域 | 根分区独有的 `root_domain` | 根分区内 |
+| 有效 root 分区 | 覆盖本分区的域 | 本分区独有的 `root_domain` | 本分区内 |
+| 有效 isolated 分区、启动时移出 `HK_TYPE_DOMAIN` 的 CPU | `NULL` | `def_root_domain` | 无 |
+
+启动时移出 `HK_TYPE_DOMAIN` 的 CPU 从 [运行队列初始化](../../linux/kernel/sched/core.c#L8791) 起就挂在 `def_root_domain` 上，[启动建域](../../linux/kernel/sched/topology.c#L2704) 和之后 cpuset 生成的集合都不包含它们。
+
+`root_domain` 为这样一个与其他 CPU 完全隔开的“CPU 岛”保存全局调度信息，[定义前的说明](../../linux/kernel/sched/sched.h#L978) 指出每个独占的 cpuset 都对应一个。它不只服务于公平类：RT 任务的推送目标在 `rq->rd->cpupri` 中查找，见 [`find_lowest_rq()`](../../linux/kernel/sched/rt.c#L1789)；DEADLINE 的带宽准入按 `rq->rd->dl_bw` 计算，见 [`dl_bw_of()`](../../linux/kernel/sched/deadline.c#L118)。因此 root 分区也切开了 RT 与 DEADLINE 的全局调度范围。
+
+**isolated 对调度的影响。** 隔离 CPU 的 `rq->sd` 为 `NULL`，依赖调度域的路径都不再起作用：
+
+| 路径 | 在 isolated CPU 上的行为 | 依据 |
+| ---- | ------------------------ | ---- |
+| 周期负载均衡 | 不触发 | [`sched_balance_trigger()`](../../linux/kernel/sched/fair.c#L13263) |
+| 即将空闲时拉任务（newidle） | 直接放弃 | [`sched_balance_newidle()`](../../linux/kernel/sched/fair.c#L13122) |
+| nohz 空闲均衡 | 不参加 | [`nohz_balance_enter_idle()`](../../linux/kernel/sched/fair.c#L12843) |
+| fork 选核 | 没有域可遍历，子任务留在父任务所在的 CPU | [初始 CPU](../../linux/kernel/sched/core.c#L4789)、[`select_task_rq_fair()`](../../linux/kernel/sched/fair.c#L8765) |
+| 唤醒选核 | 快速路径找不到末级缓存（LLC）域，留在上次运行的 CPU（`WF_CURRENT_CPU` 唤醒除外） | [`select_idle_sibling()`](../../linux/kernel/sched/fair.c#L8075) |
+
+所以 isolated 分区里的线程不会被自动铺开：只有亲和性变化（包括迁入分区）时才经 `cpumask_any_and_distribute()` 分散一次，之后新建的线程都从父线程所在的 CPU 起步。这与 [cgroup-v2.rst](../../linux/Documentation/admin-guide/cgroup-v2.rst#L2617) 的建议一致：多 CPU 的 isolated 分区中，任务应当逐个绑到具体 CPU 上。
+
+**隔离集合与内核工作。** `isolated_cpus` 变化后，[`update_isolation_cpumasks()`](../../linux/kernel/cgroup/cpuset.c#L1452) 调用 [`workqueue_unbound_exclude_cpumask()`](../../linux/kernel/workqueue.c#L7022)：unbound 工作队列（工作项不固定在某颗 CPU 上执行）的可用集合改为“请求的 unbound 掩码 − `isolated_cpus`”，结果为空时保持请求值，见 [计算](../../linux/kernel/workqueue.c#L7038)。在隔离方面，cpuset 只主动通知工作队列这一个下游；其他子系统通过 [`cpu_is_isolated()`](../../linux/include/linux/sched/isolation.h#L73) 自行避开隔离 CPU，例如 vmstat 的周期刷新 [`vmstat_shepherd()`](../../linux/mm/vmstat.c#L2140) 和 memcg 的每 CPU 缓存回收 [`drain_all_stock()`](../../linux/mm/memcontrol.c#L2006)：
+
+```text
+cpu_is_isolated(cpu) = cpu 不在 HK_TYPE_DOMAIN 集合
+                    或 cpu 不在 HK_TYPE_TICK 集合
+                    或 cpu ∈ isolated_cpus（cpuset_cpu_is_isolated()）
+```
+
+isolated 的作用也有明确边界：cpuset 不改中断亲和性，不停 tick（那是 `nohz_full=` 的作用），绑定到具体 CPU 的工作队列和 per-CPU 内核线程照常在这些 CPU 上运行。
+
+**与启动参数的关系。** `isolcpus=` 带 `domain` 标志或不带标志时，相应 CPU 被移出 `HK_TYPE_DOMAIN` 集合，见 [`housekeeping_isolcpus_setup()`](../../linux/kernel/sched/isolation.c#L200)。cpuset 在 [`cpuset_init()`](../../linux/kernel/cgroup/cpuset.c#L3932) 中记下启动时的这个集合，并把其余 CPU 预先放进 `isolated_cpus`。于是：
+
+- 这些 CPU 不进入根分区的调度域，即生成规则中的 `∩ HK_TYPE_DOMAIN`。
+- 本地建立 root 分区或调整其 CPU 时，[`prstate_housekeeping_conflict()`](../../linux/kernel/cgroup/cpuset.c#L1763) 拒绝包含它们的候选，它们只能进 isolated 分区。远端启用路径和 isolated → root 的[切换分支](../../linux/kernel/cgroup/cpuset.c#L3107)不做这项检查，不能推广为“所有路径都禁止”。
+- `cpuset.cpus.isolated` 在没有任何 isolated 分区时也可能非空。[cgroup-v2.rst](../../linux/Documentation/admin-guide/cgroup-v2.rst#L2568) 写的是没有 isolated 分区时为空，与实现不一致，以实现为准。
+- 有 `nohz_full=` 时，建立 isolated 分区不能用光同时属于 `HK_TYPE_KERNEL_NOISE` 与 `HK_TYPE_DOMAIN` 的 active CPU，见 [`isolated_cpus_can_update()`](../../linux/kernel/cgroup/cpuset.c#L1425)。
+
+### 6.8 热插拔与删除
+
+**热插拔。** CPU 进入或退出 active 状态时，[`sched_cpu_activate()`](../../linux/kernel/sched/core.c#L8416) 与 [`sched_cpu_deactivate()`](../../linux/kernel/sched/core.c#L8454) 分别经 [`cpuset_cpu_active()`](../../linux/kernel/sched/core.c#L8368) 和 [`cpuset_cpu_inactive()`](../../linux/kernel/sched/core.c#L8390) 同步调用 [`cpuset_handle_hotplug()`](../../linux/kernel/cgroup/cpuset.c#L4092)：
+
+1. 重算根组：`effective_cpus` = active CPU − `subpartitions_cpus`。若 active CPU 全部落在 `subpartitions_cpus` 中，就清空它，让子分区重新竞争，见 [根组重算](../../linux/kernel/cgroup/cpuset.c#L4125)。
+2. 先序遍历所有后代，逐个调用 [`cpuset_hotplug_update_tasks()`](../../linux/kernel/cgroup/cpuset.c#L3978)。它先等本组正在进行的迁入完成，再按公式重算。分区还要重判有效性：远端分区在 `subpartitions_cpus` 被清空、或有任务却没有 CPU 时以 `PERR_HOTPLUG` 失效，见 [远端判定](../../linux/kernel/cgroup/cpuset.c#L4016)；本地分区在父组无效、会让有任务的组没有 CPU、或 `subpartitions_cpus` 已被清空时失效，见 [本地判定](../../linux/kernel/cgroup/cpuset.c#L4025)；反过来，父组有效时无效分区可以转回有效，见 [恢复](../../linux/kernel/cgroup/cpuset.c#L4038)。
+3. member 的结果为空时继承父组，有效分区允许为空，见 [`hotplug_update_tasks()`](../../linux/kernel/cgroup/cpuset.c#L3947)；集合有变化才更新组内任务。
+4. 按需重建调度域，见 [重建](../../linux/kernel/cgroup/cpuset.c#L4176)。
+
+热插拔从不修改用户写入的请求。CPU 重新上线后各组按原请求恢复，失效的分区也可能自动转回有效。系统挂起与恢复期间 cpuset 保持不变，调度器只是临时退回单一调度域，最后一颗 CPU 恢复上线时再按 cpuset 配置重建，见 [`cpuset_cpu_active()`](../../linux/kernel/sched/core.c#L8370)。
+
+**删除。** 组的创建与释放回调已在第 2.4 节列出。与本章相关的有两点：新组上线时复制父组的 `effective_cpus`，此时 `cpuset.cpus` 为空，按 member 公式算出的也正是父组的集合，见 [`cpuset_css_online()`](../../linux/kernel/cgroup/cpuset.c#L3689)；删除有效分区时，[`cpuset_css_killed()`](../../linux/kernel/cgroup/cpuset.c#L3756) 先把它转为 member，独占 CPU 回到父分区，后续在其他组中可以重新申请。
+
+### 6.9 小结
+
+- **对象**：每组一个 `struct cpuset`，用户请求（`cpus_allowed`、`exclusive_cpus`）与内核结果（`effective_cpus`、`effective_xcpus`）分开存放；`top_cpuset`、`subpartitions_cpus` 和 `isolated_cpus` 记录全局划分。
+- **算法**：`update_cpumasks_hier()` 先序遍历重算有效集合，member 取“请求 ∩ 父组集合”、落空则继承；有效分区经 `partition_xcpus_add()/del()` 从父分区划出和归还独占 CPU；条件不满足时转为保留类型的无效状态，写入仍然成功，条件恢复后可以自动转回。
+- **落实**：有效集合按值写入每个任务的 `cpus_mask`，由 `set_cpus_allowed_ptr()` 同步完成迁移；root 分区得到独立的调度域和 `root_domain`，isolated 分区的 CPU 不在任何域中、不做负载均衡；`isolated_cpus` 让 unbound 工作队列和 `cpu_is_isolated()` 的使用者避开这些 CPU。
 
 ## 7. 综合示例：给延迟敏感容器划出 CPU 4-7
 
@@ -1266,9 +1544,9 @@ flowchart TD
 | 叶子 `cpu.max` 为 `max` 仍受限 | 祖先 `cpu.max` 和本组 `cpu.stat.local` | 5.7、8.2 |
 | 限流时长超过观察窗口 | 是否把多 CPU 时长相加？区间是否已结束？ | 8.2 |
 | 任务状态为 R 却不运行 | 是否在 limbo：组预算是否耗尽 | 5.5 |
-| 整机有空闲 CPU，线程却排队 | `Cpus_allowed_list`、有效集合、isolated 分区内的线程分布 | 6.5、6.6 |
-| 写了 CPU 列表，其他组仍来运行 | 是否仍为 member？分区是否 invalid？ | 6.2、6.4 |
-| isolated 后仍有内核工作 | 区分 unbound / 绑定工作队列、per-CPU 线程和中断 | 6.5 |
+| 整机有空闲 CPU，线程却排队 | `Cpus_allowed_list`、有效集合、isolated 分区内的线程分布 | 6.6、6.7 |
+| 写了 CPU 列表，其他组仍来运行 | 是否仍为 member？分区是否 invalid？ | 6.3、6.4 |
+| isolated 后仍有内核工作 | 区分 unbound / 绑定工作队列、per-CPU 线程和中断 | 6.7 |
 
 ## 9. 回顾
 
@@ -1285,6 +1563,6 @@ flowchart TD
 | 组怎样入队和被选中？ | `se.parent / my_q`、`cfs_rq` | [`enqueue_task_fair()`](../../linux/kernel/sched/fair.c#L7080)、[`pick_task_fair()`](../../linux/kernel/sched/fair.c#L9104) | 4.2～4.3 |
 | weight 怎样变成每 CPU 权重？ | `tg->shares / load_avg`、组实体 `load.weight` | [`calc_group_shares()`](../../linux/kernel/sched/fair.c#L4086)、[`reweight_entity()`](../../linux/kernel/sched/fair.c#L3949) | 4.4～4.5 |
 | 预算怎样扣除、耗尽和恢复？ | 共享池、本地余额、`throttle_count`、limbo | [`__account_cfs_rq_runtime()`](../../linux/kernel/sched/fair.c#L5859)、[`throttle_cfs_rq_work()`](../../linux/kernel/sched/fair.c#L5913)、[`do_sched_cfs_period_timer()`](../../linux/kernel/sched/fair.c#L6393) | 5.3～5.6 |
-| cpuset 请求怎样变成有效范围？ | `cpus_allowed / effective_cpus` | [`compute_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1227) | 6.2 |
-| 独占 CPU 怎样从父组移出？ | `effective_xcpus`、`partition_root_state` | [`update_prstate()`](../../linux/kernel/cgroup/cpuset.c#L3050)、[`partition_xcpus_add()`](../../linux/kernel/cgroup/cpuset.c#L1358) | 6.3～6.4 |
-| 放置和均衡边界怎样落实？ | `cpus_mask / cpus_ptr`、`rq.sd` | [`cpuset_update_tasks_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1192)、[`generate_sched_domains()`](../../linux/kernel/cgroup/cpuset.c#L831) | 6.5～6.7 |
+| cpuset 请求怎样变成有效范围？ | `cpus_allowed / effective_cpus` | [`update_cpumasks_hier()`](../../linux/kernel/cgroup/cpuset.c#L2227)、[`compute_effective_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1227) | 6.3 |
+| 独占 CPU 怎样从父组移出？ | `effective_xcpus`、`partition_root_state` | [`update_prstate()`](../../linux/kernel/cgroup/cpuset.c#L3050)、[`partition_xcpus_add()`](../../linux/kernel/cgroup/cpuset.c#L1358) | 6.4～6.5 |
+| 放置和均衡边界怎样落实？ | `cpus_mask / cpus_ptr`、`rq.sd` | [`cpuset_update_tasks_cpumask()`](../../linux/kernel/cgroup/cpuset.c#L1192)、[`generate_sched_domains()`](../../linux/kernel/cgroup/cpuset.c#L831) | 6.6～6.7 |
