@@ -28,6 +28,7 @@
 | `CONFIG_NO_HZ_COMMON=y`、`CONFIG_NO_HZ_FULL=y` | 编入 NOHZ 空闲均衡（6.3 节） | [.config#L105-L108](../../linux/.config#L105-L108) |
 | `CONFIG_HZ=1000` | 1 jiffy = 1 ms，均衡间隔的毫秒值与 jiffies 数值相同 | [.config#L506](../../linux/.config#L506) |
 | `CONFIG_PREEMPTION=y`（`PREEMPT_DYNAMIC`，默认 voluntary） | 新空闲均衡最多摘下一个任务就停止（5.9 节）；这是编译条件，与运行时选择哪种抢占模式无关 | [.config#L136-L142](../../linux/.config#L136-L142)、[fair.c#L9916-L9924](../../linux/kernel/sched/fair.c#L9916-L9924) |
+| `CONFIG_PREEMPT_RCU=y` | `rcu_read_lock()` 不关抢占；读取调度域不能用关抢占代替 RCU 读侧（2.8 节） | [.config#L168](../../linux/.config#L168)、[tree_plugin.h#L407-L420](../../linux/kernel/rcu/tree_plugin.h#L407-L420) |
 | `CONFIG_PREEMPT_RT` 未设置 | `SCHED_NR_MIGRATE_BREAK` 为 32 | [.config#L139](../../linux/.config#L139)、[sched.h#L2818-L2822](../../linux/kernel/sched/sched.h#L2818-L2822) |
 | `CONFIG_FAIR_GROUP_SCHED=y`、`CONFIG_CFS_BANDWIDTH=y` | 任务负载要折算成层级负载 `task_h_load()`；不能把任务迁到目标 CPU 上被限流的组中 | [.config#L219-L220](../../linux/.config#L219-L220)、[fair.c#L10145-L10152](../../linux/kernel/sched/fair.c#L10145-L10152)、[fair.c#L5902-L5905](../../linux/kernel/sched/fair.c#L5902-L5905)、[fair.c#L9672-L9673](../../linux/kernel/sched/fair.c#L9672-L9673) |
 | `CONFIG_SCHED_MC_PRIO=y` | 编入 ITMT（Intel Turbo Boost Max Technology 3.0，同一封装内个别核心的最高睿频更高），平台支持时可在 MC/CLS/PKG 层打开 `SD_ASYM_PACKING`（8.3 节） | [.config#L432](../../linux/.config#L432)、[itmt.c#L3-L12](../../linux/arch/x86/kernel/itmt.c#L3-L12)、[smpboot.c#L456-L491](../../linux/arch/x86/kernel/smpboot.c#L456-L491) |
@@ -76,7 +77,7 @@
 | 触发事件 | 调用链（简化） | 执行上下文 | 结果 |
 | --- | --- | --- | --- |
 | 本 CPU 的 tick 发现均衡时间已到 | `sched_tick()` → `sched_balance_trigger()` → 触发 `SCHED_SOFTIRQ` → `sched_balance_softirq()` → `sched_balance_domains()` | tick 在时钟硬中断中判断；均衡在软中断中执行 | 周期性地逐层检查，必要时迁移 |
-| 本 CPU 的公平队列空了，将要运行 idle | `__pick_next_task()` → `pick_next_task_fair()` 或 `balance_fair()` → `sched_balance_newidle()` | `schedule()` 内部，关中断、持本 CPU 运行队列锁（中途会释放） | 立即逐层尝试拉任务 |
+| `schedule()` 即将运行 idle | `__pick_next_task()` → `pick_next_task_fair()` 或 `balance_fair()` → `sched_balance_newidle()` | `schedule()` 内部，关中断、持本 CPU 运行队列锁（中途会释放） | 立即逐层尝试拉任务。两条入口的条件不同，见 6.2 节 |
 | 忙 CPU 的 tick 发现有停了 tick 的空闲 CPU 需要均衡 | `nohz_balancer_kick()` → `kick_ilb()` → IPI（核间中断，Inter-Processor Interrupt）→ `nohz_csd_func()` → `SCHED_SOFTIRQ` → `sched_balance_softirq()` → `nohz_idle_balance()` → `_nohz_idle_balance()` | 发起方在 tick 中；被选中的空闲 CPU 在 `SCHED_SOFTIRQ` 中执行，通常在 IPI 中断退出时处理（目标处于轮询空闲时可能不发 IPI，见 6.3 节） | 代替所有停 tick 的空闲 CPU 做周期均衡，或只更新它们的阻塞负载 |
 | 普通迁移多次失败，或必须搬运正在运行的任务 | `sched_balance_rq()` → `stop_one_cpu_nowait()` → `active_load_balance_cpu_stop()` | 源 CPU 上的 stopper 线程 | 把一个任务推到目标 CPU |
 | 唤醒、fork | `select_task_rq()` → `select_task_rq_fair()` | 持有 `p->pi_lock` | 返回任务应入队的 CPU |
@@ -92,7 +93,7 @@
 flowchart TB
     subgraph TRIG["触发"]
         T1["sched_tick()<br/>时钟硬中断"]
-        T2["schedule()<br/>公平队列为空"]
+        T2["schedule()<br/>即将运行 idle"]
         T3["忙 CPU 的 tick<br/>nohz_balancer_kick()"]
     end
     subgraph ENTRY["入口"]
@@ -111,7 +112,7 @@ flowchart TB
     T1 -->|"raise SCHED_SOFTIRQ"| E1
     T2 -->|"经 pick_next_task_fair()<br/>或 balance_fair()"| E2
     T3 -->|"IPI → nohz_csd_func()<br/>→ raise SCHED_SOFTIRQ"| E1
-    E1 -->|"有 NOHZ 请求"| E3
+    E1 -->|"请求非空，且 idle 为 CPU_IDLE"| E3
     E1 -->|"否则，均衡本 CPU"| E4
     E3 -->|"对每个空闲 CPU"| E4
     E4 --> C1
@@ -123,7 +124,8 @@ flowchart TB
 需要注意：
 
 - 三条触发路径最终都调用同一个 `sched_balance_rq()`，差别在于传入的空闲类型 `enum cpu_idle_type`（`__CPU_NOT_IDLE`、`CPU_IDLE`、`CPU_NEWLY_IDLE`，[idle.h#L7-L12](../../linux/include/linux/sched/idle.h#L7-L12)），以及是否按时间间隔节流。
-- 新空闲路径不经过 `sched_balance_domains()`，它自己遍历调度域，用“预计空闲时长”而不是时间间隔来节流（6.2 节）。
+- 新空闲路径不经过 `sched_balance_domains()`，它自己遍历调度域，用“预计空闲时长”而不是时间间隔来节流（6.2 节）。`balance_fair()` 的入口条件是根公平队列的 `nr_queued == 0`，不是“没有可运行公平任务”（6.2 节）。
+- 总览图里软中断走向 `_nohz_idle_balance()` 的条件是请求位非空且本次 `idle == CPU_IDLE`。请求位非空但空闲类型不是 `CPU_IDLE` 时，`nohz_idle_balance()` 清掉请求并返回 false，本 CPU 仍做 `sched_balance_domains()`（6.3 节）。
 
 ## 2. 调度域：负载均衡在哪些 CPU 之间进行
 
@@ -279,12 +281,16 @@ flowchart LR
 
 | 对象或字段 | 创建、发布与释放 | 读者需要的保护 |
 | --- | --- | --- |
-| 调度域链（`rq->sd`） | 在 CPU 热插拔锁和 `sched_domains_mutex` 下构建；用 `rcu_assign_pointer()` 发布；旧链用 `call_rcu()` 延迟释放（[topology.c#L644-L647](../../linux/kernel/sched/topology.c#L644-L647)、[topology.c#L769-L773](../../linux/kernel/sched/topology.c#L769-L773)） | RCU 读侧：`rcu_read_lock()` 或关抢占区间（[sched.h#L2012-L2024](../../linux/kernel/sched/sched.h#L2012-L2024)） |
+| 调度域链（`rq->sd`） | 在 CPU 热插拔锁和 `sched_domains_mutex` 下构建；用 `rcu_assign_pointer()` 发布；旧链用 `call_rcu()` 延迟释放（[topology.c#L644-L647](../../linux/kernel/sched/topology.c#L644-L647)、[topology.c#L769-L773](../../linux/kernel/sched/topology.c#L769-L773)） | RCU 读侧，或持有 `sched_domains_mutex`。关抢占不能代替，见本节下文（[sched.h#L2012-L2024](../../linux/kernel/sched/sched.h#L2012-L2024)） |
 | 调度组、算力对象、`sched_domain_shared` | 随调度域构建；`ref` 归零时随调度域的 RCU 回调释放（[topology.c#L599-L631](../../linux/kernel/sched/topology.c#L599-L631)） | 同上 |
 | `root_domain` | `refcount` 记录挂接的运行队列数，以及 `sched_get_rd()` 取得的临时引用（RT 推送路径使用），归零后 `call_rcu()` 释放（[topology.c#L472-L528](../../linux/kernel/sched/topology.c#L472-L528)） | 同上 |
 | 远端运行队列的统计量（`nr_running`、PELT 平均值等） | 由远端 CPU 在自己的运行队列锁下更新 | 均衡统计阶段**不加锁**读取，只作为启发式依据；真正摘任务时再持锁重新检查 |
 | `sgc->imbalance`、`sgc->capacity` | 多个 CPU 可能同时写 | 不加锁；它们是启发式状态，偶发的竞争只影响一次判断 |
 | 任务在运行队列之间的移动 | — | 源、目标运行队列锁，加上 `TASK_ON_RQ_MIGRATING` 协议（5.10 节） |
+
+`for_each_domain()` 经 `rcu_dereference_check_sched_domain()` 读取 `rq->sd`。宏写明的条件是持有 `sched_domains_mutex`，或 `rcu_read_lock_held()` 为真（[sched.h#L2012-L2013](../../linux/kernel/sched/sched.h#L2012-L2013)、[rcupdate.h#L679-L681](../../linux/include/linux/rcupdate.h#L679-L681)）。本配置 `CONFIG_PREEMPT_RCU=y`，`__rcu_read_lock()` 只增加 `rcu_read_lock_nesting`，不关抢占（[tree_plugin.h#L407-L420](../../linux/kernel/rcu/tree_plugin.h#L407-L420)）。非抢占 RCU 里 `__rcu_read_lock()` 才是 `preempt_disable()`，本配置不编译那段（[rcupdate.h#L83-L94](../../linux/include/linux/rcupdate.h#L83-L94)）。本配置也没有 `CONFIG_DEBUG_LOCK_ALLOC`（[.config#L10666](../../linux/.config#L10666)），于是 `rcu_read_lock_held()` 的内联实现恒返回 1（[rcupdate.h#L356-L358](../../linux/include/linux/rcupdate.h#L356-L358)），当前构建不会在运行时拦住缺少 RCU 读侧的访问。lockdep 版本才会检查 `rcu_read_lock` 的锁映射，而不是“当前不可抢占”（[update.c#L345-L351](../../linux/kernel/rcu/update.c#L345-L351)，该函数包在 `CONFIG_DEBUG_LOCK_ALLOC` 里，[update.c#L394](../../linux/kernel/rcu/update.c#L394)）。关抢占仍然不能代替 `rcu_read_lock()`：前者不进入抢占 RCU 的读侧。
+
+[sched.h#L2015-L2020](../../linux/kernel/sched/sched.h#L2015-L2020) 的注释仍写着域树只能在关抢占区间内访问。本章遍历域链的调用点同时关着抢占，并另外取 `rcu_read_lock()`：`sched_balance_domains()` 在软中断里取锁后遍历（[fair.c#L12511-L12512](../../linux/kernel/sched/fair.c#L12511-L12512)）；新空闲均衡的注释写明当时中断和抢占都关着（[fair.c#L13113-L13118](../../linux/kernel/sched/fair.c#L13113-L13118)）；`select_task_rq_fair()` 在持有 `pi_lock`、中断关闭时再取 `rcu_read_lock()`（[fair.c#L8764](../../linux/kernel/sched/fair.c#L8764)）。`nohz_run_idle_balance()` 跑在进入空闲前、关抢占和关中断之外（[fair.c#L13025-L13026](../../linux/kernel/sched/fair.c#L13025-L13026)、[idle.c#L276-L284](../../linux/kernel/sched/idle.c#L276-L284)），但它传给 `_nohz_idle_balance()` 的只有 `NOHZ_STATS_KICK`（[fair.c#L13038-L13039](../../linux/kernel/sched/fair.c#L13038-L13039)）。`sched_balance_domains()` 只在请求含 `NOHZ_BALANCE_KICK` 时调用（[fair.c#L12964-L12965](../../linux/kernel/sched/fair.c#L12964-L12965)、[sched.h#L3128-L3131](../../linux/kernel/sched/sched.h#L3128-L3131)），所以这条路径不遍历调度域。
 
 ## 3. 调度域树的构建与重建
 
@@ -326,7 +332,7 @@ flowchart LR
 
 可以看出几条设计意图（属于分析）：层次越高，间隔越长、越不轻易迁移缓存热任务；SMT 层阈值最低，因为兄弟线程之间搬任务几乎没有缓存代价；NUMA 层要求全局串行，避免大量 CPU 同时扫描整个系统。
 
-`cpuset.sched_relax_domain_level` 或启动参数 `relax_domain_level=` 可以在某一层及以上关闭 `SD_BALANCE_WAKE` 和 `SD_BALANCE_NEWIDLE`（[topology.c#L1502-L1527](../../linux/kernel/sched/topology.c#L1502-L1527)）。
+`cpuset.sched_relax_domain_level` 或启动参数 `relax_domain_level=` 在指定层及以上执行 `sd->flags &= ~(SD_BALANCE_WAKE|SD_BALANCE_NEWIDLE)`（[topology.c#L1523-L1526](../../linux/kernel/sched/topology.c#L1523-L1526)）。`default_relax_domain_level` 初值是 -1，不设置时这个函数直接返回（[topology.c#L1499](../../linux/kernel/sched/topology.c#L1499)、[topology.c#L1516-L1518](../../linux/kernel/sched/topology.c#L1516-L1518)）。`sd_init()` 本来就不设置 `SD_BALANCE_WAKE`，因此一旦生效，实际被关掉的是从该层往上的 `SD_BALANCE_NEWIDLE`。
 
 ### 3.3 `build_sched_domains()`：构建、连组、算力、挂载
 
@@ -392,7 +398,7 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 | `cfs_tasks` | 本 CPU 上全部公平任务（含各级组内的任务）组成的链表 | [sched.h#L1229](../../linux/kernel/sched/sched.h#L1229) |
 | `idle_stamp`、`avg_idle`、`max_idle_balance_cost` | 进入空闲的时刻、平均空闲时长、新空闲均衡的最大耗时，单位纳秒（6.2 节） | [sched.h#L1239-L1243](../../linux/kernel/sched/sched.h#L1239-L1243) |
 
-`cfs_tasks` 维护成“最近运行在前”的顺序：任务入队时 `list_add()` 到表头（[fair.c#L3758-L3768](../../linux/kernel/sched/fair.c#L3758-L3768)），被选中运行时 `list_move()` 到表头（[fair.c#L13749-L13759](../../linux/kernel/sched/fair.c#L13749-L13759)）。因此表尾是最久没运行的任务，缓存最可能已经冷了，`detach_tasks()` 从表尾开始挑（5.9 节）。
+`cfs_tasks` 按最近入队或最近被选中的顺序维护。内核在选中任务时把它移到表头，并注明这使链表成为 MRU（[fair.c#L13753-L13758](../../linux/kernel/sched/fair.c#L13753-L13758)）；任务入队时同样 `list_add()` 到表头（[fair.c#L3761-L3766](../../linux/kernel/sched/fair.c#L3761-L3766)）。表尾是最久没有入队、也最久没有被选中的任务。刚被唤醒的任务即使睡了很久，也会插到表头，所以表尾不等于“最久没有在 CPU 上运行”。`detach_tasks()` 仍从表尾开始挑（5.9 节）。
 
 ### 4.2 四种度量
 
@@ -714,7 +720,7 @@ env->imbalance = min(
 找到源运行队列后，`sched_balance_rq()` 在源运行队列锁下调用 `detach_tasks()`（[fair.c#L9816-L9949](../../linux/kernel/sched/fair.c#L9816-L9949)）：
 
 1. 源队列只剩不超过 1 个任务，或 `imbalance` 已不为正，直接返回。
-2. 从 `cfs_tasks` **表尾**（最久未运行的任务）开始逐个检查。每检查一个，`loop` 加 1，超过 `loop_max`（`nr_migrate` 与源队列任务数的较小值）就停止。目标 CPU 空闲时，源队列只剩 1 个任务就停止，不把它拿空；注释说拿空会让对方反过来也这样对待自己，最坏情况下形成活锁。
+2. 从 `cfs_tasks` **表尾**（最久没有入队或被选中的任务，4.1 节）开始逐个检查。每检查一个，`loop` 加 1，超过 `loop_max`（`nr_migrate` 与源队列任务数的较小值）就停止。目标 CPU 空闲时，源队列只剩 1 个任务就停止，不把它拿空；注释说拿空会让对方反过来也这样对待自己，最坏情况下形成活锁。
 3. 对每个任务调用 `can_migrate_task()`，不能迁的放回表头。
 4. 能迁的，按迁移类型扣减 `imbalance`：
    - 负载：用 `task_h_load()`，至少记 1；若负载右移 `nr_balance_failed` 位后仍超过剩余 `imbalance` 就跳过。失败次数越多，这个“别搬过头”的约束越宽松。
@@ -857,10 +863,11 @@ interval = clamp(interval, 1, max_load_balance_interval);
 
 ### 6.2 新空闲均衡
 
-**入口。** 当 `schedule()` 发现本 CPU 的公平队列为空时：
+**入口。** `sched_balance_newidle()` 在 `schedule()` 挑选下一个任务时进入，有两条路径：
 
-- 快路径：若当前任务不高于公平调度类，且运行队列中全是公平任务，`__pick_next_task()` 直接调用 `pick_next_task_fair(rq, prev, rf)`（[core.c#L5973-L6018](../../linux/kernel/sched/core.c#L5973-L6018)）。后者找不到任务时转到 `idle` 标签，调用 `sched_balance_newidle()`（[fair.c#L9201-L9220](../../linux/kernel/sched/fair.c#L9201-L9220)）。
-- 一般路径：`prev_balance()` 从当前任务的调度类开始依次调用各类的 `balance` 回调，公平调度类的回调 `balance_fair()` 在没有可运行公平任务时调用 `sched_balance_newidle()`（[core.c#L5937-L5966](../../linux/kernel/sched/core.c#L5937-L5966)、[fair.c#L8882-L8889](../../linux/kernel/sched/fair.c#L8882-L8889)）。
+- 快路径：若 `rq->donor` 的调度类不高于公平类，且 `rq->nr_running == rq->cfs.h_nr_queued`，`__pick_next_task()` 直接调用 `pick_next_task_fair()`（[core.c#L5989-L5992](../../linux/kernel/sched/core.c#L5989-L5992)）。后者挑不到任务时转到 `idle` 标签，调用 `sched_balance_newidle()`（[fair.c#L9201-L9217](../../linux/kernel/sched/fair.c#L9201-L9217)）。
+- 一般路径：上面的条件不成立时，`prev_balance()` 从 `rq->donor` 的调度类开始，向 idle 方向调用各类的 `balance`，某个回调返回非 0 就停止（[core.c#L5937-L5966](../../linux/kernel/sched/core.c#L5937-L5966)）。公平类的 `balance_fair()` 在 `sched_fair_runnable(rq)` 为真时直接返回 1。这个判断看的是根 `cfs_rq` 的 `nr_queued > 0`（[sched.h#L2592-L2595](../../linux/kernel/sched/sched.h#L2592-L2595)、[fair.c#L8882-L8889](../../linux/kernel/sched/fair.c#L8882-L8889)）。只有 `nr_queued == 0` 才调用 `sched_balance_newidle()`。donor 已经是公平类或更低时，这次循环不会调用 RT、DL 的 `balance`。
+- 延迟出队会让 `nr_queued` 与 `h_nr_runnable` 分开（5.3 节）。`DELAY_DEQUEUE` 默认打开（[features.h#L49-L58](../../linux/kernel/sched/features.h#L49-L58)）。睡眠出队时，若 `entity_eligible()` 为假，`dequeue_entity()` 在 `set_delayed()` 之后返回 false，到不了后面的 `account_entity_dequeue()`，`nr_queued` 保持不变；`set_delayed()` 把各级 `h_nr_runnable` 减 1（[fair.c#L5571-L5575](../../linux/kernel/sched/fair.c#L5571-L5575)、[fair.c#L5503-L5518](../../linux/kernel/sched/fair.c#L5503-L5518)、[fair.c#L5602-L5605](../../linux/kernel/sched/fair.c#L5602-L5605)）。一般路径上，这种任务仍使 `balance_fair()` 返回 1。后面的挑选走 `__pick_next_task_fair()`，它把 `rf` 传成 NULL（[fair.c#L9223-L9226](../../linux/kernel/sched/fair.c#L9223-L9226)、[fair.c#L14104-L14109](../../linux/kernel/sched/fair.c#L14104-L14109)），`idle` 标签看到 `rf` 为空就直接返回，不再补做新空闲均衡（[fair.c#L9201-L9220](../../linux/kernel/sched/fair.c#L9201-L9220)）。快路径则把带 `rf` 的 `pick_next_task_fair()` 交给挑选函数：延迟出队任务在 `pick_next_entity()` 里被真正摘下（[fair.c#L5687-L5693](../../linux/kernel/sched/fair.c#L5687-L5693)），队列空了仍进入 `idle` 标签。
 
 **执行上下文。** 此时中断已关、持有本 CPU 运行队列锁，`prev` 仍是本 CPU 的当前任务。
 
@@ -871,14 +878,14 @@ interval = clamp(interval, 1, max_load_balance_interval);
 3. **开销门槛**：若根域未过载（`rd->overloaded` 为假，即没有 CPU 多于一个可运行任务，也没有 misfit 任务，2.6 节），或本 CPU 的平均空闲时长 `avg_idle` 小于最底层调度域的 `max_newidle_lb_cost`，就不做均衡，直接跳到出口：更新 `next_balance`，并像第 8 步的失败分支一样调用 `nohz_newidle_balance()`（[fair.c#L13128-L13134](../../linux/kernel/sched/fair.c#L13128-L13134)、[fair.c#L13211-L13219](../../linux/kernel/sched/fair.c#L13211-L13219)）。
 4. 释放本 CPU 运行队列锁，补做阻塞负载衰减。
 5. 自下而上遍历调度域。对每一层：若 `avg_idle` 小于“已花费时间 + 本层最大耗时”，停止；若本层有 `SD_BALANCE_NEWIDLE`：
-   - `NI_RANDOM` 特性（默认开启，[features.h#L133-L136](../../linux/kernel/sched/features.h#L133-L136)）下按本层历史成功率掷一个 1024 面的骰子，没掷中就只记一次失败，跳过本层；
-   - 调用 `sched_balance_rq(..., CPU_NEWLY_IDLE, ...)`，测量本层耗时，用 `update_newidle_cost()` 更新最大耗时和成功率。
+   - `NI_RANDOM` 特性（默认开启，[features.h#L133-L136](../../linux/kernel/sched/features.h#L133-L136)）下按本层历史成功率掷一个 1024 面的骰子。没掷中就调用 `update_newidle_stats(sd, 0)`，把这次记成一次失败并跳过本层。掷中后，`weight` 的初值是 `1 + newidle_ratio`，随即被改写成 `(1024 + weight / 2) / weight`（[fair.c#L13151-L13167](../../linux/kernel/sched/fair.c#L13151-L13167)）。
+   - 调用 `sched_balance_rq(..., CPU_NEWLY_IDLE, ...)`，测量本层耗时。耗时非 0 时，`update_newidle_cost()` 才把成功次数 `weight * !!pulled_task` 累加进成功率（[fair.c#L12461-L12468](../../linux/kernel/sched/fair.c#L12461-L12468)、[fair.c#L13182](../../linux/kernel/sched/fair.c#L13182)）。一次真正拉到任务可以记成多于 1，用来抵消前面被跳过的次数。
    拉到任务或 `continue_balancing` 为 0 时停止。
 6. 重新获取本 CPU 运行队列锁，更新 `max_idle_balance_cost`。
-7. 释放锁期间可能有任务入队：若此时有公平任务，即使自己没拉到也视为成功；若有更高调度类的任务，返回 -1。
+7. 释放锁期间可能有任务入队：若此时 `cfs.h_nr_queued` 非 0，即使自己没拉到也视为成功；若 `nr_running != cfs.h_nr_queued`，说明出现了更高调度类的任务，返回 -1（[fair.c#L13204-L13209](../../linux/kernel/sched/fair.c#L13204-L13209)）。
 8. 成功时清零 `idle_stamp`；失败时调用 `nohz_newidle_balance()`，看是否需要在进入空闲前替其他空闲 CPU 更新阻塞负载（6.3 节）。
 
-**返回值语义。** 正数表示有公平任务可运行，`pick_next_task_fair()` 回到 `again` 重新挑选；负数表示出现了更高调度类的任务，返回 `RETRY_TASK`，`__pick_next_task()` 从最高调度类重新开始；0 表示失败，运行 idle 任务。
+**返回值语义。** 正数表示拉到了任务，或释放锁期间 `cfs.h_nr_queued` 变为非 0；`pick_next_task_fair()` 回到 `again` 重新挑选。这个正数不保证立刻有一个可运行的公平任务，队列里可以只剩 delayed 任务。负数表示出现了更高调度类的任务，返回 `RETRY_TASK`，`__pick_next_task()` 从最高调度类重新开始。0 表示失败，运行 idle 任务。
 
 **为什么释放锁是安全的。** 源码注释说明：`prev` 仍在本 CPU 上运行（`on_cpu`），不会被其他 CPU 的均衡选中迁走；中断和抢占仍关闭，本 CPU 上不会发生其他调度活动；调用者在返回后会重新开始挑选循环（[fair.c#L13113-L13119](../../linux/kernel/sched/fair.c#L13113-L13119)）。
 
@@ -927,9 +934,9 @@ interval = clamp(interval, 1, max_load_balance_interval);
 
 **踢醒的过程。** `kick_ilb()`（[fair.c#L12609-L12645](../../linux/kernel/sched/fair.c#L12609-L12645)）：完整均衡时先把 `nohz.next_balance` 推到下一个 jiffy，避免别的忙 CPU 紧接着重复踢；`find_new_ilb()` 在 NOHZ 空闲集合与 `HK_TYPE_KERNEL_NOISE` housekeeping 集合的交集中找一个确实空闲的 CPU（[fair.c#L12583-L12601](../../linux/kernel/sched/fair.c#L12583-L12601)），这样 `nohz_full` 隔离的 CPU 不会被选来做 ILB；若目标 CPU 已经带有全部请求位就不再重复；用 `atomic_fetch_or()` 把请求位合并到目标 CPU 的 `nohz_flags`，只有**第一个**设置请求位的发起者负责发送 IPI，因为目标的 `nohz_csd` 只有一个。
 
-IPI 到达后，`nohz_csd_func()` 原子地取走并清除请求位，若本 CPU 仍空闲，就把请求位存入 `rq->nohz_idle_balance`，置 `rq->idle_balance`，并触发 `SCHED_SOFTIRQ`（[core.c#L1314-L1331](../../linux/kernel/sched/core.c#L1314-L1331)）。若目标 CPU 正处于设置了 `TIF_POLLING_NRFLAG` 的轮询空闲，发起方只设置重新调度标志而不发 IPI（[core.c#L3844-L3849](../../linux/kernel/sched/core.c#L3844-L3849)）；`nohz_csd_func()` 改由 idle 线程在 `flush_smp_call_function_queue()` 中执行，挂起的软中断随后处理（[idle.c#L378](../../linux/kernel/sched/idle.c#L378)、[smp.c#L610-L626](../../linux/kernel/smp.c#L610-L626)）。运行时走哪条路径取决于目标 CPU 当时的空闲状态，静态分析无法确定。
+IPI 到达后，`nohz_csd_func()` 先用 `atomic_fetch_andnot()` 取走并清除请求位，再令 `rq->idle_balance = idle_cpu(cpu)`。只有这时仍空闲，才把请求位存入 `rq->nohz_idle_balance` 并触发 `SCHED_SOFTIRQ`。已经不再空闲时，请求位已经被清掉，不会留下 `nohz_idle_balance`，也不会触发软中断，这次踢醒被丢掉（[core.c#L1314-L1331](../../linux/kernel/sched/core.c#L1314-L1331)）。若目标 CPU 正处于设置了 `TIF_POLLING_NRFLAG` 的轮询空闲，发起方只设置重新调度标志而不发 IPI（[core.c#L3844-L3849](../../linux/kernel/sched/core.c#L3844-L3849)）；`nohz_csd_func()` 改由 idle 线程在 `flush_smp_call_function_queue()` 中执行，挂起的软中断随后处理（[idle.c#L378](../../linux/kernel/sched/idle.c#L378)、[smp.c#L610-L626](../../linux/kernel/smp.c#L610-L626)）。运行时走哪条路径取决于目标 CPU 当时的空闲状态，静态分析无法确定。
 
-**代理均衡。** 软中断中，`sched_balance_softirq()` 先调用 `nohz_idle_balance()`，有请求就执行 `_nohz_idle_balance()` 并直接返回，不再做本 CPU 的普通均衡（[fair.c#L12996-L13011](../../linux/kernel/sched/fair.c#L12996-L13011)）。源码注释给出的原因是：先让各个空闲 CPU 都有机会拉任务，否则本 CPU 可能只在自己的域里拉到任务就结束了。
+**代理均衡。** 软中断中，`sched_balance_softirq()` 先调用 `nohz_idle_balance()`。只有 `rq->nohz_idle_balance` 非空，且本次 `idle == CPU_IDLE`，才执行 `_nohz_idle_balance()` 并直接返回，不再做本 CPU 的普通均衡。请求位非空但空闲类型不是 `CPU_IDLE` 时，函数把 `rq->nohz_idle_balance` 清零并返回 false，随后仍执行本 CPU 的 `sched_balance_domains()`（[fair.c#L12996-L13011](../../linux/kernel/sched/fair.c#L12996-L13011)、[fair.c#L13246-L13251](../../linux/kernel/sched/fair.c#L13246-L13251)）。源码注释给出先做代理均衡的原因：先让各个空闲 CPU 都有机会拉任务，否则本 CPU 可能只在自己的域里拉到任务就结束了。这个注释描述的是 `idle == CPU_IDLE` 时提前返回的那条路径。
 
 `_nohz_idle_balance()`（[fair.c#L12893-L12990](../../linux/kernel/sched/fair.c#L12893-L12990)）：
 
@@ -942,7 +949,7 @@ IPI 到达后，`nohz_csd_func()` 原子地取走并清除请求位，若本 CPU
 
 **内存序。** 登记与代理均衡之间存在竞争：一个 CPU 刚进入 NOHZ 空闲，ILB 可能已经开始遍历。源码用成对的屏障保证不会漏掉：登记方先写掩码和计数，`smp_mb__after_atomic()`，再写 `has_blocked`/`needs_update`；ILB 方先清 `has_blocked`/`needs_update`，`smp_mb()`，再读掩码（[fair.c#L12847-L12867](../../linux/kernel/sched/fair.c#L12847-L12867)、[fair.c#L12906-L12925](../../linux/kernel/sched/fair.c#L12906-L12925)）。于是，ILB 要么在掩码中看到新 CPU，要么之后看到它重新置起的 `has_blocked`，从而再安排一次更新。
 
-下面的时序图展示一次完整的 NOHZ 均衡，并用注释标出各步所在的执行上下文。图中把 CPU 3、CPU 9 作为示例，并非固定角色；图按发 IPI 的常见情形绘制，省略了 `update_rq_clock()`、请求位检查等细节。
+下面的时序图展示一次完整的 NOHZ 均衡，并用注释标出各步所在的执行上下文。图中把 CPU 3、CPU 9 作为示例，并非固定角色。图按目标 CPU 在 IPI 到达时仍空闲、软中断里 `idle` 仍是 `CPU_IDLE` 的常见情形绘制，省略了 `update_rq_clock()`、请求位检查，以及“IPI 到达时已经不空闲”或“空闲类型不再是 `CPU_IDLE`”这两条不会进入代理均衡的分支。
 
 ```mermaid
 sequenceDiagram
@@ -992,7 +999,7 @@ sequenceDiagram
    - 否则，若本层带 `sd_flag`（对应场景的 `SD_BALANCE_*`），就记下本层并继续向上；本层不带该标志且不需要亲和时停止。于是 `sd` 是从底层起连续带该标志的最高一层。
 3. 若找到了这样的层，走**慢路径** `sched_balance_find_dst_cpu()`；否则，若是唤醒，走**快路径** `select_idle_sibling()`。
 
-由于 `sd_init()` 默认不设置 `SD_BALANCE_WAKE`，唤醒几乎总走快路径；fork 和 exec 有 `SD_BALANCE_FORK`/`SD_BALANCE_EXEC`，走慢路径。
+`sd_init()` 把 `SD_BALANCE_WAKE` 写成 `0*SD_BALANCE_WAKE`，本树没有别的地方再把它置上；debugfs 中的 `flags` 也是只读的（[topology.c#L1654-L1657](../../linux/kernel/sched/topology.c#L1654-L1657)、[debug.c#L581](../../linux/kernel/sched/debug.c#L581)）。唤醒的 `sd_flag` 是 `WF_TTWU`，与 `SD_BALANCE_WAKE` 同值，因此每一层都不带这个标志。`want_affine` 为假时，循环在第一层就停；为真时，要么做完 `wake_affine()` 后把 `sd` 清成 NULL，要么一直向上也找不到带该标志的层。两条路的 `sd` 都是 NULL，唤醒总是走快路径 `select_idle_sibling()`。带 `WF_CURRENT_CPU` 且当前 CPU 允许时，在进入域遍历之前就返回，同样不是慢路径。fork 和 exec 的域带有 `SD_BALANCE_FORK` / `SD_BALANCE_EXEC`（距离超过 `node_reclaim_distance` 的 NUMA 层除外，3.2 节），走慢路径。
 
 ### 7.2 唤醒亲和：`wake_wide()` 与 `wake_affine()`
 
@@ -1000,17 +1007,18 @@ sequenceDiagram
 
 `wake_affine()`（[fair.c#L7563-L7581](../../linux/kernel/sched/fair.c#L7563-L7581)）只在两个 CPU 中选：
 
-- `wake_affine_idle()`：唤醒者 CPU 空闲且与 `prev_cpu` 共享缓存时，`prev_cpu` 也空闲就选 `prev_cpu`，否则选唤醒者 CPU；同步唤醒且唤醒者 CPU 上只有唤醒者自己时选唤醒者 CPU；`prev_cpu` 空闲选 `prev_cpu`（[fair.c#L7489-L7518](../../linux/kernel/sched/fair.c#L7489-L7518)）。
-- 无法决定时，`wake_affine_weight()` 比较“把任务放过来后唤醒者 CPU 的负载”与“任务离开后 `prev_cpu` 的负载”（按对方算力交叉缩放，并给 `prev_cpu` 一半 `imbalance_pct` 的偏置），唤醒者一侧更轻才选唤醒者 CPU（[fair.c#L7520-L7561](../../linux/kernel/sched/fair.c#L7520-L7561)）。
+- `wake_affine_idle()`：唤醒者 CPU 空闲且与 `prev_cpu` 共享缓存时，`prev_cpu` 也空闲就选 `prev_cpu`，否则选唤醒者 CPU；同步唤醒且 `nr_running - cfs_h_nr_delayed(rq) == 1` 时选唤醒者 CPU，delayed 任务不计入这个 1；`prev_cpu` 空闲则选 `prev_cpu`（[fair.c#L7504-L7515](../../linux/kernel/sched/fair.c#L7504-L7515)）。
+- 无法决定时，`wake_affine_weight()` 比较“把任务放过来后唤醒者 CPU 的负载”与“任务离开后 `prev_cpu` 的负载”。两侧都乘以对方的 `capacity_of()`。`WA_BIAS` 默认打开（[features.h#L124](../../linux/kernel/sched/features.h#L124)），此时唤醒者一侧再乘 100，`prev_cpu` 一侧再乘 `100 + (imbalance_pct - 100) / 2`。示例机器的 `imbalance_pct` 为 117，两侧系数是 108 和 100，多出来的 8 来自 `(117 - 100) / 2`。`prev_cpu` 一侧变大后，`this_eff_load < prev_eff_load` 更容易成立，所以偏置偏向唤醒者。只有唤醒者一侧更轻才选唤醒者 CPU（[fair.c#L7540-L7560](../../linux/kernel/sched/fair.c#L7540-L7560)）。
 
 选出的 CPU 只是一个起点（`target`），随后还要交给快路径在其所在 LLC 内找空闲 CPU。
 
 ### 7.3 慢路径：`sched_balance_find_dst_cpu()`
 
-慢路径是“迁移均衡”在放置时的镜像：不是找最忙的组拉任务，而是找最闲的组放任务（[fair.c#L7646-L7695](../../linux/kernel/sched/fair.c#L7646-L7695)）：
+慢路径是“迁移均衡”在放置时的镜像：找最闲的组放任务（[fair.c#L7646-L7697](../../linux/kernel/sched/fair.c#L7646-L7697)）：
 
 ```c
 /* 伪代码：sched_balance_find_dst_cpu() */
+int new_cpu = cpu;   /* 调用者传入的 CPU；唤醒时是唤醒者 */
 sd = 最高的带 sd_flag 的调度域;
 if (sd 范围与 p->cpus_ptr 无交集) return prev_cpu;
 while (sd) {
@@ -1022,7 +1030,7 @@ while (sd) {
     cpu = new_cpu;
     sd = new_cpu 的、范围小于原 sd 的最高的带 sd_flag 的域;   /* 在新位置继续向下细化 */
 }
-return new_cpu;
+return new_cpu;   /* 一层都没选出新 CPU 时，就是上面的初始值 */
 ```
 
 `sched_balance_find_dst_group()`（[fair.c#L11063-L11227](../../linux/kernel/sched/fair.c#L11063-L11227)）用 `update_sg_wakeup_stats()` 统计各组（统计时扣除任务 `p` 自己的贡献，[fair.c#L10949-L11003](../../linux/kernel/sched/fair.c#L10949-L11003)），复用同一套 `group_classify()` 分类，再按 `update_pick_idlest()` 选出最闲的非本地组：类型更低者胜；同为过载或满载时 `avg_load` 更低者胜；同为有余量时空闲 CPU 多者胜，再比利用率低者。最后与本地组比较，只有对方明显更闲时才返回它；在 NUMA 层，过载/满载时要求对方的负载加上容差后仍低于本地组，有余量时会考虑 NUMA 首选节点并允许少量失衡（8.2 节）。
@@ -1091,7 +1099,7 @@ x86 上有两种不对称机制，都取决于运行时平台检测：
 | 全局状态 | `rd->overloaded` | `rd->rto_mask`、`rto_count` 标出有**可推送**实时任务的 CPU，即该任务已入队、未在运行、且允许在多个 CPU 上运行（[rt.c#L344-L361](../../linux/kernel/sched/rt.c#L344-L361)、[rt.c#L397-L411](../../linux/kernel/sched/rt.c#L397-L411)、[rt.c#L1446-L1447](../../linux/kernel/sched/rt.c#L1446-L1447)） |
 | 入口 | `sched_balance_rq()` | 推：`push_rt_tasks()`，常经 `queue_balance_callback()` 排队，在本次调度操作的后段持锁执行（[rt.c#L384-L395](../../linux/kernel/sched/rt.c#L384-L395)）；拉：`balance_rt()` → `pull_rt_task()`（[rt.c#L1594-L1615](../../linux/kernel/sched/rt.c#L1594-L1615)） |
 
-deadline 调度类的结构类似，入口是 `push_dl_tasks()`、`pull_dl_task()` 和 `balance_dl()`（[deadline.c#L2477](../../linux/kernel/sched/deadline.c#L2477)、[deadline.c#L2946-L2953](../../linux/kernel/sched/deadline.c#L2946-L2953)）。两者与公平调度类的交集是：RT 和 DL 的利用率会降低 `cpu_capacity`，从而影响公平任务的均衡（8.4 节）；`prev_balance()` 按调度类优先级依次调用各类的 `balance` 回调，高优先级类拉到任务后，公平调度类的新空闲均衡就不再执行（[core.c#L5937-L5966](../../linux/kernel/sched/core.c#L5937-L5966)）。
+deadline 调度类的结构类似，入口是 `push_dl_tasks()`、`pull_dl_task()` 和 `balance_dl()`（[deadline.c#L2477](../../linux/kernel/sched/deadline.c#L2477)、[deadline.c#L2946-L2953](../../linux/kernel/sched/deadline.c#L2946-L2953)）。两者与公平调度类的交集是：RT 和 DL 的利用率会降低 `cpu_capacity`，从而影响公平任务的均衡（8.4 节）。`prev_balance()` 从 `rq->donor` 的调度类开始向低优先级方向调用 `balance`，某个类返回非 0 就停止（[core.c#L5937-L5966](../../linux/kernel/sched/core.c#L5937-L5966)）。`balance_rt()` 的返回值是 stop、DL 或 RT 当前是否可运行，不只表示这次有没有拉到任务（[rt.c#L1602-L1614](../../linux/kernel/sched/rt.c#L1602-L1614)）。因此 donor 高于公平类、且更高类已经可运行时，公平类的新空闲均衡不会执行；donor 已经是公平类时，这条路径不会调用 RT、DL 的 `balance`。快路径在 donor 不高于公平类且 `nr_running == cfs.h_nr_queued` 时直接跳过 `prev_balance()`（6.2 节）。
 
 ## 10. 观测与调试
 
@@ -1121,10 +1129,10 @@ deadline 调度类的结构类似，入口是 `push_dl_tasks()`、`pull_dl_task(
 
 - **一棵树**：每个 CPU 有一条从 SMT 到 NUMA 的调度域链。调度域保存每层的均衡参数和运行时状态，是每 CPU 私有的；调度组和算力对象把同一层划分成可比较的单元，非 NUMA 层的组由同层 CPU 共享，NUMA 层的组每 CPU 一份但共享算力对象。树在启动和拓扑变化时由 `build_sched_domains()` 构建，经 `cpu_attach_domain()` 删除退化层后用 RCU 发布。
 
-- **一次判定**：`sched_balance_rq()` 是所有迁移路径共用的核心。它先由 `should_we_balance()` 确定每组只有一个 CPU 负责上层（新空闲均衡除外）；再统计各组的负载、利用率、可运行度和任务数，把组分为七类；根据本地组与最忙组的类别，选择按任务个数、利用率或负载来计算要搬多少；然后从最忙运行队列的最久未运行任务开始，经亲和性、限流、缓存热度、NUMA 局部性过滤后摘下任务，在不同时持有两把锁的前提下挂到目标运行队列。搬不动时，通过 `LBF_*` 标志改目标、标记上层失衡、排除源 CPU 或请求主动均衡；均衡的结果反过来调节 `balance_interval` 和 `nr_balance_failed`。
+- **一次判定**：`sched_balance_rq()` 是所有迁移路径共用的核心。它先由 `should_we_balance()` 确定每组只有一个 CPU 负责上层（新空闲均衡除外）；再统计各组的负载、利用率、可运行度和任务数，把组分为七类；根据本地组与最忙组的类别，选择按任务个数、利用率或负载来计算要搬多少；然后从最忙运行队列 `cfs_tasks` 的表尾开始，经亲和性、限流、缓存热度、NUMA 局部性过滤后摘下任务，在不同时持有两把锁的前提下挂到目标运行队列。表尾是最久没有入队或被选中的任务（4.1 节）。搬不动时，通过 `LBF_*` 标志改目标、标记上层失衡、排除源 CPU 或请求主动均衡；均衡的结果反过来调节 `balance_interval` 和 `nr_balance_failed`。
 
 - **三条触发**：tick 驱动的周期均衡按层间隔逐层检查；新空闲均衡在 CPU 即将空闲时立即拉任务，用预计空闲时长控制开销；NOHZ 空闲均衡让忙 CPU 在 tick 中判断，再唤醒一个空闲 CPU 代表所有停 tick 的空闲 CPU 执行周期均衡。
 
-- **一个镜像**：fork、exec（以及设置了 `SD_BALANCE_WAKE` 的唤醒）走慢路径，复用同一套 `group_classify()` 分类，方向相反——找最闲的组和 CPU 放任务；普通唤醒走快路径：先在唤醒者与原 CPU 之间做亲和选择，再在 LLC 内找空闲 CPU，扫描个数受周期均衡计算的 `nr_idle_scan` 约束。
+- **一个镜像**：fork 和 exec 走慢路径，复用同一套 `group_classify()` 分类，方向相反——找最闲的组和 CPU 放任务。本树不设置 `SD_BALANCE_WAKE`，唤醒总是走快路径：先在唤醒者与原 CPU 之间做亲和选择，再在 LLC 内找空闲 CPU，扫描个数受周期均衡计算的 `nr_idle_scan` 约束。
 
 这些机制共同体现了几个取舍：用分层和“每组一个代表”把开销控制在 O(n)；用多种度量与组分类代替单一的负载公式；在缓存、NUMA 局部性与均衡之间，用失败计数逐步放宽约束，而不是一开始就强行搬运。

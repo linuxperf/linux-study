@@ -45,7 +45,7 @@
 | `CONFIG_SCHED_CLASS_EXT` 未出现在 `.config` 中 | sched_ext 未编入，判断过程见 [cpu 控制器章第 0 节](../cgroup2/cpu.md) | — |
 | `CONFIG_JUMP_LABEL=y` | 调度特性 `sched_feat(X)` 编译为静态键，可在运行时切换 | [.config#L847](../../linux/.config#L847)、[sched.h#L2250-L2262](../../linux/kernel/sched/sched.h#L2250-L2262) |
 | `CONFIG_IRQ_TIME_ACCOUNTING` 未设置，`CONFIG_PARAVIRT_TIME_ACCOUNTING=y` | 记账用的 `rq->clock_task` 不扣除中断处理时间；在半虚拟化 steal time 启用时扣除被宿主机占用的时间 | [.config#L150](../../linux/.config#L150)、[.config#L397](../../linux/.config#L397)、[core.c#L787-L844](../../linux/kernel/sched/core.c#L787-L844) |
-| `CONFIG_NO_HZ_FULL=y` | CPU 上只剩一个公平任务时，tick 可能停止 | [.config#L108](../../linux/.config#L108)、[core.c#L1385-L1386](../../linux/kernel/sched/core.c#L1385-L1386) |
+| `CONFIG_NO_HZ_FULL=y` | 没有 deadline、实时任务，且公平队列不超过一个任务时，本地 tick 可能停止；带宽受限时仍不停（5.4 节） | [.config#L108](../../linux/.config#L108)、[core.c#L1350-L1400](../../linux/kernel/sched/core.c#L1350-L1400) |
 | `CONFIG_DEBUG_FS=y`、`CONFIG_DEBUG_FS_ALLOW_ALL=y` | `sched_init_debug()` 在 debugfs 中创建 `sched/features`、`sched/base_slice_ns` 等文件；默认允许挂载 debugfs 并创建文件，启动参数 `debugfs=` 可以改变这一点 | [.config#L10544-L10545](../../linux/.config#L10544-L10545)、[debug.c#L499-L512](../../linux/kernel/sched/debug.c#L499-L512)、[internal.h#L61-L63](../../linux/fs/debugfs/internal.h#L61-L63)、[inode.c#L902-L923](../../linux/fs/debugfs/inode.c#L902-L923) |
 
 还有几个**运行时条件**会改变结论，本章以默认值为准。
@@ -157,7 +157,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | fork 后首次唤醒 | [`wake_up_new_task()`](../../linux/kernel/sched/core.c#L4831-L4867) | `enqueue_task_fair(ENQUEUE_INITIAL)` | 放在 V 处，第一个 deadline 只给半个 slice（5.2 节） |
 | 睡眠后唤醒 | [`ttwu_do_activate()`](../../linux/kernel/sched/core.c#L3701-L3748) | `enqueue_task_fair(ENQUEUE_WAKEUP)`、`check_preempt_wakeup_fair()` | 按保存的 lag 放置，判断是否抢占当前任务（5.3 节） |
-| 延迟出队期间被唤醒 | [`ttwu_runnable()`](../../linux/kernel/sched/core.c#L3775-L3799) | `enqueue_task_fair(ENQUEUE_DELAYED)` | 取消延迟状态，保留原来的位置（4.8 节） |
+| 延迟出队期间被唤醒 | [`ttwu_runnable()`](../../linux/kernel/sched/core.c#L3775-L3799) | `enqueue_task_fair(ENQUEUE_DELAYED)` | 取消延迟状态；lag 已转正则以 0 重新放置，否则留在原位（4.8 节） |
 | 阻塞 | [`try_to_block_task()`](../../linux/kernel/sched/core.c#L6545-L6588) | `dequeue_task_fair(DEQUEUE_SLEEP)` | 合格则出队并保存 lag；不合格则延迟出队（5.6 节） |
 | tick | [`sched_tick()`](../../linux/kernel/sched/core.c#L5597-L5646) | `task_tick_fair()` | 记账，推进 vruntime 和 deadline，必要时请求重新调度（5.4 节） |
 | 调度 | [`__schedule()`](../../linux/kernel/sched/core.c#L6817-L6974) | `pick_next_task_fair()` 等 | 挑出下一个实体，当前实体移出或放回红黑树（5.5 节） |
@@ -239,7 +239,7 @@ EEVDF 把实体的运行看成一连串**请求**：每次请求运行 r 这么�
 deadline = 请求开始时的 vruntime + r × w0 / w
 ```
 
-源码中对应 `se->deadline = se->vruntime + calc_delta_fair(se->slice, se)`（[fair.c#L1130-L1133](../../linux/kernel/sched/fair.c#L1130-L1133)）。由此有一个容易忽略的结论：实体的 vruntime 从请求开始走到 deadline，需要的实际时间恰好是 r，**与权重无关**。权重决定的是 vruntime 的推进速度，也就是 V 多快能追上它、它多久能重新合格，从而决定它被选中的频率。
+源码中对应 `se->deadline = se->vruntime + calc_delta_fair(se->slice, se)`（[fair.c#L1130-L1133](../../linux/kernel/sched/fair.c#L1130-L1133)）。由此有一个容易忽略的结论：实体的 vruntime 从请求开始走到 deadline，需要的实际时间恰好是 r，**与权重无关**。权重通过同一个比值 `w0/w` 同时改变两件事：实际时间换成虚拟时间的速度，以及一次请求的虚拟长度。权重大的实体虚拟进度更慢，V 要更久才追得上它；在相同的起点上，它的 deadline 也更早。被选中的先后由合格条件和 deadline 一起决定，不能只归因于其中一件。
 
 ### 2.4 实体在公平调度类中的状态
 
@@ -388,7 +388,7 @@ struct cfs_rq {
 
 | 结构 | 字段 | 说明 |
 | --- | --- | --- |
-| `struct rq` | `nr_running` | 本 CPU 上所有调度类已入队的任务数，**包括**延迟出队的公平任务（[sched.h#L1124](../../linux/kernel/sched/sched.h#L1124)） |
+| `struct rq` | `nr_running` | 本 CPU 上所有调度类已入队的任务数（[sched.h#L1124](../../linux/kernel/sched/sched.h#L1124)）。延迟出队的公平任务也算在内：`dequeue_entities()` 在延迟时提前返回，不会执行后面的 `sub_nr_running()`（[fair.c#L7233-L7235](../../linux/kernel/sched/fair.c#L7233-L7235)、[fair.c#L7292](../../linux/kernel/sched/fair.c#L7292)） |
 | | `cfs` | 根组的公平运行队列（嵌入） |
 | | `curr`（与 `donor` 共用） | 当前运行的任务 |
 | | `clock_task` | 记账用的任务时钟，由 `update_rq_clock()` 推进（[sched.h#L1189](../../linux/kernel/sched/sched.h#L1189)） |
@@ -423,7 +423,7 @@ V = zero_vruntime + (sum_w_vruntime + [curr 在队列上] (curr->vruntime − ze
 
 本章涉及的 `cfs_rq` 字段和实体的 EEVDF 字段**全部由所属 CPU 的 rq 锁保护**，没有使用原子操作或 RCU。rq 锁是 raw 自旋锁。在本章涉及的路径中，持有 rq 锁期间中断总是关闭的，但关中断的不一定是加锁函数本身：`rq_lock()` 只加锁、不关中断（[sched.h#L1881-L1886](../../linux/kernel/sched/sched.h#L1881-L1886)），中断由调用者事先关闭。具体来说：
 
-- tick 路径运行在时钟中断处理中（[timer.c#L2464-L2479](../../linux/kernel/time/timer.c#L2464-L2479)），由 `sched_tick()` 用 `rq_lock()` 加锁（[core.c#L5612](../../linux/kernel/sched/core.c#L5612)）；
+- 本地 tick 运行在时钟中断处理中（[timer.c#L2464-L2479](../../linux/kernel/time/timer.c#L2464-L2479)），由 `sched_tick()` 用 `rq_lock()` 加锁（[core.c#L5612](../../linux/kernel/sched/core.c#L5612)）。`NO_HZ_FULL` 停掉某个 CPU 的本地 tick 之后，`sched_tick_remote()` 仍大约每秒一次，在 unbound 工作队列上对该 CPU 调用 `task_tick()`，并用 `rq_lock_irq()` 取得那把 rq 锁（[core.c#L5685-L5721](../../linux/kernel/sched/core.c#L5685-L5721)、[core.c#L5735-L5736](../../linux/kernel/sched/core.c#L5735-L5736)）；
 - `__schedule()` 先 `local_irq_disable()` 再加锁（[core.c#L6846-L6866](../../linux/kernel/sched/core.c#L6846-L6866)）；
 - 唤醒路径中，`try_to_wake_up()` 已以 `irqsave` 方式持有 `p->pi_lock`（[core.c#L4197](../../linux/kernel/sched/core.c#L4197)），再通过 `__task_rq_lock()`（`ttwu_runnable()`）或 `rq_lock()`（`ttwu_queue()`）对目标 rq 加锁（[core.c#L3781](../../linux/kernel/sched/core.c#L3781)、[core.c#L3983](../../linux/kernel/sched/core.c#L3983)）；经 IPI 入队的 `sched_ttwu_pending()` 自己使用 `rq_lock_irqsave()`（[core.c#L3811](../../linux/kernel/sched/core.c#L3811)）；
 - 修改 nice 等路径通过 `task_rq_lock()` 加锁，它先以 `irqsave` 方式获取 `p->pi_lock`，再取 rq 锁（[core.c#L744-L753](../../linux/kernel/sched/core.c#L744-L753)）。
@@ -551,7 +551,7 @@ static int vruntime_eligible(struct cfs_rq *cfs_rq, u64 vruntime)
 	return clamp(vlag, -limit, limit);
 ```
 
-来源：[kernel/sched/fair.c 第 769～775 行](../../linux/kernel/sched/fair.c#L769-L775)。上方注释解释了为什么要限制：V 是用加权平均近似出来的，实体的加入、离开和改权重都会移动 V，lag 可能因此越积越大（[fair.c#L753-L766](../../linux/kernel/sched/fair.c#L753-L766)）。注释给出的上限是“两倍 slice，且至少为一个 `TICK_NSEC`，因为 tick 是计时的粒度”，而代码实际取的是“队列中最大的 slice 加一个 `TICK_NSEC`”（第 769 行），二者并不一致，本章以代码为准。`cfs_rq_max_slice()` 取 `curr` 的 slice 与树根 `max_slice` 中较大的一个（[fair.c#L838-L851](../../linux/kernel/sched/fair.c#L838-L851)）。以 8 个以上 CPU 的默认值为例，上限对应 2.8 ms + 1 ms = 3.8 ms 的实际时间，再按实体权重折算成虚拟时间。
+来源：[kernel/sched/fair.c 第 769～775 行](../../linux/kernel/sched/fair.c#L769-L775)。上方注释解释了为什么要限制：V 是用加权平均近似出来的，实体的加入、离开和改权重都会移动 V，lag 可能因此越积越大（[fair.c#L753-L766](../../linux/kernel/sched/fair.c#L753-L766)）。注释给出的上限是“两倍 slice，且至少为一个 `TICK_NSEC`，因为 tick 是计时的粒度”，而代码实际取的是“队列中最大的 slice 加一个 `TICK_NSEC`”（第 769 行），二者并不一致，本章以代码为准。`cfs_rq_max_slice()` 在 `curr` 仍在队列上（`curr->on_rq`）时，取它的 slice 与树根 `max_slice` 中较大的一个；`curr` 已出队或不存在时只用树根（[fair.c#L838-L851](../../linux/kernel/sched/fair.c#L838-L851)）。以 8 个以上 CPU 的默认值为例，上限对应 2.8 ms + 1 ms = 3.8 ms 的实际时间，再按实体权重折算成虚拟时间。
 
 ### 4.4 增强红黑树与 `pick_eevdf()`
 
@@ -619,12 +619,12 @@ found:
 来源：[kernel/sched/fair.c 第 1039～1083 行](../../linux/kernel/sched/fair.c#L1039-L1083)。在这段代码之前还有两个提前返回（[fair.c#L1022-L1037](../../linux/kernel/sched/fair.c#L1022-L1037)）。完整的判断顺序是：
 
 1. **只有一个实体**（`nr_queued == 1`）：直接返回它，不检查合格性。
-2. **next buddy**：`PICK_BUDDY` 开启且 `cfs_rq->next` 合格时返回它。注释说明这只影响延迟、不影响公平性；按作者的理解，原因是 next 必须先满足合格条件，跳过的只是“deadline 最早”这一条。
+2. **next buddy**：`PICK_BUDDY` 开启且 `cfs_rq->next` 合格时立刻返回它，不再做后面的保护期检查、树搜索，也不和 `curr` 比较 deadline。注释说明这只影响延迟、不影响公平性。合格条件还在，所以不会选中已经超前的实体；被跳过的是“合格实体里 deadline 最早”，以及当前任务可能仍在保护期内这一事实。一个合格但 deadline 更晚的 next 也会直接运行。
 3. **筛选 `curr`**：`curr` 已出队或不合格时，不再作为候选。
 4. **保护期**：`protect` 为真且 `curr` 仍在保护期内（4.5 节），直接返回 `curr`。
 5. **最左节点**：deadline 最早的实体如果合格，就是答案。
 6. **堆式搜索**：从根开始，左子树中有合格实体就往左走；否则当前节点合格就选它；再否则往右走。
-7. **与 `curr` 比较**：`curr` 不在树中，最后单独比较 deadline。
+7. **与 `curr` 比较**：`curr` 不在树中，最后才和树上选出的 `best` 比较。树里没有合格实体时直接用 `curr`。两边都有时，只有 `curr` 的 deadline **严格更早**（`entity_before()`）才改选它；deadline 相同则保留 `best`（[fair.c#L1080-L1081](../../linux/kernel/sched/fair.c#L1080-L1081)）。
 
 第 6 步的正确性来自中序有序：在节点 N 处，左子树所有实体的 deadline 都早于 N 和右子树。左子树有合格实体时，答案一定在左子树；左子树没有而 N 合格时，N 就是答案；否则答案只能在右子树。每一步下降一层，所以是 O(树高) = O(log n)。由于每一步只比较 `min_vruntime`，即使右子树中有更多合格实体也不会被访问。
 
@@ -641,9 +641,9 @@ found:
                        min_vruntime=11       min_vruntime=5
 ```
 
-合格的实体是 E4、E5（v ≤ 8）。搜索过程：最左节点 E1 不合格；从根 E2 开始，左子树 E1 的 `min_vruntime` 为 10，不合格，不进入；E2 本身 v=9 不合格，向右；到 E4，左子树 E3 的 `min_vruntime` 为 11，不合格，不进入；E4 合格，选中。整个过程只访问了 E2、E4 两个节点，E1、E3 所在的子树被剪掉。
+合格的实体是 E4、E5（v ≤ 8）。搜索过程：最左节点检查先看 E1，不合格；再从根 E2 做堆式搜索，左子树的 `min_vruntime` 为 10，不合格，不进入；E2 本身 v=9 不合格，向右；到 E4，左子树 E3 的 `min_vruntime` 为 11，不合格，不进入；E4 合格，选中。堆式搜索只下降到 E2 和 E4，E3 被剪掉。E1 在最左节点检查里看过一次，堆式搜索只读它的 `min_vruntime` 来决定不下降。E5 也合格，但 deadline 晚于 E4，搜索不会走到它。
 
-**next buddy 从哪里来**。`cfs_rq->next` 由 [`set_next_buddy()`](../../linux/kernel/sched/fair.c#L8891-L8900)沿实体链向上设置。调用者有三处：任务睡眠而它的组队列中仍有其他实体时，把组实体设为父队列的 next（[fair.c#L7251-L7263](../../linux/kernel/sched/fair.c#L7251-L7263)），让同组的任务更可能接着运行；`yield_to_task_fair()`；以及默认关闭的 `NEXT_BUDDY` 唤醒路径。`clear_buddies()` 在实体被选中、出队、`update_curr()` 请求重新调度和 yield 时清除它（[fair.c#L5484-L5499](../../linux/kernel/sched/fair.c#L5484-L5499)）。所以在“全部任务都在根组”的主线中，`next` 只会由 `yield_to()` 设置。
+**next buddy 从哪里来**。`cfs_rq->next` 由 [`set_next_buddy()`](../../linux/kernel/sched/fair.c#L8891-L8900)沿实体链向上设置。调用者有三处：任务睡眠而它的组队列中仍有其他实体时，把组实体设为父队列的 next（[fair.c#L7251-L7263](../../linux/kernel/sched/fair.c#L7251-L7263)），让同组的任务更可能接着运行；`yield_to_task_fair()`；以及默认关闭的 `NEXT_BUDDY` 唤醒路径。`clear_buddies()` 在实体被选中、出队、`update_curr()` 请求重新调度和 yield 时清除它（[fair.c#L5484-L5499](../../linux/kernel/sched/fair.c#L5484-L5499)）。所以在“全部任务都在根组”的主线中，`next` 只会由 `yield_to()` 设置。目标合格时，第 2 步会直接返回它，即使树上还有 deadline 更早的合格实体。
 
 ### 4.5 记账、截止时间推进与保护期
 
@@ -664,7 +664,7 @@ account_cfs_rq_runtime(cfs_rq, delta)           // 带宽余额
 
 对应源码：[`update_se()`](../../linux/kernel/sched/fair.c#L1232-L1271)、[fair.c#L1302-L1332](../../linux/kernel/sched/fair.c#L1302-L1332)。时间来自 `rq_clock_task()`，在当前配置下它不扣除中断时间（第 0 节）。
 
-调用 `update_curr()` 的地方很多：tick（`entity_tick()`）、入队、出队、`put_prev_entity()`、`pick_task_fair()`、唤醒抢占检查、`reweight_entity()`、`yield_task_fair()`，以及调度核心通过 `sched_class::update_curr` 调用的 [`update_curr_fair()`](../../linux/kernel/sched/fair.c#L1335-L1338)。凡是要读取或改变队列状态之前，都先把 `curr` 的账结清。
+调用 `update_curr()` 的地方很多：tick（`entity_tick()`）、入队、出队、`put_prev_entity()`、`pick_task_fair()`、唤醒抢占检查、`reweight_entity()`、`yield_task_fair()`，以及调度核心通过 `sched_class::update_curr` 调用的 [`update_curr_fair()`](../../linux/kernel/sched/fair.c#L1335-L1338)。读取或改变队列状态之前，通常先把 `curr` 的账结清。入队时若实体自己仍是 `cfs_rq->curr`，则先放置再结账，见 5.3 节。
 
 **截止时间推进**。
 
@@ -718,7 +718,7 @@ static inline void set_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity 
 
 来源：[kernel/sched/fair.c 第 963～976 行](../../linux/kernel/sched/fair.c#L963-L976)。`protect_slice(se)` 就是 `se->vruntime < se->vprot`（[fair.c#L985-L988](../../linux/kernel/sched/fair.c#L985-L988)）。按配置分两种情况：
 
-- `RUN_TO_PARITY` 开启（默认）：保护期为“队列中其他实体的最小 slice 与自己 slice 中较小者”折算的虚拟时间，且不超过 deadline。所有实体 slice 相同时，`vprot` 就等于 deadline，即保护一整个请求；有更短 slice 的实体在排队时，保护期相应缩短。这里的 `cfs_rq_min_slice()` 取树根的 `min_slice` 和 `curr` 的 slice（[fair.c#L823-L836](../../linux/kernel/sched/fair.c#L823-L836)），而 `set_next_entity()` 调用它时，被选中的实体已经出树、`curr` 也还没设置，所以算的是其他实体。
+- `RUN_TO_PARITY` 开启（默认）：保护期为“队列中其他实体的最小 slice 与自己 slice 中较小者”折算的虚拟时间，且不超过 deadline。所有实体 slice 相同时，`vprot` 就等于 deadline，即保护一整个请求；有更短 slice 的实体在排队时，保护期相应缩短。`cfs_rq_min_slice()` 只在 `curr` 仍在队列上时才把它的 slice 算进去，否则只用树根的 `min_slice`（[fair.c#L823-L836](../../linux/kernel/sched/fair.c#L823-L836)）。`set_next_entity()` 调用它时，被选中的实体已经出树，`curr` 也还没设置，所以算的是其他仍在树上的实体。
 - 关闭时：保护期为未缩放的 base slice（0.7 ms）与自身 slice 中较小者，相当于给出一个最小运行量。
 
 保护期在三个地方起作用：
@@ -852,7 +852,7 @@ return true
 
 **延迟出队要解决什么问题**。features.h 的注释给出了动机：对不合格的任务推迟出队，让它们留在竞争中“烧掉”负的 lag；等它们被选中时，按定义 lag 已经为正（[features.h#L49-L59](../../linux/kernel/sched/features.h#L49-L59)）。结合源码，可以把它的效果归纳为三点，其中后两点是作者的分析：
 
-1. **欠账在睡眠期间偿还。** 不合格的任务 vruntime 超前于 V。它留在队列上不运行，其他实体运行使 V 逐渐追上它，等它合格并被选中时才真正出队，此时 lag ≥ 0，`DELAY_ZERO` 再把正的部分截为 0（[fair.c#L5542-L5547](../../linux/kernel/sched/fair.c#L5542-L5547)）。
+1. **欠账在睡眠期间偿还。** 不合格的任务 vruntime 超前于 V。它留在队列上不运行，其他实体运行使 V 逐渐追上它，等 `vruntime_eligible()` 通过并被选中时才真正出队。出队时 `update_entity_lag()` 用 `avg_vruntime()` 的向下取整结果计算 vlag，`DELAY_ZERO` 再把 **大于 0** 的 vlag 截成 0（[fair.c#L5542-L5547](../../linux/kernel/sched/fair.c#L5542-L5547)）。[features.h#L49-L55](../../linux/kernel/sched/features.h#L49-L55) 说被选中时 lag 已经为正，这是按合格定义说的；整数除法可能让算出来的 vlag 略小，小于等于 0 的部分不会被截掉。
 2. **V 不会因出队而倒退。** `place_entity()` 的注释指出，移除一个 lag 为负的实体会让 V 向后跳，干扰其他实体的 lag（[fair.c#L5314-L5318](../../linux/kernel/sched/fair.c#L5314-L5318)）。延迟到 lag ≈ 0 时再移除，V 基本不动。
 3. **长时间睡眠的任务不背旧账。** 如果不延迟，任务会带着负的 vlag 睡下去，无论睡多久，醒来时 `PLACE_LAG` 都会把这笔旧账原样恢复。有了延迟出队，睡眠足够久的任务在睡眠期间就已结清欠账，醒来时 lag 为 0。本地文档 [sched-eevdf.rst#L24-L30](../../linux/Documentation/scheduler/sched-eevdf.rst#L24-L30) 把这称为基于虚拟时间的“衰减”机制。
 
@@ -872,7 +872,7 @@ return true
 | 途径 | 调用 | 结果 |
 | --- | --- | --- |
 | 被 `pick_eevdf()` 选中 | [`pick_next_entity()`](../../linux/kernel/sched/fair.c#L5682-L5696) 发现 `sched_delayed`，调用 `dequeue_entities(DEQUEUE_SLEEP \| DEQUEUE_DELAYED)`，返回 NULL 让调用者重新挑选 | 真正出队，`__block_task()` 清除 `p->on_rq` |
-| 被唤醒 | `ttwu_runnable()` → `enqueue_task(ENQUEUE_DELAYED)` → `requeue_delayed_entity()` | 取消延迟，留在原位继续竞争 |
+| 被唤醒 | `ttwu_runnable()` → `enqueue_task(ENQUEUE_DELAYED)` → `requeue_delayed_entity()` | 取消延迟；`vlag > 0` 时以 0 重新放置并开始新请求，否则留在原位 |
 | 切换调度类 | `__sched_setscheduler()`、`rt_mutex_setprio()` 先强制完成出队 | [syscalls.c#L716-L717](../../linux/kernel/sched/syscalls.c#L716-L717)、[core.c#L7439-L7440](../../linux/kernel/sched/core.c#L7439-L7440) |
 | 任务退出 | [`task_dead_fair()`](../../linux/kernel/sched/fair.c#L8833-L8850) | 强制完成出队 |
 | `wait_task_inactive()` | 强制完成出队，注释说是为了避免总是等到 tick 超时 | [core.c#L2314-L2319](../../linux/kernel/sched/core.c#L2314-L2319) |
@@ -919,7 +919,7 @@ v'                    = V − vlag'
 3. 设置新权重，按新权重重算 PELT 的 `load_avg`。
 4. 若在队列上：把相对值加回 V，vruntime = V − vlag'，重新放回树和 `load`。
 
-**例子**。nice 0 的实体 vlag = −1 ms（超前 1 ms 虚拟时间），改成 nice 5（权重 1024 → 335）。新 vlag = −1 × 1024 / 335 ≈ −3.06 ms。虚拟时间变成了原来的约 3 倍，但它“超前的实际服务量”w × vlag 不变。
+**例子**。nice 0 的实体 vlag = −1 ms（vruntime 比 V 超前 1 ms），改成 nice 5（权重 1024 → 335）。新 vlag = −1 × 1024 / 335 ≈ −3.06 ms。变长的是这段超前量，不是 vruntime 本身；w × vlag 不变，所以折算成实际时间仍然超前约 1 ms。`set_user_nice()` 会先出队再入队。出队后队列里还有其他实体时，`place_entity()` 按 4.7 节把这个 vlag 暂时放大后再放置，放置完成之后的实际 lag 等于 −3.06 ms。
 
 **两条调用路径**：
 
@@ -977,7 +977,7 @@ wake_up_new_task(p)                           // fork.c 第 2642 行
 
 - **放置发生在入队时，不在 fork 时。** `task_fork_fair()` 只调用 `set_task_max_allowed_capacity()`，新任务的 vruntime 直到 `wake_up_new_task()` 入队、知道了目标 CPU 的 V 之后才确定。
 - **新任务从 V 开始，但 deadline 只有半个 slice。** vlag 被 `__sched_fork()` 清零，所以新任务既不欠账也不超前；`ENQUEUE_INITIAL` 让它的第一个 deadline 较早，更快得到第一次运行（4.7 节）。
-- **fork 通常不触发唤醒抢占。** `check_preempt_wakeup_fair()` 遇到 `WF_FORK` 就返回，注释的理由是 fork 之后往往紧跟 exec，与父进程没有共享数据（[fair.c#L9045-L9052](../../linux/kernel/sched/fair.c#L9045-L9052)）。唯一的例外是子任务的 slice 比当前任务短：`PREEMPT_SHORT` 分支在这个检查之前就跳去挑选了（5.3 节）。
+- **fork 通常不触发唤醒抢占。** `check_preempt_wakeup_fair()` 遇到 `WF_FORK` 就返回，注释的理由是 fork 之后往往紧跟 exec，与父进程没有共享数据（[fair.c#L9045-L9052](../../linux/kernel/sched/fair.c#L9045-L9052)）。子任务的 slice 比当前任务短时，`PREEMPT_SHORT` 分支在这个检查之前就去挑选（5.3 节），并且只有 `pick_next_entity()` 选中子任务才会抢占。
 
 另外，`__sched_fork()` 不重置 `slice` 和 `custom_slice`，子任务沿用从父任务复制来的值；只有父任务设置了 `sched_reset_on_fork` 时，`sched_fork()` 才恢复默认值（[core.c#L4715-L4734](../../linux/kernel/sched/core.c#L4715-L4734)）。因此用 `sched_setattr()` 设置的自定义 slice 会被子进程继承。
 
@@ -1082,7 +1082,7 @@ preempt:
 - **比较发生在同一层。** `find_matching_se()` 把当前任务和被唤醒任务的实体链上溯到同一个 `cfs_rq`（[fair.c#L423-L453](../../linux/kernel/sched/fair.c#L423-L453)），之后的挑选只在这一层进行。单层情形下两者本来就在 `rq->cfs` 上。
 - **是否抢占由 EEVDF 自己决定。** 源码不另设“vruntime 差多少就抢占”的阈值，而是直接问 `pick_next_entity()`：如果现在挑选，会不会选中被唤醒者。选中了才抢占。
 - **挑选有副作用。** `pick_next_entity()` 可能顺带完成某个延迟出队实体的出队并返回 NULL，所以代码要重试（[fair.c#L9084-L9090](../../linux/kernel/sched/fair.c#L9084-L9090)）。
-- **策略的影响。** `SCHED_BATCH` 和 `SCHED_IDLE` 任务被唤醒时不抢占别人（[fair.c#L9028-L9032](../../linux/kernel/sched/fair.c#L9028-L9032)）；非 idle 实体被唤醒时总是抢占 idle 实体，反之不抢占（[fair.c#L9012-L9026](../../linux/kernel/sched/fair.c#L9012-L9026)）。这里的 idle 指 `SCHED_IDLE` 任务或 `cpu.idle` 组（[fair.c#L465-L470](../../linux/kernel/sched/fair.c#L465-L470)）。
+- **策略的影响。** `SCHED_BATCH` 不抢占非 idle 的当前任务，`SCHED_IDLE` 也不抢占非 idle 实体（[fair.c#L9025-L9032](../../linux/kernel/sched/fair.c#L9025-L9032)）。非 idle 实体（包括 `SCHED_BATCH`）被唤醒时总是抢占 idle 实体，并取消后者的保护期（[fair.c#L9012-L9023](../../linux/kernel/sched/fair.c#L9012-L9023)）。这里的 idle 指 `SCHED_IDLE` 任务或 `cpu.idle` 组（[fair.c#L465-L470](../../linux/kernel/sched/fair.c#L465-L470)）。
 
 回到开头的编辑器。它在睡眠前通常是合格的（大部分时间在等输入，运行得很少），所以出队时保存了非负的 vlag，醒来后放在 V 或 V 之前，是合格的，deadline 为放置点加一个 vslice。此时：
 
@@ -1123,7 +1123,7 @@ void resched_curr_lazy(struct rq *rq)
 
 **粒度**。`HRTICK` 特性默认关闭，`hrtick_enabled_fair()` 返回 0（[sched.h#L2854-L2859](../../linux/kernel/sched/sched.h#L2854-L2859)），所以 slice 到期只能在 slice 结束后的第一个 tick（或其他调用 `update_curr()` 的事件）中被发现。按作者的分析，一个计算任务在默认 2.8 ms 的 slice 下，一次连续运行通常在 2.8～3.8 ms 之间。打开 `HRTICK` 后，`hrtick_start_fair()` 在队列中有多个任务时，按“slice − 本次已运行时间”设置一个高精度定时器（[fair.c#L6943-L6962](../../linux/kernel/sched/fair.c#L6943-L6962)），定时器回调以 `queued = 1` 调用 `task_tick`，`entity_tick()` 遇到这种 tick 直接请求重新调度（[fair.c#L5737-L5746](../../linux/kernel/sched/fair.c#L5737-L5746)、[core.c#L886-L899](../../linux/kernel/sched/core.c#L886-L899)）。
 
-**tick 停止**。在 `NO_HZ_FULL` 下，CPU 上的公平任务不超过一个时 `sched_can_stop_tick()` 允许停 tick（[core.c#L1385-L1386](../../linux/kernel/sched/core.c#L1385-L1386)）。只有一个实体时 `update_curr()` 本来也不会请求重新调度（4.5 节），所以停掉 tick 不影响 EEVDF 的决定。
+**tick 停止**。`sched_can_stop_tick()` 先看 deadline 和实时任务：有 deadline 任务，或有多个 `SCHED_RR` 任务，则返回假。恰好一个 `SCHED_RR` 任务就返回真；没有 RR、但有 `SCHED_FIFO` 任务时也返回真。后两种情况都不再看公平任务有多少（[core.c#L1354-L1375](../../linux/kernel/sched/core.c#L1354-L1375)）。走到公平任务这一步时，`h_nr_queued > 1` 禁止停 tick（[core.c#L1385-L1386](../../linux/kernel/sched/core.c#L1385-L1386)）；不超过一个还要再看带宽，受限任务也返回假（[core.c#L1395-L1398](../../linux/kernel/sched/core.c#L1395-L1398)）。只有一个公平实体时 `update_curr()` 本来也不会请求重新调度（4.5 节），所以在这条路径上停掉本地 tick 不改变 EEVDF 的选择。本地 tick 停掉之后，`sched_tick_remote()` 仍大约每秒调用一次 `task_tick()`（3.7 节）；单个实体不会因此被换下。
 
 ### 5.5 选择与切换
 
@@ -1237,7 +1237,7 @@ sequenceDiagram
 - 它在队列中时，其他实体被换上后的保护期按最小 slice 计算，也会变短（4.5 节）；
 - 代价是它每次运行得更短、被切换得更频繁。
 
-**调度策略**。`SCHED_BATCH` 在公平调度类中的记账、放置和挑选与 `SCHED_NORMAL` 完全相同，区别只在于被唤醒时不抢占别人（5.3 节）。`SCHED_IDLE` 的权重固定为 3，并在唤醒抢占和选核中被当作 idle 实体对待。
+**调度策略**。`SCHED_BATCH` 在公平调度类中的记账、放置和挑选与 `SCHED_NORMAL` 相同。唤醒时，它不抢占非 idle 的当前任务，但会抢占 idle 实体（5.3 节）。`SCHED_IDLE` 的权重固定为 3。唤醒抢占里，`SCHED_IDLE` 任务和 `cpu.idle` 组由 `se_is_idle()` 当成 idle 实体。选核算法不在本章展开；与它相关的一点是，`sched_idle_cpu()` 在 `nr_running == cfs.h_nr_idle` 且队列非空时为真，`select_idle_sibling()` 把它和空闲 CPU 写在同一个条件里（[fair.c#L7031-L7040](../../linux/kernel/sched/fair.c#L7031-L7040)、[fair.c#L8003-L8005](../../linux/kernel/sched/fair.c#L8003-L8005)）。根组下，`h_nr_idle` 就是 `SCHED_IDLE` 任务数。
 
 **切换调度类**。任务离开公平调度类前，如果处于延迟出队状态，会被强制完成出队（4.8 节）。[`switched_from_fair()`](../../linux/kernel/sched/fair.c#L13723-L13726)和 [`switched_to_fair()`](../../linux/kernel/sched/fair.c#L13728-L13747)主要处理 PELT 负载的摘除和接入；进入公平类的任务若已入队，正在运行时请求重新调度，否则检查唤醒抢占。
 
@@ -1247,7 +1247,8 @@ sequenceDiagram
 
 | 路径 | 执行上下文 | 持有的锁 | 能否睡眠 |
 | --- | --- | --- | --- |
-| `sched_tick()` → `task_tick_fair()` | tick 硬中断，中断关闭 | 本 CPU 的 rq 锁 | 不能 |
+| `sched_tick()` → `task_tick_fair()` | 本地 tick 硬中断，中断关闭 | 本 CPU 的 rq 锁 | 不能 |
+| `sched_tick_remote()` → `task_tick()` | unbound 工作队列，可能在别的 CPU 上。工作约每秒排队一次；只有目标 CPU 的本地 tick 已经停止时才调用 `task_tick()`（[core.c#L5700-L5721](../../linux/kernel/sched/core.c#L5700-L5721)、[core.c#L5735-L5736](../../linux/kernel/sched/core.c#L5735-L5736)） | 目标 CPU 的 rq 锁，由 `rq_lock_irq()` 关闭中断 | 持锁期间不能 |
 | hrtick 回调（`HRTICK` 开启时） | hrtimer 硬中断 | 本 CPU 的 rq 锁 | 不能 |
 | `__schedule()` → 挑选、换下、换上、阻塞出队 | 调用 `schedule()` 的任务自身，中断关闭 | 本 CPU 的 rq 锁 | 不能 |
 | `try_to_wake_up()` → 入队、唤醒抢占 | 任意上下文，包括中断；`TTWU_QUEUE` 默认开启（[features.h#L78-L83](../../linux/kernel/sched/features.h#L78-L83)），满足 `ttwu_queue_cond()`（主要是目标 CPU 与唤醒者不共享缓存，或其运行队列为空）时，入队经 IPI 交给目标 CPU 执行（[core.c#L3915-L3962](../../linux/kernel/sched/core.c#L3915-L3962)） | 唤醒者直接入队时持有 `p->pi_lock` 和目标 rq 锁；经 IPI 时由目标 CPU 上的 `sched_ttwu_pending()` 只持目标 rq 锁入队（[core.c#L3801-L3822](../../linux/kernel/sched/core.c#L3801-L3822)） | 不能 |
@@ -1257,7 +1258,7 @@ sequenceDiagram
 记住三条规则：
 
 1. **一个运行队列，一把锁。** `cfs_rq` 的红黑树、`sum_w_vruntime`、`zero_vruntime`、`curr`，以及实体的 vruntime、deadline、vlag、vprot，都只在持有所属 CPU 的 rq 锁时读写。
-2. **先结账，再判断。** 任何依赖 V、合格性或 deadline 的操作之前，都先调用 `update_curr()`；任何放置、出队和改权重都通过 `avg_vruntime()` 把参考点移到当前的 V。
+2. **先结账，再判断。** 读取 V、合格性或 deadline 之前，先调用 `update_curr()`。例外是被入队的实体仍是 `cfs_rq->curr`：此时 `on_rq` 已经为 0，但这个指针还没清掉，`enqueue_entity()` 必须先 `place_entity()`，再 `update_curr()`（5.3 节）。放置、完成出队，以及在队列上改权重，都会通过 `avg_vruntime()` 把参考点移到当时算出的 V。
 3. **`p->on_rq` 是跨 CPU 的握手点。** 延迟出队让“任务已睡眠”和“任务离开队列”分成两个时刻，后者由 `__block_task()` 以 release 语义公布，此后本 CPU 不再拥有 p。
 
 ## 7. 观察手段
@@ -1285,15 +1286,15 @@ sequenceDiagram
 | [sched-design-CFS.rst#L75-L76](../../linux/Documentation/scheduler/sched-design-CFS.rst#L75-L76) | 红黑树按 vruntime 排序，选最左节点 | 按 deadline 排序；最左节点合格才直接选它，否则用 `min_vruntime` 做堆式搜索（4.4 节） |
 | [sched-design-CFS.rst#L184-L188](../../linux/Documentation/scheduler/sched-design-CFS.rst#L184-L188) | `yield_task` 基本是一次出队加一次入队，可由 `compat_yield` sysctl 改为放到树的最右端 | `yield_task_fair()` 不出队，只在任务合格时把 vruntime 推到 deadline 并开始新请求；源码中没有 `compat_yield`（5.7 节） |
 | [sched-eevdf.rst#L27-L29](../../linux/Documentation/scheduler/sched-eevdf.rst#L27-L29) | 任务睡眠时留在运行队列上，标记为延迟出队 | 只有睡眠时**不合格**的任务才延迟出队；合格的任务立即出队并保存 lag；特殊状态和带宽限流的出队也不延迟（4.8 节） |
-| [sched-eevdf.rst#L30-L31](../../linux/Documentation/scheduler/sched-eevdf.rst#L30-L31) | VD 更早的任务可以抢占其他任务 | 唤醒抢占要求被唤醒者在同一层成为 `pick_eevdf()` 的选择，受当前任务保护期的约束（slice 更短时除外）；fork、`SCHED_BATCH` 和 `SCHED_IDLE` 的唤醒不抢占（5.3 节） |
+| [sched-eevdf.rst#L30-L31](../../linux/Documentation/scheduler/sched-eevdf.rst#L30-L31) | VD 更早的任务可以抢占其他任务 | 唤醒抢占要求被唤醒者在同一层成为 `pick_eevdf()` 的选择，受当前任务保护期的约束（slice 更短时除外）。fork 不抢占；`SCHED_BATCH` 不抢占非 idle 的当前任务；`SCHED_IDLE` 不抢占非 idle 实体（5.3 节） |
 
 ## 9. 回顾
 
 - 公平调度类负责 `SCHED_NORMAL`、`SCHED_BATCH`、`SCHED_IDLE` 任务。当前源码中它的选择算法是 EEVDF，CFS 这个名字保留在文件名和注释里。调度核心通过 `sched_class` 回调驱动它：入队、出队、唤醒抢占、tick、挑选与换上换下。
 - 权重由 nice 查表得到，vruntime 按 w0/w 的比例推进。V 是所有在队实体 vruntime 的加权平均，vlag = V − v 表示实体被欠或超前的虚拟时间，lag ≥ 0 的实体合格。每个实体以 slice 为长度发出请求，deadline = vruntime + slice × w0/w，走完一个请求恰好需要 slice 的实际时间。
 - `cfs_rq` 用 `zero_vruntime` 作参考点保存 Σ(v − v0)×w 和 Σw，`avg_vruntime()` 计算 V 并把参考点移过去，`vruntime_eligible()` 用乘法而不是除法判断合格。正在运行的实体不在树中，所有计算都要把它单独加回。
-- 红黑树按 deadline 排序，每个节点附带子树的最小 vruntime。`pick_eevdf()` 先看 next buddy、保护期内的 `curr` 和最左节点，再沿树做堆式搜索，O(log n) 找到合格实体中 deadline 最早的一个，最后与 `curr` 比较。
+- 红黑树按 deadline 排序，每个节点附带子树的最小 vruntime。`pick_eevdf()` 先看唯一实体和合格的 next buddy，再看保护期内的 `curr` 和最左节点，然后沿树做堆式搜索，O(log n) 找到合格实体中 deadline 最早的一个。树中没有合格实体时用 `curr`；两边都有时，只有 `curr` 的 deadline 严格更早才改选它。next buddy 在保护期之前返回，所以它不参加这次比较。
 - `update_curr()` 在 tick、入队、出队、挑选等时刻结账；vruntime 到达 deadline 时开始新请求并请求重新调度。`RUN_TO_PARITY` 在实体换上时设置保护期 `vprot`，保护期内 tick 不请求重新调度、挑选时保留合格的 `curr`；重新选中自己不续保护期，此后每个 tick 都重新挑选。
 - 入队时 `place_entity()` 以 V − vlag 放置，并按 (W + w)/W 放大 lag，抵消新实体对 V 的影响；新任务从 V 开始且只给半个 slice 的 deadline；非睡眠出队保留相对 deadline。改权重时按 w/w' 缩放 vlag 和相对 deadline，V 不变。
-- 不合格的任务睡眠时延迟出队：它留在队列上，计入权重和 `nr_running`，不计入 `h_nr_runnable`，直到被挑选时才真正出队、`p->on_rq` 才清零，或在此之前被唤醒而原地恢复竞争。这样欠账在睡眠中偿还，V 不因出队倒退，睡眠不能抹掉欠账。
+- 不合格的任务睡眠时延迟出队：它留在队列上，计入权重和 `nr_running`，不计入 `h_nr_runnable`，直到被挑选时才真正出队、`p->on_rq` 才清零。若在此之前被唤醒，lag 已经大于 0 就按 0 重新放置，否则留在原位继续竞争。这样欠账在睡眠中偿还，V 不因出队倒退，睡眠不能抹掉欠账。
 - 唤醒抢占在两条实体链的共同层上问 EEVDF“现在会不会选被唤醒者”。公平调度类只设置 need_resched 标志，在默认的 voluntary 抢占模型下，真正的切换发生在返回用户态、`cond_resched()` 等调度点或任务阻塞时；`HRTICK` 默认关闭，slice 到期以 tick 为粒度被发现。
