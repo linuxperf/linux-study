@@ -1,547 +1,491 @@
-# softirq 机制：待处理工作如何被执行
+# 软中断：用每 CPU 的 pending 位推迟一类工作
 
-网卡中断处理函数已经返回，接收描述符却还没有全部检查，数据包也没有全部交给协议栈。这些工作保存在哪里？谁会继续处理？如果新数据不断到来，CPU 什么时候才能回到其他任务？
+e1000e 的 MSI 处理函数读完中断原因寄存器之后，并没有在硬中断里把接收描述符走完。它在 `napi_schedule_prep()` 成功时调用 `__napi_schedule()`，把 `napi_struct` 挂到当前 CPU 的轮询链表上，再把 `NET_RX_SOFTIRQ` 这一位置 1。定时器到期、块层请求完成、RCU 回调也使用同一套办法：硬中断或进程只负责做标记，真正的批量工作由一个已经注册的函数稍后执行。
 
-softirq 的源码就是围绕这些问题组织的。理解它时，可以先抓住三个对象：**子系统保存工作的队列、当前 CPU 的 pending 位图、负责扫描位图并调用回调的执行器。** 队列记录具体工作，位图记录哪些类别需要处理，执行器决定何时调用这些类别的处理函数。
+这套办法叫软中断（softirq）。它不经过 IDT，也没有每次事件一份的描述符。内核把延后工作分成固定的若干类，每一类在每个 CPU 上占 pending 位图里的一位；执行点看到这位被置上，就调用该类唯一的回调。
 
-本章依据本地 [Linux Makefile](../../linux/Makefile#L2) 标记的 **6.18.52** 版本。主线采用 **x86-64 的 IDT 中断入口、e1000e 网卡的 MSI 接收路径**，假定未启用 `CONFIG_PREEMPT_RT`、未强制线程化 IRQ，NAPI 使用普通 softirq 轮询模式。实时内核、线程化 IRQ 与线程化 NAPI 的差异放在后面讨论。e1000e 源码中不少函数仍使用 `e1000_` 前缀，本文均引用 `drivers/net/ethernet/intel/e1000e/` 下的实现。
+本章回答下面几个问题：
 
-建议分三遍阅读：先用第 1～5 节建立触发与执行模型，再用第 6～9 节理解执行上下文和网卡实例，最后阅读生命周期、配置差异和观测方法。
+1. `raise` 在当前 CPU 上留下了什么？回调从哪里来，参数又在哪里？
+2. 置位之后，回调在哪一次调用里真正执行？
+3. 同一个 CPU 上为什么不会嵌套跑两层 softirq，不同 CPU 为什么可以同时跑同一个向量？
+4. 一轮处理怎样被时间、轮数和 `need_resched()` 截断，剩下的工作交给谁？
+5. `local_bh_disable()` 和 `spin_lock_bh()` 怎样挡住本 CPU 的 softirq？
+6. tasklet 和带 `WQ_BH` 的 workqueue 怎样复用其中两个向量？
 
-## 1. 从网卡中断返回以后，工作去了哪里
+建议先读[中断子系统介绍](introduction.md)的第 4.5 节，知道软中断在硬中断退出路径上的位置。e1000e 从通知走到 `e1000e_poll()` 的设备细节在[中断子系统概述](overview.md)第 6.3 节，本章第 4.8 节只接上 `NET_RX_SOFTIRQ` 这一段。
 
-### 1.1 把快速响应与成批处理连接起来
+## 0. 分析基线
 
-e1000e 的 [`e1000_intr_msi()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1750)读取中断原因、处理必要的设备状态，然后通过 [`napi_schedule_prep()` 与 `__napi_schedule()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1800)安排接收处理。真正清理接收描述符的操作由后续 [`e1000e_poll()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L2658)调用。
+本章依据仓库内 [Makefile 第 2～4 行](../../linux/Makefile#L2-L4)标记的 **6.18.52** 版本，架构为 **x86-64**。正文沿 `kernel/softirq.c` 里 `CONFIG_PREEMPT_RT` 未启用时的 `#else` 分支。该文件前半部分是 RT 专用的 bottom-half 计数和锁，本配置不会编译进去。
 
-先忽略预算和并发，整个过程可以缩成下面几步：
+| 配置 | 对本章的影响 | 依据 |
+| --- | --- | --- |
+| `CONFIG_PREEMPT_RT` 未设置 | 使用非 RT 的 `preempt_count` 软中断位、`invoke_softirq()` 和 `local_bh_*` | [.config#L139](../../linux/.config#L139)、[softirq.c#L364](../../linux/kernel/softirq.c#L364) |
+| `CONFIG_TRACE_IRQFLAGS` 未被选中 | `PROVE_LOCKING`、`IRQSOFF_TRACER`、`RV` 都未打开，因此没有 `select TRACE_IRQFLAGS`。`local_bh_disable()` 是直接增加 `preempt_count` 的内联函数；带 lockdep 跟踪的关 bottom half 实现不编入 | [.config#L10659](../../linux/.config#L10659)、[.config#L10751](../../linux/.config#L10751)、[.config#L10789](../../linux/.config#L10789)、[Kconfig.debug#L1367-L1378](../../linux/lib/Kconfig.debug#L1367-L1378)、[Kconfig#L391-L395](../../linux/kernel/trace/Kconfig#L391-L395)、[bottom_half.h#L7-L15](../../linux/include/linux/bottom_half.h#L7-L15) |
+| `CONFIG_PREEMPT_COUNT=y` | bottom half 关闭和 softirq 执行都体现在 `preempt_count` 里，因此这两段都不能睡眠 | [.config#L140](../../linux/.config#L140)、[preempt.h#L148-L149](../../linux/include/linux/preempt.h#L148-L149) |
+| `CONFIG_PREEMPT_VOLUNTARY=y`、`CONFIG_PREEMPT_DYNAMIC=y`、`CONFIG_PREEMPTION=y` | 抢占模型默认可由 `preempt=` 改为 full 等。默认 voluntary 下，中断返回内核时的 `irqentry_exit_cond_resched` 是空操作 | [.config#L136](../../linux/.config#L136)、[.config#L141-L142](../../linux/.config#L141-L142)、[core.c#L7636-L7641](../../linux/kernel/sched/core.c#L7636-L7641)、[core.c#L7732-L7737](../../linux/kernel/sched/core.c#L7732-L7737) |
+| `CONFIG_IRQ_FORCED_THREADING=y` | 编入 `threadirqs` 路径。静态键 `force_irqthreads_key` 默认关闭，主线按关闭来写 | [.config#L83](../../linux/.config#L83)、[manage.c#L27-L35](../../linux/kernel/irq/manage.c#L27-L35) |
+| `CONFIG_X86_64=y` | 选中 `HAVE_IRQ_EXIT_ON_IRQ_STACK` 和 `HAVE_SOFTIRQ_ON_OWN_STACK`。非 RT 下后者再打开 `CONFIG_SOFTIRQ_ON_OWN_STACK`。中断退出时直接调用 `__do_softirq()`；任务上下文的 `do_softirq_own_stack()` 切到 irq stack | [.config#L333](../../linux/.config#L333)、[.config#L940-L942](../../linux/.config#L940-L942)、[Kconfig#L249](../../linux/arch/x86/Kconfig#L249)、[Kconfig#L290](../../linux/arch/x86/Kconfig#L290)、[Kconfig#L1157-L1164](../../linux/arch/Kconfig#L1157-L1164) |
+| `CONFIG_SMP=y`、`CONFIG_HOTPLUG_CPU=y` | 每个 CPU 一份 pending 和 `ksoftirqd`；CPU 下线时迁走 tasklet 链表 | [.config#L362](../../linux/.config#L362)、[.config#L528](../../linux/.config#L528) |
+| `CONFIG_HZ=1000` | `MAX_SOFTIRQ_TIME` 为 2 个 jiffy，约 2 ms。这是两轮处理之间的判断，不是单个回调的时限 | [.config#L506](../../linux/.config#L506)、[softirq.c#L543](../../linux/kernel/softirq.c#L543)、[jiffies.h#L461-L463](../../linux/include/linux/jiffies.h#L461-L463) |
+| `CONFIG_TREE_RCU=y` | `use_softirq` 默认为真，RCU 核心处理注册为 `RCU_SOFTIRQ`。启动参数是 `rcutree.use_softirq` | [.config#L167](../../linux/.config#L167)、[tree.c#L114-L117](../../linux/kernel/rcu/tree.c#L114-L117)、[tree.c#L72-L75](../../linux/kernel/rcu/tree.c#L72-L75) |
+| `CONFIG_NO_HZ_FULL=y` | 空闲 tick 停止前会检查本 CPU 是否还有不能忽略的 softirq pending | [.config#L108](../../linux/.config#L108)、[tick-sched.c#L1141-L1180](../../linux/kernel/time/tick-sched.c#L1141-L1180) |
+| `CONFIG_VIRT_CPU_ACCOUNTING_GEN=y`，`CONFIG_IRQ_TIME_ACCOUNTING` 未设置 | 记账方式在 `choice` 里选了 GEN，因此没有 `CONFIG_VIRT_CPU_ACCOUNTING_NATIVE`。softirq 和硬中断进出钩子里的 `vtime_account_*()`、`irqtime_account_irq()` 都是空函数。GEN 的记账入口在用户态边界和任务切换，不在这对钩子里 | [.config#L148-L150](../../linux/.config#L148-L150)、[Kconfig#L538-L584](../../linux/init/Kconfig#L538-L584)、[vtime.h#L30-L46](../../linux/include/linux/vtime.h#L30-L46)、[vtime.h#L133-L160](../../linux/include/linux/vtime.h#L133-L160) |
+
+有两个运行时开关会改变主线，本章默认它们保持关闭：
+
+- 启动参数 `threadirqs` 在 `parse_early_param()` 里打开 `force_irqthreads_key`。`spawn_ksoftirqd()` 是 `early_initcall`，晚于这次解析。键打开后，硬中断退出不再就地执行 softirq，定时器类向量改由 `ktimers/%u` 处理。见第 4.6 节。
+- `rcutree.use_softirq=0` 时，RCU 不注册 `RCU_SOFTIRQ`，改走每 CPU 的 rcuc 线程。默认值为真。
+
+## 1. 软中断要解决什么问题
+
+### 1.1 一次标记对应一类工作
+
+硬中断处理发生在被打断的执行之上，本地可屏蔽中断通常是关着的，回调也不能睡眠。网卡一次中断可能对应一批描述符，定时器一次 tick 可能到期多个定时器。如果这些循环都留在硬中断里，同一次通知会拉长关中断时间。
+
+softirq 把“有工作”和“做工作”拆开：
 
 ```text
-e1000e 硬中断处理函数
-    │
-    ├─ 将 adapter->napi 放入当前 CPU 的 softnet_data.poll_list
-    └─ 标记 NET_RX_SOFTIRQ 待处理
-                  │
-                  ▼
-          softirq 核心检查 pending
-                  │
-                  ▼
-           net_rx_action()
-                  │  遍历待轮询的 NAPI 实例
-                  ▼
-           e1000e_poll()
-                  │
-                  └─ 清理发送完成项、处理接收描述符
+子系统初始化：open_softirq(nr, action)     把函数指针写入全局表
+某 CPU 上发生事件：raise_softirq*(nr)       只给本 CPU 的第 nr 位置 1
+执行点：handle_softirqs()                  按置位的编号调用 action()
 ```
 
-这条链的接合点分别是 [`____napi_schedule()`](../../linux/net/core/dev.c#L4892)、[`handle_softirqs()`](../../linux/kernel/softirq.c#L579)、[`net_rx_action()`](../../linux/net/core/dev.c#L7800)和 [`__napi_poll()`](../../linux/net/core/dev.c#L7635)。softirq 核心只知道需要调用 `NET_RX_SOFTIRQ` 对应的函数；具体哪块网卡、哪个 NAPI 实例还有工作，由网络子系统管理。
+回调原型是 `void (*action)(void)`，见 [`struct softirq_action`](../../linux/include/linux/interrupt.h#L587-L590)。它没有 IRQ 号，也没有 `dev_id`。具体要处理的对象由子系统放在自己的每 CPU 队列里。pending 位只表示“这一类在这个 CPU 上需要跑一次”，多次置同一位仍然只占一位。
 
-### 1.2 “延后”描述的是处理阶段
+`softirq.c` 开头的注释把并发契约写在公共代码外面：softirq 核心没有跨 CPU 共享的 pending；某个向量若要串行化，由它自己的锁负责；即使某个设备在逻辑上串行，被标记执行的仍然只是当前 CPU。网络接收被当作可以多 CPU 并行的例子，tasklet 则自己保证同一个 tasklet 不同时在两个 CPU 上运行（[softirq.c#L37-L53](../../linux/kernel/softirq.c#L37-L53)）。
 
-在主线配置下，硬中断退出时就可能执行 softirq，然后才恢复被打断的代码。因此，延后处理未必经过一次任务调度，也未必发生在某个专用线程中。硬中断退出检查见 [`__irq_exit_rcu()`](../../linux/kernel/softirq.c#L713)，直接执行与唤醒线程的选择见 [`invoke_softirq()`](../../linux/kernel/softirq.c#L487)。
+### 1.2 它在内核中的位置
 
-softirq 的触发操作也很轻量：[`__raise_softirq_irqoff()`](../../linux/kernel/softirq.c#L786)对当前 CPU 的位图做一次按位或。这里没有执行 x86 的软件陷入指令，没有分配 IDT vector，也没有根据 Linux IRQ 号查找驱动。
+下图汇总默认配置（`threadirqs` 关闭）下进入 `action` 的几条控制流：硬中断退出、bottom half 开着时的进程上下文 `raise`，以及最外层 `local_bh_enable()`。它不是同一次调用的时序。
 
-因此，本章中的 **softirq 编号是工作类别的数组下标**。它与设备使用的 Linux IRQ 号、CPU 使用的 x86 vector 属于不同编号空间。
+```mermaid
+flowchart TD
+    hw["硬中断回调"] -->|"置本 CPU pending"| bit["__softirq_pending"]
+    hw --> exit["__irq_exit_rcu：减去 HARDIRQ_OFFSET"]
+    exit -->|"不在中断上下文且 pending 非 0"| run["__do_softirq / handle_softirqs"]
+    run -->|"时间、轮数或 need_resched 截断"| ks["唤醒 ksoftirqd"]
+    task["进程上下文 raise"] -->|"in_interrupt 为假"| ks
+    bh["最外层 local_bh_enable"] -->|"pending 非 0"| own["do_softirq：切到 irq stack"]
+    ks --> loop["ksoftirqd 调用 handle_softirqs"]
+    run --> act["softirq_vec 的 action"]
+    own --> act
+    loop --> act
+```
 
-## 2. 数据模型：全局回调表、每 CPU 位图、子系统队列
+读图时注意三件事：
 
-### 2.1 全局表回答“这一类工作由谁处理”
+- 硬中断退出路径上的 softirq 仍在这次中断返回之前执行，它不是另一个被调度进来的任务。`ksoftirqd` 才是每 CPU 一个的 `SCHED_NORMAL` 线程。
+- 进程上下文在 bottom half 开着时调用 `raise_softirq()`，只置位并唤醒 `ksoftirqd`，不会在调用者栈上立刻执行回调。就地执行发生在硬中断退出，以及最外层 `local_bh_enable()`；后一条路径也负责跑掉 `local_bh_disable()` 期间留下的 pending。
+- 图中的 `action` 内部还可以再置位。新置的位进入下一轮判断，不会在当前这次 `action()` 里面递归调用自己。
 
-[`struct softirq_action`](../../linux/include/linux/interrupt.h#L587)只有一个无参数、无返回值的函数指针：
+和相邻机制的差别，[介绍一章第 4.5 节](introduction.md)已经列过。这里只保留和源码入口对应的一行：
+
+| 机制 | 谁触发执行 | 回调所在上下文 |
+| --- | --- | --- |
+| IRQ `thread_fn` | `__irq_wake_thread()` 唤醒该 action 的线程 | 可调度的 IRQ 线程 |
+| softirq `action` | 硬中断退出、`local_bh_enable()` 或 `ksoftirqd` | 不可睡眠；硬中断可以再进来 |
+| 普通 workqueue | worker 线程 | 工作项本身可以睡眠 |
+| `WQ_BH` workqueue | 复用 `HI_SOFTIRQ` / `TASKLET_SOFTIRQ` | 与 softirq 相同 |
+
+### 1.3 十个向量分别留给谁
+
+向量编号是枚举下标，数值越小，同一轮里越先执行。注释要求不要轻易增加新向量，并写明 RCU 最好永远留在最后（[interrupt.h#L541-L561](../../linux/include/linux/interrupt.h#L541-L561)）。
+
+| 向量 | 值 | 注册位置 | 回调 |
+| --- | --- | --- | --- |
+| `HI_SOFTIRQ` | 0 | [`softirq_init()`](../../linux/kernel/softirq.c#L1035-L1048) 中的 `open_softirq(HI_SOFTIRQ, ...)` | `tasklet_hi_action` |
+| `TIMER_SOFTIRQ` | 1 | [`timers_init()`](../../linux/kernel/time/timer.c#L2575-L2579) | `run_timer_softirq` |
+| `NET_TX_SOFTIRQ` | 2 | [`net_dev_init()`](../../linux/net/core/dev.c#L13231-L13232) | `net_tx_action` |
+| `NET_RX_SOFTIRQ` | 3 | 同上 | `net_rx_action` |
+| `BLOCK_SOFTIRQ` | 4 | [`blk_mq_init()`](../../linux/block/blk-mq.c#L5252-L5261) | `blk_done_softirq` |
+| `IRQ_POLL_SOFTIRQ` | 5 | [`irq_poll_setup()`](../../linux/lib/irq_poll.c#L207-L214) | `irq_poll_softirq` |
+| `TASKLET_SOFTIRQ` | 6 | [`softirq_init()`](../../linux/kernel/softirq.c#L1035-L1048) 中的 `open_softirq(TASKLET_SOFTIRQ, ...)` | `tasklet_action` |
+| `SCHED_SOFTIRQ` | 7 | [`init_sched_fair_class()`](../../linux/kernel/sched/fair.c#L14194) | `sched_balance_softirq` |
+| `HRTIMER_SOFTIRQ` | 8 | [`hrtimers_init()`](../../linux/kernel/time/hrtimer.c#L2331-L2335) | `hrtimer_run_softirq` |
+| `RCU_SOFTIRQ` | 9 | [`rcu_init()`](../../linux/kernel/rcu/tree.c#L4878-L4879)，仅当 `use_softirq` | `rcu_core_si` |
+
+`HI_SOFTIRQ` 和 `TASKLET_SOFTIRQ` 的回调在跑 tasklet 链表之前，还会先跑 BH workqueue。高优先级 BH 工作因此排在本轮所有其他向量前面，普通 BH 工作排在块层和 irq_poll 之后、调度软中断之前。第 4.7 节展开这个顺序。
+
+定时器轮、RCU 宽限期和负载均衡算法不属于本章。本章只说明它们怎样注册、怎样置位，以及 pending 位和它们自己的每 CPU 队列是什么关系。
+
+### 1.4 本章边界
+
+下面这些分支存在于源码中，主线不沿它们展开：
+
+- `CONFIG_PREEMPT_RT` 把 bottom half 禁用记在任务和每 CPU 的 `softirq_ctrl` 上，硬中断退出只唤醒 `ksoftirqd`（[softirq.c#L106-L342](../../linux/kernel/softirq.c#L106-L342)）。
+- `threadirqs` 打开时的 `ktimers/%u`，第 4.6 节只说明它和默认路径的分叉。
+- 网络线程化 NAPI：`NAPI_STATE_THREADED` 且 `napi->thread` 非空时，`____napi_schedule()` 通常唤醒该线程并返回，不再置 `NET_RX_SOFTIRQ`。启动参数 `thread_backlog_napi` 打开后有一个例外：线程若是本 CPU 的 `backlog_napi`，仍挂上 `poll_list`。该静态键默认关闭。第 4.8 节给出分支。
+
+## 2. 核心数据结构
+
+### 2.1 全局回调表只有函数指针
 
 ```c
-struct softirq_action
-{
-    void (*action)(void);
+static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
+```
+
+定义在 [softirq.c#L60](../../linux/kernel/softirq.c#L60)。表是全局的一份，所有 CPU 共用同一组函数指针。`open_softirq()` 把 `softirq_vec[nr].action` 赋成传入的函数，没有锁，也没有注销接口（[softirq.c#L793-L796](../../linux/kernel/softirq.c#L793-L796)）。本仓库里的调用都位于初始化函数。执行循环只读取 `action`，不检查它是否为空，所以必须先注册再置位。
+
+名字表 `softirq_to_name[]` 与枚举顺序一致，供 `/proc/softirqs` 和出错打印使用（[softirq.c#L64-L67](../../linux/kernel/softirq.c#L64-L67)）。
+
+### 2.2 x86 上 pending 是每 CPU 一个 `u16`
+
+通用代码把 pending 放在 `irq_cpustat_t.__softirq_pending` 里。x86 定义了 `__ARCH_IRQ_STAT`，自己的 `irq_cpustat_t` 并不包含这个字段，而是单独声明：
+
+```c
+DECLARE_PER_CPU_CACHE_HOT(u16, __softirq_pending);
+#define local_softirq_pending_ref       __softirq_pending
+```
+
+见 [hardirq.h#L56-L69](../../linux/arch/x86/include/asm/hardirq.h#L56-L69)。访问宏在 `local_softirq_pending_ref` 已被定义时不再改写成 `irq_stat.__softirq_pending`（[interrupt.h#L519-L527](../../linux/include/linux/interrupt.h#L519-L527)）：
+
+| 宏 | 作用 |
+| --- | --- |
+| `local_softirq_pending()` | 读当前 CPU 的位图 |
+| `set_softirq_pending(x)` | 整字写入 |
+| `or_softirq_pending(x)` | 按位或 |
+
+`NR_SOFTIRQS` 是 10，放得进 `u16`。置位写成 `or_softirq_pending(1UL << nr)`（[softirq.c#L786-L790](../../linux/kernel/softirq.c#L786-L790)）。`__raise_softirq_irqoff()` 要求调用时本地中断已经关闭，函数本身不检查 `nr` 的范围。
+
+清位和置位都发生在本 CPU 关中断的窗口里：`handle_softirqs()` 先把位图写成 0，再开中断跑回调。回调里若调用 `__raise_softirq_irqoff()` 或 `raise_softirq_irqoff()`，调用者必须已经关中断；`raise_softirq()` 会自己 `local_irq_save()`（[softirq.c#L777-L790](../../linux/kernel/softirq.c#L777-L790)）。因此同一 CPU 上，清零和按位或不会互相撕开这个 `u16`。其他 CPU 不修改这一个变量。
+
+pending 位没有队列节点，也没有“这次事件的参数”。`NET_RX_SOFTIRQ` 置位时，待轮询的 `napi_struct` 已经挂在该 CPU 的 `softnet_data.poll_list` 上。tasklet 则挂在该 CPU 的 `tasklet_vec` 或 `tasklet_hi_vec` 上。回调负责把队列取空；取不完就再次置位，让下一轮继续。
+
+### 2.3 `preempt_count` 用两个步长区分“正在执行”和“禁止执行”
+
+非 RT 配置把软中断状态放进 `preempt_count`。位段注释在 [preempt.h#L15-L55](../../linux/include/linux/preempt.h#L15-L55)：
+
+| 位段 | 掩码 | 本章用到的步长 |
+| --- | --- | --- |
+| 0–7 | `PREEMPT_MASK` | `PREEMPT_OFFSET = 1`，关抢占 |
+| 8–15 | `SOFTIRQ_MASK` | `SOFTIRQ_OFFSET = 0x100`，正在执行 softirq |
+| 8–15 | 同上 | `SOFTIRQ_DISABLE_OFFSET = 0x200`，一次 `local_bh_disable()` |
+
+`SOFTIRQ_DISABLE_OFFSET` 定义为 `2 * SOFTIRQ_OFFSET`，所以一次关闭 bottom half 置的是 bit 9，不会碰到表示“正在执行”的 bit 8。嵌套关闭继续往高位加：两次关闭是 `0x400`。正在执行同时又关闭一次，则是 `0x100 + 0x200 = 0x300`。
+
+四个判断宏在本配置下的定义是（[preempt.h#L127-L143](../../linux/include/linux/preempt.h#L127-L143)）：
+
+| 宏 | 看什么 | 只关闭了 bottom half 时 | 正在执行 softirq 时 |
+| --- | --- | --- | --- |
+| `in_serving_softirq()` | `softirq_count()` 的 bit 8 | 假 | 真 |
+| `in_softirq()` | 整个 `SOFTIRQ_MASK` 非 0 | 真 | 真 |
+| `in_interrupt()` | NMI、硬中断或整个 softirq 位段 | 真 | 真 |
+| `in_task()` | 没有 NMI、硬中断，也没有 bit 8 | 真 | 假 |
+
+头文件把 `in_softirq()` 和 `in_interrupt()` 标为不建议在新代码里使用，因为它们把“禁止 softirq”和“正在执行 softirq”算在一起。`raise_softirq_irqoff()` 和 `__irq_exit_rcu()` 用的是 `in_interrupt()`：bottom half 关着时，两者都不会就地启动 softirq。
+
+`in_task()` 在只关闭 bottom half 时仍为真，因为判断式只排除 bit 8。能不能睡眠要看 `preempt_count()` 是否为 0。`local_bh_disable()` 已经加上 `0x200`，`preemptible()` 要求计数为 0 且中断打开（[preempt.h#L227](../../linux/include/linux/preempt.h#L227)），所以这段代码不能睡眠，也不能靠 `in_task()` 证明自己处在可调度上下文。`schedule()` 进入 `__schedule()` 之前还会再 `preempt_disable()` 一次；[`schedule_debug()`](../../linux/kernel/sched/core.c#L5925-L5927) 要求此时的计数恰好等于 [`PREEMPT_DISABLE_OFFSET`](../../linux/include/linux/preempt.h#L192)。位段里还留着 `0x100` 或 `0x200` 时等式不成立，于是进入 [`__schedule_bug()`](../../linux/kernel/sched/core.c#L5878-L5887)。这次 `preempt_disable()` 在 [`__schedule_loop()`](../../linux/kernel/sched/core.c#L7039-L7043)。
+
+`spin_lock_bh()` 使用的步长是 `SOFTIRQ_LOCK_OFFSET`，等于 `SOFTIRQ_DISABLE_OFFSET + PREEMPT_LOCK_OFFSET`（[preempt.h#L177](../../linux/include/linux/preempt.h#L177)）。本配置 `PREEMPT_LOCK_OFFSET` 就是 `PREEMPT_OFFSET`，所以拿锁时同时加上 `0x200` 和 `1`。
+
+### 2.4 `ksoftirqd` 与统计计数
+
+`DEFINE_PER_CPU(struct task_struct *, ksoftirqd)` 保存每 CPU 线程（[softirq.c#L62](../../linux/kernel/softirq.c#L62)）。`spawn_ksoftirqd()` 经 `smpboot` 调用 `kthread_create_on_cpu()`，名字来自 `thread_comm`，是 `ksoftirqd/%u`（[softirq.c#L1103-L1107](../../linux/kernel/softirq.c#L1103-L1107)、[smpboot.c#L180-L181](../../linux/kernel/smpboot.c#L180-L181)）。`kthread()` 把从 `kthreadd` 继承来的策略设回 `SCHED_NORMAL`（[kthread.c#L405-L409](../../linux/kernel/kthread.c#L405-L409)）。softirq 代码没有再提高它的优先级。
+
+每 CPU 的 `kernel_stat.softirqs[NR_SOFTIRQS]` 是 `unsigned int` 计数（[kernel_stat.h#L40-L43](../../linux/include/linux/kernel_stat.h#L40-L43)）。`kstat_incr_softirqs_this_cpu()` 在每次调用某个向量的 `action` 之前加一（[kernel_stat.h#L60-L63](../../linux/include/linux/kernel_stat.h#L60-L63)）。一次 `net_rx_action()` 可以处理多个 `napi_struct`，计数仍然只加一。重启循环再进入这个向量时会再加一。
+
+### 2.5 tasklet 是挂在两个向量上的每 CPU 链表
+
+`HI_SOFTIRQ` 和 `TASKLET_SOFTIRQ` 没有把待执行对象放在 pending 位里。每个 CPU 有两条链表（[softirq.c#L801-L807](../../linux/kernel/softirq.c#L801-L807)）：
+
+```c
+struct tasklet_head {
+	struct tasklet_struct *head;
+	struct tasklet_struct **tail;
 };
 ```
 
-全局 [`softirq_vec[NR_SOFTIRQS]`](../../linux/kernel/softirq.c#L60)保存各类别的回调。当前源码的[枚举定义](../../linux/include/linux/interrupt.h#L547)共有 10 类，编号从 0 开始：
+`softirq_init()` 把 `tail` 指到 `head` 的地址，表示空链表，然后注册两个 action（[softirq.c#L1035-L1048](../../linux/kernel/softirq.c#L1035-L1048)）。
 
-| 编号 | 类别 | 对应处理入口或用途 |
+[`struct tasklet_struct`](../../linux/include/linux/interrupt.h#L688-L699) 里和调度有关的是：
+
+| 字段 | 含义 |
+| --- | --- |
+| `next` | 当前 CPU 链表上的后继。入队时写成 `NULL`，由 `tail` 指向这个位置 |
+| `state` 的 `TASKLET_STATE_SCHED` | 已经在某条链表上，或正等待执行。重复 `tasklet_schedule()` 时若此位已置，不再入队 |
+| `state` 的 `TASKLET_STATE_RUN` | 本配置是 SMP，表示正在某个 CPU 上执行。`tasklet_trylock()` 用 test-and-set 取得它 |
+| `count` | 原子计数。非 0 表示 disable，回调不会运行 |
+| `use_callback` 与联合体 | 为真时调用 `callback(tasklet)`，否则调用旧式 `func(data)` |
+
+头文件注释写明这个 API 已废弃，并建议考虑线程化 IRQ；同时说明 tasklet 相对普通 softirq 的差别是同一个 tasklet 同时只在一个 CPU 上跑（[interrupt.h#L665-L686](../../linux/include/linux/interrupt.h#L665-L686)）。
+
+BH workqueue 不使用 `tasklet_struct`。它有自己的每 CPU `bh_worker_pools`，只是借用这两个向量把执行拉进 softirq。见第 4.7 节。
+
+## 3. 置位之后，回调在哪里执行
+
+### 3.1 四条入口看的是同一份 pending
+
+`__raise_softirq_irqoff()` 只做按位或。随后走哪条执行路径，取决于当时的 `preempt_count`。下面的判断来自 `raise_softirq_irqoff()`、`__irq_exit_rcu()`、`__local_bh_enable_ip()` 和 `do_softirq()`，都是本配置会编译的代码。
+
+| 置位时的上下文 | `raise_softirq_irqoff()` 还会做什么 | 回调何时跑 |
 | --- | --- | --- |
-| 0 | `HI_SOFTIRQ` | 高优先级 tasklet 与高优先级 BH workqueue，见 [`tasklet_hi_action()`](../../linux/kernel/softirq.c#L956) |
-| 1 | `TIMER_SOFTIRQ` | 普通内核定时器，见 [`run_timer_softirq` 的注册](../../linux/kernel/time/timer.c#L2579) |
-| 2 | `NET_TX_SOFTIRQ` | 网络发送侧延后处理，见 [`net_tx_action` 的注册](../../linux/net/core/dev.c#L13231) |
-| 3 | `NET_RX_SOFTIRQ` | 网络接收轮询，见 [`net_rx_action` 的注册](../../linux/net/core/dev.c#L13232) |
-| 4 | `BLOCK_SOFTIRQ` | 块层完成处理，见 [`blk_done_softirq` 的注册](../../linux/block/blk-mq.c#L5261) |
-| 5 | `IRQ_POLL_SOFTIRQ` | IRQ 轮询工作，见 [`irq_poll_softirq` 的注册](../../linux/lib/irq_poll.c#L214) |
-| 6 | `TASKLET_SOFTIRQ` | 普通 tasklet 与普通 BH workqueue，见 [`tasklet_action()`](../../linux/kernel/softirq.c#L950) |
-| 7 | `SCHED_SOFTIRQ` | 调度域负载均衡，见 [`sched_balance_softirq` 的注册](../../linux/kernel/sched/fair.c#L14194) |
-| 8 | `HRTIMER_SOFTIRQ` | 需要在 softirq 中运行的高精度定时器，见 [`hrtimer_run_softirq` 的注册](../../linux/kernel/time/hrtimer.c#L2335) |
-| 9 | `RCU_SOFTIRQ` | RCU 处理，例如 [`rcu_core_si` 的注册](../../linux/kernel/rcu/tree.c#L4879) |
+| 硬中断，或已经在执行 softirq | `in_interrupt()` 为真，不唤醒线程 | 外层硬中断退出，或当前 `handle_softirqs()` 的下一轮 |
+| bottom half 已关闭的任务 | 同上，因为 `0x200` 已经让 `in_interrupt()` 为真 | 最外层 `local_bh_enable()` 里的 `do_softirq()` |
+| 普通任务，bottom half 开着 | 唤醒本 CPU 的 `ksoftirqd` | 该线程被调度到之后 |
+| 上面任一路径真正进入执行函数时 | — | `handle_softirqs()` |
 
-枚举中存在某个类别，并不意味着所有配置都注册它，也不意味着所属子系统的全部工作都在这里完成。应当继续检查注册点的配置条件与触发点。
+还有一条容易漏掉的入口。空闲任务或迁移线程在调度前会调用 `flush_smp_call_function_queue()`，把挂起的跨 CPU 调用做完。若这些调用置了 softirq，非 RT 配置下它接着调用 `do_softirq()`（[smp.c#L598-L625](../../linux/kernel/smp.c#L598-L625)、[interrupt.h#L595-L601](../../linux/include/linux/interrupt.h#L595-L601)）。`do_softirq()` 若发现 `in_interrupt()` 为真就直接返回（[softirq.c#L510-L516](../../linux/kernel/softirq.c#L510-L516)），所以 bottom half 关着时这条路径也只是把位留着。
 
-### 2.2 每 CPU 位图回答“本 CPU 哪些类别待处理”
+`ksoftirqd` 指针在 `spawn_ksoftirqd()` 之前是空的。`wakeup_softirqd()` 看到空指针就返回（[softirq.c#L75-L81](../../linux/kernel/softirq.c#L75-L81)）。这个阶段进程上下文的 raise 只留下 pending，要等下一次硬中断退出或 `local_bh_enable()`。默认配置下，硬中断退出不依赖线程已经创建：`invoke_softirq()` 在 `force_irqthreads()` 为假时直接调用 `__do_softirq()`（[softirq.c#L487-L496](../../linux/kernel/softirq.c#L487-L496)）。
 
-当前 x86 实现将 pending 保存为单独的每 CPU `u16` 变量 [`__softirq_pending`](../../linux/arch/x86/kernel/irq.c#L36)，并通过 [`local_softirq_pending_ref`](../../linux/arch/x86/include/asm/hardirq.h#L68)接入通用接口。不要直接套用其他架构或旧版本中“pending 一定在 `irq_stat` 里”的布局。
+### 3.2 一轮 `handle_softirqs()` 处理的是进入时的快照
 
-三个[访问宏](../../linux/include/linux/interrupt.h#L525)分别读、覆盖和按位或当前 CPU 的值：
-
-```c
-#define local_softirq_pending() (__this_cpu_read(local_softirq_pending_ref))
-#define set_softirq_pending(x)  (__this_cpu_write(local_softirq_pending_ref, (x)))
-#define or_softirq_pending(x)   (__this_cpu_or(local_softirq_pending_ref, (x)))
-```
-
-例如，CPU 0 上设置 `BIT(NET_RX_SOFTIRQ)`，只说明 CPU 0 的网络接收处理入口需要运行。CPU 1 有自己独立的 pending 状态。同一个全局回调可以在不同 CPU 上处理不同的本地工作。
-
-### 2.3 pending 不保存工作数量
-
-假设没有消费发生，连续三次执行：
+函数同时被硬中断退出、`do_softirq_own_stack()` 和 `ksoftirqd` 使用。调用方进入时本地中断是关的。下面按源码写成简化逻辑，保留会改变结果的开关中断、快照和停止条件（[softirq.c#L579-L652](../../linux/kernel/softirq.c#L579-L652)）：
 
 ```text
-pending |= BIT(NET_RX_SOFTIRQ)
-pending |= BIT(NET_RX_SOFTIRQ)
-pending |= BIT(NET_RX_SOFTIRQ)
-```
-
-结果仍然只有一个置位。位图不能区分“一次通知”和“一百次通知”，也不包含数据包地址。**多个触发合并成一次待处理标记，工作本身必须留在子系统的数据结构中。** 这一性质直接来自 [`or_softirq_pending()`](../../linux/include/linux/interrupt.h#L527)的按位或语义。
-
-对于网络接收，工作又分为两层：
-
-- [`softnet_data.poll_list`](../../linux/include/linux/netdevice.h#L3501)保存本 CPU 待轮询的 NAPI 实例。
-- 网卡接收环保存已经完成的描述符，e1000e 在 [`e1000_clean_rx_irq()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L929)中检查描述符的 `DD` 状态并推进消费位置。
-
-因此，pending 清零并不等于“所有数据包已经处理完”，pending 置位也不能用于估计接收队列深度。
-
-## 3. 注册与触发：安排执行，不直接执行回调
-
-### 3.1 `open_softirq()` 只安装回调
-
-[`open_softirq()`](../../linux/kernel/softirq.c#L793)的实现非常短：
-
-```c
-void open_softirq(int nr, void (*action)(void))
-{
-    softirq_vec[nr].action = action;
-}
-```
-
-它没有动态分配编号，没有创建设备对象，也没有建立每设备的回调链。网络子系统在[初始化时](../../linux/net/core/dev.c#L13231)注册 `net_tx_action` 和 `net_rx_action`；tasklet 则在 [`softirq_init()`](../../linux/kernel/softirq.c#L1035)中注册两个入口。
-
-这解释了驱动的接入方式：e1000e 通过 [`netif_napi_add()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L7465)注册自己的 NAPI 回调，由网络层统一调度。它不为每块网卡分配一个 softirq 编号，也不覆盖全局 `NET_RX_SOFTIRQ` 回调。
-
-### 3.2 三种 raise 接口分别承担什么责任
-
-| 接口 | 对本地硬中断状态的要求 | 行为 |
-| --- | --- | --- |
-| `__raise_softirq_irqoff(nr)` | 调用时必须已关闭 | 记录 raise tracepoint，设置 pending 位 |
-| `raise_softirq_irqoff(nr)` | 调用时必须已关闭 | 设置 pending，并在需要时唤醒 `ksoftirqd` |
-| `raise_softirq(nr)` | 由接口保存、关闭并恢复 | 包装 `raise_softirq_irqoff()` |
-
-对应实现集中在 [`kernel/softirq.c` 的 raise 接口](../../linux/kernel/softirq.c#L760)。名字中的 `irqoff` 表示调用前提，不能理解为函数会代替调用者关闭硬中断。
-
-主线配置下，`raise_softirq_irqoff()` 在 `!in_interrupt()` 时唤醒本 CPU 的 `ksoftirqd`。这里的 `in_interrupt()` 还覆盖 BH 被禁用的情况，见[上下文判断宏](../../linux/include/linux/preempt.h#L135)。于是：
-
-- 从硬中断触发时，通常留给中断退出路径处理。
-- 从正在执行的 softirq 触发时，留给执行循环再次检查。
-- 在 `local_bh_disable()` 区间触发时，最外层重新启用 BH 是后续处理机会。
-- 从普通、BH 已启用的任务上下文触发时，需要唤醒 `ksoftirqd`，确保存在后续执行者。
-
-最低层 `__raise_softirq_irqoff()` 不负责唤醒，因此调用者必须有明确的后续执行路径。例如 [`net_rx_action()`](../../linux/net/core/dev.c#L7853)在自己仍位于 softirq 执行循环中时，用它安排下一轮网络处理。
-
-### 3.3 唤醒线程不代表回调已经完成
-
-[`wakeup_softirqd()`](../../linux/kernel/softirq.c#L75)取得本 CPU 的线程指针，并调用 `wake_up_process()`。唤醒只是使线程有机会获得 CPU；raise 接口没有等待回调完成的协议。
-
-同样，raise 本身不提供跨 CPU 队列的发布协议。若工作会由另一个 CPU 消费，队列的锁、原子状态和内存顺序必须由所属子系统安排。e1000e/NAPI 使用[原子修改 NAPI 状态](../../linux/net/core/dev.c#L6659)取得调度资格，再在[关闭本地硬中断的区间](../../linux/net/core/dev.c#L6640)修改本 CPU 的 poll 链表。
-
-## 4. 执行入口：哪些时机会检查 pending
-
-### 4.1 硬中断退出：最直接的执行机会
-
-x86-64 的 [`run_irq_on_irqstack_cond()`](../../linux/arch/x86/include/asm/irq_stack.h#L189)把设备中断处理放在 `irq_enter_rcu()` 与 `irq_exit_rcu()` 之间。退出时，通用代码在[扣除硬中断计数之后](../../linux/kernel/softirq.c#L720)检查：
-
-```c
-preempt_count_sub(HARDIRQ_OFFSET);
-if (!in_interrupt() && local_softirq_pending())
-    invoke_softirq();
-```
-
-这里的顺序十分关键。扣除的是刚完成的这一层 hardirq；如果它打断的是一个正在执行的 softirq，或者一个 BH 被禁用的区间，`in_interrupt()` 仍不为零，此时不会递归调用 softirq 执行器。
-
-在未强制线程化的非 RT 配置下，[`invoke_softirq()`](../../linux/kernel/softirq.c#L487)直接进入 `__do_softirq()` 或 `do_softirq_own_stack()`。因此可以出现下面的时序：
-
-```text
-普通任务被网卡 IRQ 打断
-  → e1000_intr_msi() 标记 NET_RX 待处理
-  → IRQ 退出路径调用 softirq
-  → net_rx_action() 批量处理
-  → 最后恢复原来的执行流
-```
-
-此时 CPU 借用了被打断任务的执行机会，回调并没有因为 `current` 指向该任务而获得可睡眠的普通任务上下文。
-
-### 4.2 重新启用 BH：普通任务也可能执行 pending
-
-非 RT 的 [`__local_bh_enable_ip()`](../../linux/kernel/softirq.c#L428)在解除最外层 BH 禁用后，若不处于其他中断上下文且存在 pending，就调用 `do_softirq()`。这意味着 `local_bh_enable()` 可能执行一批延后工作，调用成本并非总是一次计数减法。
-
-[`do_softirq()`](../../linux/kernel/softirq.c#L510)先检查 `in_interrupt()`，然后保存本地 IRQ 状态，读取 pending，必要时调用 `do_softirq_own_stack()`，最后恢复 IRQ 状态。它与 `__do_softirq()` 的职责不同：前者处理调用环境，后者直接进入核心分派循环。
-
-### 4.3 `ksoftirqd/N`：获得调度机会后继续执行
-
-第三个入口是每 CPU 的 [`run_ksoftirqd()`](../../linux/kernel/softirq.c#L1055)。它检查本 CPU pending，并调用同一个 `handle_softirqs()`。硬中断退出、BH 重新启用、内核线程，最终共享同一套类别表和待处理位图。
-
-### 4.4 换栈与切换任务是两件事
-
-x86 的 [`do_softirq_own_stack()`](../../linux/arch/x86/include/asm/irq_stack.h#L206)可以切换到本 CPU 的 IRQ 栈再调用 `__do_softirq()`，避免在已经很深的任务栈上继续消耗栈空间。硬中断入口则根据[是否来自用户态、IRQ 栈是否已在使用](../../linux/arch/x86/include/asm/irq_stack.h#L133)选择是否换栈。
-
-这些栈切换不会把当前执行变成 `ksoftirqd`。只有调度器实际运行了该内核线程，`current` 才对应 `ksoftirqd/N`。分析调用栈时，应分别判断“使用哪个栈”和“当前在哪种执行上下文”。
-
-## 5. 核心循环：如何消费 pending，又保留新来的工作
-
-### 5.1 先读一份保留关键顺序的伪代码
-
-下面是 [`handle_softirqs()`](../../linux/kernel/softirq.c#L579)的简化伪代码，省略记账、RCU 和调试辅助操作。进入和返回时本地硬中断均关闭：
-
-```text
-end = jiffies + msecs_to_jiffies(2)
+end = jiffies + MAX_SOFTIRQ_TIME          /* HZ=1000 时是 2 个 jiffy */
 max_restart = 10
-pending = 读取本 CPU 的 pending
-进入 softirq 执行上下文
+去掉 current->flags 里的 PF_MEMALLOC
+pending = 本 CPU 位图
+preempt_count += SOFTIRQ_OFFSET           /* 标成正在执行 */
+account_softirq_enter()                 /* 本配置里它调用的记账函数是空的，见第 4.4 节 */
 
 restart:
-    本 CPU 的 pending = 0
-    开本地硬中断
+    把本 CPU 位图写成 0
+    开本地中断
+    按 pending 从低位到高位调用对应 action()
+    若本次是 ksoftirqd：rcu_softirq_qs()
+    关本地中断
+    pending = 本 CPU 位图               /* 本轮 action 新置的位 */
+    若 pending 非 0：
+        若 jiffies 仍早于 end，且 !need_resched()，且 --max_restart 非 0：
+            goto restart
+        否则 wakeup_softirqd()          /* 位图保持新置的那些位 */
 
-    按编号从小到大，处理 pending 快照中每个置位的类别：
-        增加该类别的执行次数
-        调用 softirq_vec[nr].action()
-
-    关本地硬中断
-    pending = 重新读取本 CPU 的 pending
-
-    如果 pending 非零：
-        如果未到时间上限、无需重新调度，且还有重启次数：
-            跳到 restart
-        否则：
-            唤醒本 CPU 的 ksoftirqd
-
-退出 softirq 执行上下文
+account_softirq_exit()                  /* 本配置里它调用的记账函数是空的，见第 4.4 节 */
+preempt_count -= SOFTIRQ_OFFSET
+按进入时的值恢复 PF_MEMALLOC 这一位
 ```
 
-阅读这里最容易混淆两个同名概念：局部变量 `pending` 是**当前这一轮的快照**，每 CPU 的 pending 是**执行期间新产生的请求**。它们可以同时非零，也可以一个为零而另一个非零。
+低位优先来自 `ffs()`。x86 的 `ffs()` 与编译器内建一致：最低置位是第 1 位，0 返回 0（[bitops.h#L328-L339](../../linux/arch/x86/include/asm/bitops.h#L328-L339)）。循环里用返回值既选向量，又右移掉已经处理的低位（[softirq.c#L610-L631](../../linux/kernel/softirq.c#L610-L631)）。
 
-### 5.2 为什么先清 pending，再打开硬中断
+举例：快照里只有 `TIMER_SOFTIRQ`（bit 1）和 `NET_RX_SOFTIRQ`（bit 3），数值是 `0b1010`。
 
-源码先[读取快照](../../linux/kernel/softirq.c#L596)，再[清空每 CPU pending，最后打开本地硬中断](../../linux/kernel/softirq.c#L602)。于是新来的硬中断可以把新的通知写入每 CPU pending，而当前循环继续消费局部快照。
+1. `ffs` 得到 2，指针从 `softirq_vec[0]` 前进 1 步，调用 `run_timer_softirq`。
+2. 指针再加 1，快照右移 2 位，剩下 `0b10`。
+3. `ffs` 再得到 2，指针再前进 1 步，落到 `softirq_vec[3]`，调用 `net_rx_action`。
 
-以下以同一个 `NET_RX_SOFTIRQ` 在处理期间再次被触发为例：
+这一轮不会因为 `net_rx_action` 内部又把 `NET_RX_SOFTIRQ` 置上就再次调用它。新位写进已经清零的每 CPU 位图，要等本轮所有快照位都处理完、重新关中断之后再读。若停止条件允许，下一轮才会再跑。
 
-| 时刻 | 本 CPU pending | 局部快照 | 发生的事情 |
-| --- | --- | --- | --- |
-| A | `NET_RX` | 尚未读取 | 首次收到工作通知 |
-| B | 0 | `NET_RX` | 执行器取出快照并清空本地位图 |
-| C | 0 | `NET_RX` | 开硬中断，执行 `net_rx_action()` |
-| D | `NET_RX` | `NET_RX` | 新中断或回调再次标记接收工作 |
-| E | `NET_RX` | 新读取的 `NET_RX` | 本轮返回后，执行器看到新请求 |
+`max_restart` 初值是 10。每一轮结束后先自减，结果为 0 就不再回去。因此只看这个计数时，循环体最多进入 10 次：第一次进入时尚为 10，第 10 次结束后减成 0。源码注释写的是“最多重启 `MAX_SOFTIRQ_RESTART` 次”（[softirq.c#L530-L544](../../linux/kernel/softirq.c#L530-L544)）。按这段条件的字面次数，`goto restart` 最多发生 9 次，加上第一次进入共 10 轮。
 
-只要遵循接口的中断状态和队列同步约定，D 时刻的新置位不会被本轮结束操作覆盖，因为清零已经发生在 B 时刻。相反，如果把清零放在回调之后，新通知就可能被抹掉。
+时间条件是 `time_before(jiffies, end)`，`end` 在函数入口算好。`msecs_to_jiffies(2)` 在 `HZ <= 1000` 且 1000 能被 `HZ` 整除时，公式是把毫秒向上换成 jiffy（[jiffies.h#L455-L463](../../linux/include/linux/jiffies.h#L455-L463)）。`HZ` 为 1000 时结果是 2。检查点在一整轮快照之后，不在某个 `action()` 内部，所以单个回调可以越过这 2 个 jiffy。注释还说明 `stop_machine()` 期间 jiffies 可能停止增长，所以除了时间还要有轮数上限。
 
-“再次置位”只保证再次获得处理机会，实际工作仍由队列状态决定。新工作有时已被正在运行的回调顺便消费，后续多执行一次回调并不代表位图机制出错。
+`need_resched()` 同样只在两轮之间采样。某一轮已经开始后，即使 tick 把当前任务标成需要调度，这一轮仍会把快照里剩余的向量跑完，然后停止并唤醒 `ksoftirqd`。
 
-### 5.3 为什么允许硬中断打断 softirq，却不递归执行 softirq
+### 3.3 同一个 CPU 不会嵌套进入 `handle_softirqs()`
 
-回调调用前的 [`local_irq_enable()`](../../linux/kernel/softirq.c#L606)使 CPU 能继续响应硬中断。与此同时，非 RT 的 [`softirq_handle_begin()`](../../linux/kernel/softirq.c#L461)增加 `SOFTIRQ_OFFSET`，标记当前正在服务 softirq。
+`softirq_handle_begin()` 在开中断之前加上 `SOFTIRQ_OFFSET`（[softirq.c#L461-L464](../../linux/kernel/softirq.c#L461-L464)）。此后 `in_serving_softirq()` 和 `in_interrupt()` 都为真。回调运行时本地中断是开的，硬中断可以进来并再次置位；那次硬中断的 `__irq_exit_rcu()` 看到 `in_interrupt()` 仍为真，不会再调用 `invoke_softirq()`。新位留给外层循环在关中断之后读取。
 
-因此，硬中断打断回调并返回时，[`__irq_exit_rcu()`](../../linux/kernel/softirq.c#L722)仍会发现当前处于 softirq 上下文，留下 pending 后恢复外层回调。外层循环在[关闭硬中断后重新检查](../../linux/kernel/softirq.c#L637)，统一决定是否再处理一轮。这避免了同 CPU 上不断递归进入执行器。
+`do_softirq()` 一开始就在 `in_interrupt()` 为真时返回。因此从正在执行的 softirq 里，或从关着 bottom half 的代码里，再调用 `do_softirq()` 不会形成第二层。`local_bh_enable()` 只有在减去本次关闭、并且 `in_interrupt()` 变成假之后才会调用它。
 
-### 5.4 编号决定扫描顺序，不构成抢占优先级
+不同 CPU 之间没有这层互斥。两个 CPU 可以同时执行 `net_rx_action`，各自读自己的 `softnet_data`。需要跨 CPU 保护的数据由网络子系统自己的锁处理，softirq 核心不提供这把锁。
 
-循环用 [`ffs(pending)`](../../linux/kernel/softirq.c#L610)找到最低置位，再推进回调指针和位图。一个快照内，编号较小的类别先执行，每个置位类别执行一次。
+### 3.4 截断之后 CPU 什么时候离开这段处理
 
-但如果 `NET_RX_SOFTIRQ` 正在运行时又产生 `HI_SOFTIRQ`，核心不会中断当前网络回调立即改跑 `HI`。新置位进入下一次 pending 检查。`HI` 的“高优先级”应理解为扫描顺序上的优先，不能当作调度器的抢占优先级。
+到达时间、轮数或 `need_resched()` 限制时，`handle_softirqs()` 留下尚未处理的 pending，并 `wakeup_softirqd()`。它不在这里调用 `schedule()`。
 
-### 5.5 2 毫秒与 10 次究竟限制什么
+随后能不能换任务，取决于这条 softirq 是从哪里进来的：
 
-源码设置 [`MAX_SOFTIRQ_TIME = msecs_to_jiffies(2)` 与 `MAX_SOFTIRQ_RESTART = 10`](../../linux/kernel/softirq.c#L530)。一轮快照中的所有回调返回后，若还有 pending，才检查：
+- **硬中断退出，被打断的是用户态。** `irqentry_exit()` 走进 `irqentry_exit_to_user_mode()`。返回用户态的循环里，`TIF_NEED_RESCHED` 或 `TIF_NEED_RESCHED_LAZY` 置位就会 `schedule()`（[common.c#L185-L191](../../linux/kernel/entry/common.c#L185-L191)、[common.c#L26-L31](../../linux/kernel/entry/common.c#L26-L31)）。`ksoftirqd` 是否马上运行，由调度器在此时的可运行任务里决定。
+- **硬中断退出，被打断的是内核态，且进入前中断是开的。** `CONFIG_PREEMPTION` 下会调用 `irqentry_exit_cond_resched()`（[common.c#L209-L211](../../linux/kernel/entry/common.c#L209-L211)）。默认 voluntary 模型把这个调用换成空操作（[core.c#L7636-L7641](../../linux/kernel/sched/core.c#L7636-L7641)）。被打断的内核代码继续执行，直到它自己的调度点。`ksoftirqd` 只是已经被唤醒。
+- **`ksoftirqd` 自己。** `run_ksoftirqd()` 从 `handle_softirqs(true)` 返回后调用 `cond_resched()`（[softirq.c#L1055-L1066](../../linux/kernel/softirq.c#L1055-L1066)）。voluntary 模型里 `cond_resched` 仍然会真正调度（[core.c#L7636-L7638](../../linux/kernel/sched/core.c#L7636-L7638)）。若 pending 还在，`smpboot` 循环下一轮的 `ksoftirqd_should_run()` 为真，线程会再进入一次。
 
-```c
-if (time_before(jiffies, end) && !need_resched() &&
-    --max_restart)
-    goto restart;
-```
+因此，2 ms 和 10 轮限制的直接效果是结束本次 `handle_softirqs()`，把剩余位图留给 `ksoftirqd`。它不保证调用返回后用户任务立刻占据 CPU。
 
-由[检查位置](../../linux/kernel/softirq.c#L639)可以得出四个结论：
+## 4. 沿着源码看每条路径
 
-1. **时间限制作用于是否再开始一轮。** 核心不能在某个回调运行到 2 毫秒时强制打断它。
-2. **这里按 jiffies 判断时间。** `msecs_to_jiffies(2)` 会受 `HZ` 和换算粒度影响，不是高精度的 2 毫秒定时器。
-3. **本次调用最多执行 10 轮快照。** 初始值为 10，每次准备重启时先减一；包括首次执行在内最多 10 轮，并非首次之外再重启 10 次。
-4. **`need_resched()` 只阻止下一轮。** 它不会跳过当前快照中尚未调用的类别，也不会立即中止正在运行的回调。
+### 4.1 注册与置位
 
-次数限制还用于覆盖 `jiffies` 可能暂时不前进的情况，源码注释举了 `stop_machine()` 的例子。时间、次数和重新调度需求共同决定是否把剩余工作留给线程，而具体回调仍需要自己控制处理量。
+`open_softirq()` 只有一行赋值。`start_kernel()` 在 `local_irq_enable()` 之前就要把若干向量注册好。顺序是：`sched_init()` 调用 `init_sched_fair_class()`，注册 `SCHED_SOFTIRQ`（[main.c#L938](../../linux/init/main.c#L938)、[core.c#L8852](../../linux/kernel/sched/core.c#L8852)、[fair.c#L14178-L14194](../../linux/kernel/sched/fair.c#L14178-L14194)）；`rcu_init()` 在 `use_softirq` 为真时注册 `RCU_SOFTIRQ`（[main.c#L958](../../linux/init/main.c#L958)、[tree.c#L4866-L4879](../../linux/kernel/rcu/tree.c#L4866-L4879)）；然后才是 `timers_init()`、`hrtimers_init()` 和 `softirq_init()`，最后打开本地中断（[main.c#L973-L993](../../linux/init/main.c#L973-L993)）。网络、块层和 irq_poll 的注册更晚，在各自的初始化函数里。
 
-### 5.6 回调之外的上下文收尾
+三个置位接口的分工是：
 
-核心还会进行软中断时间记账、记录 entry/exit tracepoint、检查回调前后的 `preempt_count()` 是否一致，见[分派循环中的辅助操作](../../linux/kernel/softirq.c#L598)。若回调错误地遗留了抢占计数，核心会报错并恢复计数；这是诊断措施，不能代替回调正确配对禁用和恢复操作。
-
-它还在入口清除借用任务的 `PF_MEMALLOC`，退出时恢复原值，见[任务标志处理](../../linux/kernel/softirq.c#L589)及[退出收尾](../../linux/kernel/softirq.c#L648)。这个细节再次说明：softirq 可以借用当前任务执行，但必须隔离不应继承的任务状态。
-
-## 6. `ksoftirqd`：让剩余工作参与任务调度
-
-### 6.1 每个 CPU 都有自己的处理线程
-
-[`softirq_threads`](../../linux/kernel/softirq.c#L1103)描述了线程的三个关键属性：
-
-```c
-static struct smp_hotplug_thread softirq_threads = {
-    .store             = &ksoftirqd,
-    .thread_should_run = ksoftirqd_should_run,
-    .thread_fn         = run_ksoftirqd,
-    .thread_comm       = "ksoftirqd/%u",
-};
-```
-
-[`spawn_ksoftirqd()`](../../linux/kernel/softirq.c#L1152)通过 smpboot 框架注册每 CPU 线程。底层使用 [`kthread_create_on_cpu()`](../../linux/kernel/smpboot.c#L180)创建线程，并标记其 CPU 归属。这里没有把所有 CPU 的 pending 集中到一条公共队列，也不会因为 CPU 0 很忙，就自动让 `ksoftirqd/1` 消费 CPU 0 的位图。
-
-[`ksoftirqd_should_run()`](../../linux/kernel/softirq.c#L1050)返回本 CPU 的 pending 状态；smpboot 的[主循环](../../linux/kernel/smpboot.c#L154)据此决定睡眠还是调用 `run_ksoftirqd()`。
-
-### 6.2 为什么在线程里仍然不能随意睡眠
-
-`run_ksoftirqd()` 在非 RT 下先关闭本地硬中断，再调用 `handle_softirqs(true)`；核心随后打开硬中断、建立 softirq 执行上下文、调用各类回调。处理完毕后，线程才[恢复环境并调用 `cond_resched()`](../../linux/kernel/softirq.c#L1055)。
-
-因此，非 RT 下需要区分两个阶段：
-
-```text
-ksoftirqd/N 的线程循环：可以被调度，可以在等待工作时睡眠
-    ↓
-handle_softirqs() 内的回调：处于 softirq 上下文，不能主动阻塞睡眠
-    ↓
-退出 softirq 上下文：cond_resched() 提供重新调度机会
-```
-
-把回调交给 `ksoftirqd`，主要改变的是取得 CPU 的方式；回调仍遵守同一套 softirq 上下文约束。它不能因为线程名称出现在调用栈上，就调用 `msleep()`、等待完成量或获取可能睡眠的普通互斥锁。
-
-### 6.3 `ksoftirqd` 的出现不一定意味着过载
-
-至少有三类原因会让它参与工作：
-
-1. 核心分派循环还有 pending，但[时间、轮数或重新调度条件](../../linux/kernel/softirq.c#L639)不允许继续。
-2. 普通任务上下文调用 [`raise_softirq_irqoff()`](../../linux/kernel/softirq.c#L773)，需要唤醒一个后续执行者。
-3. 配置要求在硬中断退出时[转交线程](../../linux/kernel/softirq.c#L487)，例如强制线程化分支。
-
-`ksoftirqd` 采用普通调度策略，源码在[定时器线程设计说明](../../linux/include/linux/interrupt.h#L624)中明确说明其 `SCHED_OTHER` 定位。把剩余工作放到可调度线程，有助于让其他任务获得运行机会；代价是后续处理时间会受线程调度影响。
-
-唤醒 `ksoftirqd` 也不会把 pending 标记为该线程独占。在本文的非 RT、未强制线程化路径中，若另一个硬中断先到达，退出路径仍可能先处理这些 pending。线程真正运行时会[重新检查位图](../../linux/kernel/softirq.c#L1058)，而不会假设自己被唤醒就一定有工作。
-
-## 7. 上下文与并发：BH 禁用到底保护了什么
-
-### 7.1 区分“正在处理”和“暂时禁止处理”
-
-非 RT 下，softirq 状态编码在 `preempt_count()` 的一部分位中。[偏移定义](../../linux/include/linux/preempt.h#L33)给出：
-
-```text
-SOFTIRQ_OFFSET         = 1 << 8 = 0x100
-SOFTIRQ_DISABLE_OFFSET = 2 * SOFTIRQ_OFFSET = 0x200
-```
-
-核心进入回调时加 `0x100`；每嵌套一层 `local_bh_disable()` 加 `0x200`。这样可以用 softirq 计数域的最低位区分执行状态与单纯禁用状态，设计意图见 [`softirq.c` 的计数说明](../../linux/kernel/softirq.c#L91)。
-
-以下只列出 softirq 计数域，忽略其他抢占与中断位：
-
-| 状态 | softirq 计数 | `in_serving_softirq()` | `in_softirq()` |
-| --- | --- | --- | --- |
-| 普通任务，BH 已启用 | `0x000` | 假 | 假 |
-| 普通任务，一层 BH 禁用 | `0x200` | 假 | 真 |
-| 普通任务，两层 BH 禁用 | `0x400` | 假 | 真 |
-| 正在执行 softirq | `0x100` | 真 | 真 |
-| softirq 内又禁用一层 BH | `0x300` | 真 | 真 |
-
-所以，看到 `in_softirq()` 为真，不能据此认定当前一定正在执行 softirq 回调。[头文件](../../linux/include/linux/preempt.h#L118)提供 `in_serving_softirq()` 来表达“正在服务 softirq”，并将含义较宽的 `in_softirq()`、`in_interrupt()` 列为不建议新代码使用的旧接口。
-
-### 7.2 `local_bh_disable()` 不会让硬件停止发中断
-
-[`local_bh_disable()`](../../linux/include/linux/bottom_half.h#L18)增加 BH 禁用计数。非 RT 下，它阻止本 CPU 在临界区内开始执行 softirq，并通过计数保持不可抢占；它不会在整个临界区持续关闭本地硬中断，也不会修改网卡的中断屏蔽寄存器。
-
-因此，下面的过程是允许的：
-
-```text
-任务调用 local_bh_disable()
-    ↓
-硬中断到来，设置 NET_RX pending
-    ↓
-硬中断退出时发现 BH 仍被禁用，暂不执行 softirq
-    ↓
-恢复任务，继续原来的临界区
-    ↓
-最外层 local_bh_enable() 才可能处理 pending
-```
-
-嵌套禁用必须配对解除。非 RT 的[重新启用路径](../../linux/kernel/softirq.c#L427)先减去 `cnt - 1`，保留一个抢占计数单位；必要的 softirq 处理结束后，再减去最后一个单位并检查重新调度。它避免在解除 BH 禁用到执行 pending 之间出现不受控的抢占窗口。
-
-### 7.3 同 CPU 不递归，不代表跨 CPU 自动互斥
-
-主线配置下可以总结为：
-
-| 参与者 | 是否可能并发或打断 | 需要注意的保护范围 |
+| 接口 | 中断要求 | 置位之外的动作 |
 | --- | --- | --- |
-| 同 CPU 的另一轮普通 softirq 分派 | 不会递归进入当前 softirq | 当前执行计数阻止 IRQ 退出时再次进入 |
-| 同 CPU 的硬中断 | 可以打断开 IRQ 的回调 | 共享数据可能需要 IRQ 级保护 |
-| 其他 CPU 的同类 softirq | 可以同时执行 | per-CPU pending 不提供全局互斥 |
-| 其他 CPU 的任务或硬中断 | 可以同时访问共享对象 | 仍需要对象锁、原子操作等同步 |
+| `__raise_softirq_irqoff(nr)` | 调用者已关中断 | 只做按位或和 trace |
+| `raise_softirq_irqoff(nr)` | 同上 | 若不在 `in_interrupt()`，唤醒 `ksoftirqd` |
+| `raise_softirq(nr)` | 可在中断打开时调用 | `local_irq_save()` 后调用上一行，再恢复 |
 
-源码开头的[并发设计注释](../../linux/kernel/softirq.c#L37)明确要求各 softirq 实现管理自己的串行化。全局 `softirq_vec` 共享的是回调入口，不是一个全局执行锁。
+见 [softirq.c#L757-L791](../../linux/kernel/softirq.c#L757-L791)。`__raise_softirq_irqoff()` 前面的注释要求调用时中断已经关闭，函数里的 `lockdep_assert_irqs_disabled()` 用来标明这一点。本配置没有 `CONFIG_PROVE_LOCKING`，这个断言走 `#else`，编译成空操作（[lockdep.h#L548](../../linux/include/linux/lockdep.h#L548)、[lockdep.h#L624-L630](../../linux/include/linux/lockdep.h#L624-L630)）。`raise_softirq_irqoff()` 的注释写明：已经处在中断或 softirq 里就只置位，因为返回时会再看 pending；这里的 `in_interrupt()` 也覆盖 bottom half 被关掉的代码。普通任务上下文则唤醒 `ksoftirqd`，让 softirq 尽快被调度到，而不是在当前栈上执行。
 
-### 7.4 从访问者决定锁法
+定时器和时钟事件使用包装函数 `raise_timer_softirq()`。它要求处于中断上下文。`force_irqthreads()` 为假时，它就是 `__raise_softirq_irqoff()`（[interrupt.h#L641-L648](../../linux/include/linux/interrupt.h#L641-L648)）。周期定时器在到期判断成立时调用它（[timer.c#L2455-L2458](../../linux/kernel/time/timer.c#L2455-L2458)）；高精度定时器在软到期时间已到时同样调用它（[hrtimer.c#L1902-L1905](../../linux/kernel/time/hrtimer.c#L1902-L1905)）。
 
-对非 RT 配置，先列出共享数据可能在哪些上下文被访问，再选择保护方式：
+`SCHED_SOFTIRQ` 有两处常见置位。`sched_balance_trigger()` 在 `jiffies` 到达 `rq->next_balance` 时调用会关中断的 `raise_softirq()`（[fair.c#L13257-L13267](../../linux/kernel/sched/fair.c#L13257-L13267)）。nohz 空闲平衡的跨 CPU 调用则在中断已关时使用 `__raise_softirq_irqoff()`（[core.c#L1326-L1329](../../linux/kernel/sched/core.c#L1326-L1329)）。
 
-- **任务与 softirq 共享。** 任务侧通常使用 `spin_lock_bh()`：先禁止本 CPU 的 softirq，再用锁协调其他 CPU。若任务只拿普通自旋锁，本 CPU softirq 打断任务后又尝试拿同一把锁，就可能等待一个无法恢复执行的持锁者。
-- **softirq 与硬中断共享。** softirq 侧通常需要 `spin_lock_irqsave()` 一类保护，防止本 CPU 硬中断打断持锁区后再次等待同一把锁。
-- **只有不同 CPU 的 softirq 共享。** 需要跨 CPU 互斥；能否使用普通自旋锁，取决于是否还有任务或硬中断访问同一数据。
-- **数据确实只在当前 CPU 的任务/BH 路径访问。** 非 RT 下，本地 BH 禁用可用于排除本 CPU 的 softirq；一旦存在硬中断访问或跨 CPU 访问，就需要补充相应同步。
+### 4.2 硬中断退出：先减硬中断计数，再决定是否就地执行
 
-实现上，[`__raw_spin_lock_bh()`](../../linux/include/linux/spinlock_api_smp.h#L123)先调用 BH 禁用函数再获取锁，释放时[先解锁再重新启用 BH](../../linux/include/linux/spinlock_api_smp.h#L163)；[`__raw_spin_lock_irqsave()`](../../linux/include/linux/spinlock_api_smp.h#L104)则先保存并关闭本地 IRQ。局部屏蔽解决本 CPU 的重入，锁解决不同 CPU 的竞争，二者作用范围不同。
+普通设备中断和系统向量在 x86-64 上由 `run_irq_on_irqstack_cond()` / `run_sysvec_on_irqstack_cond()` 包住。包装在处理函数前后调用 `irq_enter_rcu()` 和 `irq_exit_rcu()`（[irq_stack.h#L169-L203](../../linux/arch/x86/include/asm/irq_stack.h#L169-L203)）。
 
-这些分析以非 RT 锁语义为前提。实时内核中的 `spinlock_t`、本地锁和 BH 禁用行为需要按第 12 节重新检查。
+`irq_enter_rcu()` 通过 `__irq_enter_raw()` 加上 `HARDIRQ_OFFSET`，并在 nohz full 或空闲任务被打断时通知 tick，然后调用 `account_hardirq_enter()`。它里面的 `vtime_account_irq()` 和 `irqtime_account_irq()` 在本配置都是空函数，原因见第 4.4 节（[softirq.c#L662-L670](../../linux/kernel/softirq.c#L662-L670)、[hardirq.h#L46-L50](../../linux/include/linux/hardirq.h#L46-L50)、[vtime.h#L151-L155](../../linux/include/linux/vtime.h#L151-L155)）。
 
-## 8. e1000e 实例：从 MSI 到 NAPI 完成
+`irq_exit_rcu()` 进入 `__irq_exit_rcu()`（[softirq.c#L713-L730](../../linux/kernel/softirq.c#L713-L730)）。x86 没有定义 `__ARCH_IRQ_EXIT_IRQS_DISABLED`，所以这里先 `local_irq_disable()`。随后：
 
-### 8.1 先建立两级回调关系
+1. `account_hardirq_exit(current)`。它调用的 `vtime_account_hardirq()` 和 `irqtime_account_irq()` 同样是空函数（[vtime.h#L157-L161](../../linux/include/linux/vtime.h#L157-L161)）。
+2. `preempt_count_sub(HARDIRQ_OFFSET)`。嵌套的内层硬中断减完之后，外层硬中断计数仍在，`in_interrupt()` 仍为真。
+3. 若 `in_interrupt()` 为假且 pending 非 0，调用 `invoke_softirq()`。bottom half 仍关闭时，第 2 步之后 `in_interrupt()` 仍为真，softirq 被推迟到 `local_bh_enable()`。
+4. 若 `threadirqs` 打开且定时器线程有自己的 pending，并且当前不在 NMI 或硬中断里，唤醒 `ktimers`。默认配置下 `force_irqthreads()` 为假，这个条件不成立。`wake_timersd()` 在未启用强制线程化时是空函数；本配置启用了该选项，所以调用的是真正的唤醒函数，只是静态键让第 4 步进不去。
+5. `tick_irq_exit()`。nohz 下，若本 CPU 空闲且不需要重新调度，或它是 nohz full CPU，并且已经不在硬中断里，就调用 `tick_nohz_irq_exit()`（[softirq.c#L682-L692](../../linux/kernel/softirq.c#L682-L692)）。
 
-初始化阶段有两次注册：
+`invoke_softirq()` 在默认配置下调用 `__do_softirq()`，不再切换栈。这和 x86-64 的入口栈规则是配套的（[irq_stack.h#L132-L152](../../linux/arch/x86/include/asm/irq_stack.h#L132-L152)）：
 
-```text
-网络核心：open_softirq(NET_RX_SOFTIRQ, net_rx_action)
-驱动：    netif_napi_add(netdev, &adapter->napi, e1000e_poll)
+- 从内核态进入、且 irq stack 尚未标记占用时，入口已经切到 irq stack，并在整个处理期间保持 `hardirq_stack_inuse`。退出路径上的 `__do_softirq()` 就在这块栈上。注释认为此时 irq stack 应当接近空的。
+- 从用户态进入时不切栈，注释说明任务内核栈此时是空的。`__do_softirq()` 留在这块栈上。`hardirq_stack_inuse` 在这条路径上没有被置位。softirq 打开中断之后若又来硬中断，新的中断来自内核态且该标记为假，入口会再切到 irq stack。
+
+`do_softirq_own_stack()` 不用于这条退出路径。它用于任务上下文，见下一节。
+
+### 4.3 `local_bh_enable()` 在计数回到“允许执行”时就地调用
+
+本配置的 `local_bh_disable()` 展开为 `__local_bh_disable_ip(ip, SOFTIRQ_DISABLE_OFFSET)`。因为没有 `CONFIG_PREEMPT_RT` 和 `CONFIG_TRACE_IRQFLAGS`，这个函数是内联的 `preempt_count_add(cnt)` 加一个编译屏障（[bottom_half.h#L7-L21](../../linux/include/linux/bottom_half.h#L7-L21)）。它不关硬中断。硬中断仍可置位，但退出时被 `in_interrupt()` 挡住。
+
+`local_bh_enable()` 调用 `__local_bh_enable_ip(ip, SOFTIRQ_DISABLE_OFFSET)`（[softirq.c#L427-L458](../../linux/kernel/softirq.c#L427-L458)）。本配置没有编入函数中间那段 `local_irq_disable()` / `local_irq_enable()`。实际步骤是：
+
+1. 若在硬中断里调用，`WARN_ON_ONCE`。`lockdep_assert_irqs_enabled()` 要求进入时中断是开的；没有 lockdep 时这条断言不生效，调用约定仍写在源码里。
+2. `__preempt_count_sub(cnt - 1)`。`cnt` 为 `0x200` 时减去 `0x1FF`。若 softirq 位段原来正好是 `0x200`，结果是只留下抢占位 `1`，softirq 位段变 0。若原来是两次关闭的 `0x400`，结果是 `0x201`：还剩一次关闭，外加临时的抢占位。
+3. 只有 `in_interrupt()` 为假且 pending 非 0 才调用 `do_softirq()`。嵌套的内层 enable 因为位段仍非 0，不会执行 softirq。
+4. `preempt_count_dec()` 去掉第 2 步留下的那 1。然后 `preempt_check_resched()`。
+
+因此一次匹配的 `local_bh_disable()` / `local_bh_enable()` 净效果是加 `0x200` 再减 `0x200`。softirq 若要跑，跑在抢占计数仍至少为 1 的窗口里，并且走 `do_softirq()` 自己的栈。
+
+`do_softirq()` 确认不在中断上下文后关中断，pending 非 0 则调用 `do_softirq_own_stack()`（[softirq.c#L510-L525](../../linux/kernel/softirq.c#L510-L525)）。x86-64 的宏先把 `hardirq_stack_inuse` 置真，再在 irq stack 上调用 `__do_softirq()`，返回后清标记（[irq_stack.h#L206-L218](../../linux/arch/x86/include/asm/irq_stack.h#L206-L218)）。标记为真时，期间到来的硬中断不再切一次栈（[irq_stack.h#L138-L141](../../linux/arch/x86/include/asm/irq_stack.h#L138-L141)）。注释说明这条路径只发生在任务上下文重新打开 bottom half、irq stack 未被占用的时候。
+
+`spin_lock_bh()` 把关闭 bottom half 和关抢占合成同一次加法（[spinlock_api_smp.h#L123-L128](../../linux/include/linux/spinlock_api_smp.h#L123-L128)）：
+
+```c
+__local_bh_disable_ip(_RET_IP_, SOFTIRQ_LOCK_OFFSET);
+/* 然后取得自旋锁 */
 ```
 
-前者设置[全局 softirq 入口](../../linux/net/core/dev.c#L13232)，后者把[驱动回调放入 NAPI 实例](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L7465)。[`struct napi_struct`](../../linux/include/linux/netdevice.h#L383)同时保存 `poll_list`、`state`、`weight` 和 `poll`，使网络层可以统一管理多个设备的轮询。
+`spin_unlock_bh()` 先放锁，再 `__local_bh_enable_ip(_RET_IP_, SOFTIRQ_LOCK_OFFSET)`（[spinlock_api_smp.h#L163-L168](../../linux/include/linux/spinlock_api_smp.h#L163-L168)）。此时 `cnt - 1` 正好是 `0x200`。若这是最外层，softirq 位段被减掉，抢占位还留着，`do_softirq()` 可能运行，最后再 `preempt_count_dec()`。
 
-默认 [`netif_napi_add()`](../../linux/include/linux/netdevice.h#L2822)使用 `NAPI_POLL_WEIGHT`，本版本[定义为 64](../../linux/include/linux/netdevice.h#L2796)。设备打开时，驱动先 [`napi_enable()`，再启用设备中断](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L4693)，使中断到来时已经有可调度的 NAPI 实例。
+这把锁同时做两件事：自旋锁挡住其他 CPU；本 CPU 的 softirq 在锁持有期间不能开始执行，也就不能再次获取同一把锁。只调用 `local_bh_disable()` 挡不住其他 CPU 上的 softirq。
 
-### 8.2 MSI 处理函数取得调度资格
+### 4.4 执行循环里回调能做什么
 
-[`e1000_intr_msi()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1750)读取 ICR。驱动在[接收配置](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L3234)中设置 IAME 和 IAM，使读取 ICR 能自动屏蔽相应设备中断。随后，正常收发分支执行：
+`handle_softirqs()` 在调用 `action` 之前打开本地中断，所以回调里可以用 `local_irq_save()` 保护自己的每 CPU 队列，硬中断也可以插入。回调返回后，函数比较 `preempt_count`。若与进入时不同，打印向量号、名字和函数指针，再把计数写回进入时的值（[softirq.c#L617-L629](../../linux/kernel/softirq.c#L617-L629)）。写回计数不能补上回调少做的解锁或少释放的引用，它只避免这个错误继续影响后面的向量和退出路径。
+
+`current` 仍是被借用的任务。函数进入时清掉 `PF_MEMALLOC`，使网络接收不会继承被打断任务的内存分配标志；注释说明与换页相关的套接字仍可能在回调里再次置上该标志。离开时 `current_restore_flags(old_flags, PF_MEMALLOC)` 只恢复这一位，回调改过的其他 `flags` 位保留（[softirq.c#L589-L594](../../linux/kernel/softirq.c#L589-L594)、[sched.h#L1868-L1873](../../linux/include/linux/sched.h#L1868-L1873)）。
+
+`account_softirq_enter()` 调用 `vtime_account_irq()` 和 `irqtime_account_irq()`，`account_softirq_exit()` 调用 `vtime_account_softirq()` 和 `irqtime_account_irq()`。本配置下这些被调用的函数都是空函数：`vtime_account_irq()`、`vtime_account_softirq()` 和硬中断离开时用的 `vtime_account_hardirq()` 只在 `CONFIG_VIRT_CPU_ACCOUNTING_NATIVE` 下有实体，`irqtime_account_irq()` 只在 `CONFIG_IRQ_TIME_ACCOUNTING` 下有实体（[vtime.h#L30-L46](../../linux/include/linux/vtime.h#L30-L46)、[vtime.h#L133-L160](../../linux/include/linux/vtime.h#L133-L160)）。`CONFIG_VIRT_CPU_ACCOUNTING_GEN` 的记账入口是 `vtime_user_enter()` / `vtime_user_exit()` 和 `vtime_task_switch_generic()`，不经过这对钩子（[Kconfig#L573-L576](../../linux/init/Kconfig#L573-L576)、[cputime.c#L718-L740](../../linux/kernel/sched/cputime.c#L718-L740)、[cputime.c#L777-L785](../../linux/kernel/sched/cputime.c#L777-L785)）。本章不展开 GEN 怎样把这段时间记到任务上。
+
+只有 `ksirqd` 为真、且不是 RT 时，每一轮快照之后才调用 `rcu_softirq_qs()`（[softirq.c#L634-L635](../../linux/kernel/softirq.c#L634-L635)）。硬中断退出路径不调用它。RCU 侧的注释说明，从 RCU 的角度看这次调用相当于在该点短暂打开抢占，从而提供一个静止状态（[tree.c#L237-L259](../../linux/kernel/rcu/tree.c#L237-L259)）。静止状态怎样推进宽限期不在本章展开。
+
+回调返回时必须把 `preempt_count` 恢复到进入值，也不能睡眠。`ksoftirqd` 虽然是普通线程，`handle_softirqs(true)` 期间 bit 8 已经置上，`cond_resched()` 发生在 `softirq_handle_end()` 把这位置掉之后。
+
+### 4.5 `ksoftirqd` 的循环
+
+`spawn_ksoftirqd()` 用 `smpboot_register_percpu_thread()` 注册线程，并挂上 CPU 下线回调 `takeover_tasklets`（[softirq.c#L1103-L1162](../../linux/kernel/softirq.c#L1103-L1162)）。`smpboot_thread_fn()` 把线程标为 `TASK_INTERRUPTIBLE` 后关闭抢占，再调用 `ksoftirqd_should_run()`。该函数只读本 CPU pending。没有 pending 就 `schedule()`；有则把状态改回 `TASK_RUNNING`，打开抢占，调用 `run_ksoftirqd()`（[smpboot.c#L102-L161](../../linux/kernel/smpboot.c#L102-L161)）。
+
+`run_ksoftirqd()` 先关中断。pending 仍在时直接调用 `handle_softirqs(true)`，注释说明线程栈在这里不深，所以不再切到 irq stack（[softirq.c#L1055-L1068](../../linux/kernel/softirq.c#L1055-L1068)）。返回后开中断并 `cond_resched()`。若 pending 在关中断之后、调用之前已经变为 0，则只开中断返回。
+
+线程被唤醒的来源就是第 3.1 节那些 `wakeup_softirqd()`：普通任务上下文的 raise，以及 `handle_softirqs()` 自己到达限制时。后一种情况下线程可能就是当前任务，唤醒不会另建一条执行流；`cond_resched()` 之后若 pending 还在，外层循环会再跑一轮。
+
+### 4.6 `threadirqs` 把就地执行改成两个线程
+
+`setup_forced_irqthreads()` 是 `early_param("threadirqs")`，只把静态键打开（[manage.c#L27-L35](../../linux/kernel/irq/manage.c#L27-L35)）。`parse_early_param()` 发生在 `start_kernel()` 里（[main.c#L900-L901](../../linux/init/main.c#L900-L901)），早于 `do_pre_smp_initcalls()` 里的 `early_initcall`（[main.c#L1337-L1343](../../linux/init/main.c#L1337-L1343)、[main.c#L1536](../../linux/init/main.c#L1536)）。因此键若在命令行上打开，`spawn_ksoftirqd()` 能看见它，并额外注册 `ktimers/%u`。
+
+键打开且 `ksoftirqd` 指针已经非空时，`invoke_softirq()` 不再调用 `__do_softirq()`，只唤醒 `ksoftirqd`。硬中断退出路径上的普通 softirq 改由该线程执行。`ksoftirqd` 尚未创建时，条件 `!force_irqthreads() || !ksoftirqd` 仍为真，退出路径继续就地执行。
+
+定时器类不进这条普通 pending。`raise_timer_softirq()` 改为 `raise_ktimers_thread()`，把位或进每 CPU 的 `pending_timer_softirq`（[softirq.c#L1122-L1126](../../linux/kernel/softirq.c#L1122-L1126)）。`__irq_exit_rcu()` 在不处于 NMI 和硬中断时唤醒 `ktimers`。`run_ktimerd()` 关中断，把这些位或进普通 pending，清掉定时器专用位图，再调用 `__do_softirq()`（[softirq.c#L1128-L1140](../../linux/kernel/softirq.c#L1128-L1140)）。线程创建时 `sched_set_fifo_low(current)` 把它设为 `SCHED_FIFO`、`sched_priority` 为 1（[softirq.c#L1111-L1114](../../linux/kernel/softirq.c#L1111-L1114)、[syscalls.c#L860-L866](../../linux/kernel/sched/syscalls.c#L860-L866)）。`__normal_prio()` 对实时策略的换算是 `MAX_RT_PRIO - 1 - rt_prio`（[syscalls.c#L19-L28](../../linux/kernel/sched/syscalls.c#L19-L28)）。`rt_priority` 为 1 时内部 `prio` 为 98。`cpupri` 的对照表把 `rt_priority == 1` 放在实时优先级的低端，仍高于普通任务所在的 `prio >= MAX_RT_PRIO` 区间（[cpupri.c#L27-L41](../../linux/kernel/sched/cpupri.c#L27-L41)、[prio.h#L9-L16](../../linux/include/linux/sched/prio.h#L9-L16)）。
+
+`interrupt.h` 里的注释说明这样拆开的原因：`ksoftirqd` 保持 `SCHED_NORMAL`，因为它处理的是上一轮没有做完的积压；若定时器也放在这个优先级，就会和普通任务一起等 CPU。把定时器软中断放到低优先级的 `SCHED_FIFO` 线程，是为了让它们先于 `SCHED_NORMAL` 任务执行（[interrupt.h#L611-L630](../../linux/include/linux/interrupt.h#L611-L630)）。这条注释描述的是 `threadirqs` 或 RT 打开之后的安排。默认配置不创建 `ktimers`，定时器向量仍走普通 pending。
+
+即使跑在 `ktimers` 里，回调仍经过 `__do_softirq()`，执行期间同样加上 `SOFTIRQ_OFFSET`，不能睡眠。
+
+### 4.7 tasklet 与 BH workqueue 共用两个向量
+
+`tasklet_schedule()` 先 test-and-set `TASKLET_STATE_SCHED`。只有从 0 变成 1 才调用 `__tasklet_schedule()`，因此已在队列上的 tasklet 不会再挂一次（[interrupt.h#L755-L759](../../linux/include/linux/interrupt.h#L755-L759)）。`__tasklet_schedule_common()` 关中断，把节点接到当前 CPU 链表尾，再 `raise_softirq_irqoff()` 对应的向量（[softirq.c#L809-L822](../../linux/kernel/softirq.c#L809-L822)）。`tasklet_hi_schedule()` 走 `tasklet_hi_vec` 和 `HI_SOFTIRQ`。
+
+`tasklet_action()` 先调用 `workqueue_softirq_action(false)`，再处理普通 tasklet 链表。`tasklet_hi_action()` 先以 `true` 调用它，再处理高优先级链表（[softirq.c#L950-L960](../../linux/kernel/softirq.c#L950-L960)）。因为 `HI_SOFTIRQ` 是 bit 0，同一轮快照里高优先级 BH 工作和高优先级 tasklet 先于定时器、网络和普通 tasklet。
+
+tasklet 链表的处理在 `tasklet_action_common()`（[softirq.c#L903-L948](../../linux/kernel/softirq.c#L903-L948)）：
+
+1. 关中断，把整条链表摘下来，`tail` 重新指回空表头，再开中断。
+2. 对每个节点 `tasklet_trylock()`。SMP 上这会试着置 `TASKLET_STATE_RUN`。失败表示另一个 CPU 正在跑它，节点被放回当前 CPU 的链表并再次置位。
+3. 锁取得后若 `count != 0`，放开 `RUN` 位，同样放回链表并再次置位。此路径不清除 `SCHED`。
+4. `count` 为 0 时先 `tasklet_clear_sched()` 清掉 `SCHED` 并唤醒等这个位的人，再调用 `callback` 或 `func`。回调期间另一个 `tasklet_schedule()` 可以重新置 `SCHED` 并入队，形成下一次执行。然后放开 `RUN`。
+
+因此同一个 tasklet 的串行化来自 `TASKLET_STATE_RUN`，而不是来自 softirq 向量本身。不同 tasklet 仍可在不同 CPU 上并行。
+
+`tasklet_disable()` 先把 `count` 加一，再等待 `RUN` 位落下（[interrupt.h#L786-L790](../../linux/include/linux/interrupt.h#L786-L790)）。它不把节点从链表上摘掉。若此时 `SCHED` 仍为 1，后续的 softirq 会反复走第 3 步：放回、再置位、不清除 `SCHED`，直到 `count` 回到 0。`tasklet_kill()` 用 `wait_on_bit_lock()` 等 `SCHED`：该位已经是 0 时立刻把它置上并返回；该位仍是 1 时睡到它被清掉，再自己取得它。然后等待 `RUN` 结束，再 `tasklet_clear_sched()`（[softirq.c#L1009-L1018](../../linux/kernel/softirq.c#L1009-L1018)）。因此只有已经入队、`SCHED` 仍为 1，并且 `count` 还没减回 0 时，action 不会清 `SCHED`，`tasklet_kill()` 才会停在这次等待上。还没入队时 `SCHED` 为 0，这次等待会立刻返回。`tasklet_kill()` 若发现自己处在中断上下文，会打印提示；`wait_on_bit_lock()` 会睡眠，不能在原子上下文里用。
+
+BH workqueue 的入口是 `kick_bh_pool()`。池在当前 CPU 上时，高优先级池置 `HI_SOFTIRQ`，否则置 `TASKLET_SOFTIRQ`。目标是另一个 CPU 时，先向那个 CPU 排队 irq_work；目标 CPU 上的 `bh_pool_kick_normal()` / `bh_pool_kick_highpri()` 再置相应的位（[workqueue.c#L1235-L1248](../../linux/kernel/workqueue.c#L1235-L1248)、[workqueue.c#L7767-L7774](../../linux/kernel/workqueue.c#L7767-L7774)）。`system_bh_wq` 和 `system_bh_highpri_wq` 在 workqueue 初始化时以 `WQ_BH` 创建（[workqueue.c#L7912-L7914](../../linux/kernel/workqueue.c#L7912-L7914)）。`WQ_BH` 的定义写明执行上下文是 bottom half（[workqueue.h#L371](../../linux/include/linux/workqueue.h#L371)）。
+
+`workqueue_softirq_action()` 在对应池还有工作时调用 `bh_worker()`（[workqueue.c#L3683-L3688](../../linux/kernel/workqueue.c#L3683-L3688)）。`bh_worker()` 自己还有一轮限制：`BH_WORKER_JIFFIES` 是 `msecs_to_jiffies(2)`，`BH_WORKER_RESTARTS` 是 10（[workqueue.c#L133-L139](../../linux/kernel/workqueue.c#L133-L139)、[workqueue.c#L3634-L3662](../../linux/kernel/workqueue.c#L3634-L3662)）。这层限制在 softirq 的 2 个 jiffy / 10 轮之内再截断 BH 工作项。工作项回调仍然处在 softirq 上下文。
+
+### 4.8 从 e1000e 的硬中断到 `NET_RX_SOFTIRQ`
+
+[`e1000_intr_msi()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1750) 先读 ICR。链路状态变化在这里处理；不可纠正 ECC 错误会安排复位工作并立刻返回，不再往下走（[netdev.c#L1758-L1798](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1758-L1798)）。其余情况在 `napi_schedule_prep()` 成功时把收发数据留给 NAPI（[netdev.c#L1800-L1808](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1800-L1808)）：
 
 ```c
 if (napi_schedule_prep(&adapter->napi)) {
-    adapter->total_tx_bytes = 0;
-    adapter->total_tx_packets = 0;
-    adapter->total_rx_bytes = 0;
-    adapter->total_rx_packets = 0;
-    __napi_schedule(&adapter->napi);
+	adapter->total_tx_bytes = 0;
+	adapter->total_tx_packets = 0;
+	adapter->total_rx_bytes = 0;
+	adapter->total_rx_packets = 0;
+	__napi_schedule(&adapter->napi);
 }
 ```
 
-这段代码见[驱动中的 NAPI 调度点](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1800)。屏蔽设备中断使接下来的接收工作可以成批轮询，直到网络层允许驱动重新启用通知。
+`__napi_schedule()` 关本地中断，对当前 CPU 的 `softnet_data` 调用 `____napi_schedule()`（[dev.c#L6640-L6646](../../linux/net/core/dev.c#L6640-L6646)）。后者在 `NAPI_STATE_THREADED` 且 `napi->thread` 非空时，默认唤醒该线程并返回。例外是 `use_backlog_threads()` 为真，并且这个线程就是本 CPU 的 `backlog_napi`：静态键默认关闭，由启动参数 `thread_backlog_napi` 打开（[dev.c#L208-L219](../../linux/net/core/dev.c#L208-L219)、[dev.c#L4899-L4913](../../linux/net/core/dev.c#L4899-L4913)）。其余情况，包括线程指针为空和这个例外，把 `napi` 接到 `poll_list` 尾部，记下 `list_owner`，并且仅当 `sd->in_net_rx_action` 为假时 `raise_softirq_irqoff(NET_RX_SOFTIRQ)`（[dev.c#L4917-L4925](../../linux/net/core/dev.c#L4917-L4925)）。硬中断里调用时 `in_interrupt()` 为真，`raise_softirq_irqoff()` 不唤醒 `ksoftirqd`。本次硬中断退出若 bottom half 没有被关掉，并且上面确实置了位，就会就地进入 `net_rx_action()`。
 
-[`napi_schedule_prep()`](../../linux/net/core/dev.c#L6659)通过比较交换修改 NAPI 状态：
+`net_rx_action()` 把本 CPU `poll_list` 上的 `napi_struct` 摘下来逐个 `napi_poll()`。默认预算 `netdev_budget` 为 300，时间上限 `netdev_budget_usecs` 为 `2 * USEC_PER_SEC / HZ`（[hotdata.c#L14-L16](../../linux/net/core/hotdata.c#L14-L16)）。`HZ` 为 1000 时后者是 2000 微秒，换成 jiffy 后与旁边“至少 2 个 jiffy”的注释一致；两者都可以通过 sysctl 修改。预算用尽或时间到达时，函数在关中断之后把还没做完的节点接回 `poll_list`，并 `__raise_softirq_irqoff(NET_RX_SOFTIRQ)`（[dev.c#L7800-L7859](../../linux/net/core/dev.c#L7800-L7859)）。因为此时已经在 `handle_softirqs()` 里，这个新位不会递归进入 `net_rx_action()`，而是等本轮快照结束之后的重启判断。
 
-- 若已设置 `NAPI_STATE_DISABLE`，拒绝新的调度。
-- 若尚未设置 `NAPI_STATE_SCHED`，设置它并返回真，调用者取得入队资格。
-- 若已经设置 `SCHED`，设置 `NAPI_STATE_MISSED` 并返回假，避免重复插入同一个链表节点，同时保留再次检查的需求。
+`e1000e_poll()` 在发送清理没做完或接收工作量达到预算时返回预算值，让上面的循环认为这一轮还没结束（[netdev.c#L2658-L2675](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L2658-L2675)）。描述符怎样回收、中断怎样在 `napi_complete_done()` 之后恢复，见[概述一章](overview.md)。
 
-这里的去重是 **NAPI 实例级别**的状态协议。softirq 位图的去重则是 **CPU 上工作类别级别**的协议。两者不能互相替代。
+这里可以看到三层限制叠在一起：驱动的 `poll` 按调用者给的预算返回；`net_rx_action()` 按网络预算和时间再决定是否重新置位；`handle_softirqs()` 按 2 个 jiffy、10 轮和 `need_resched()` 决定是马上再跑一轮，还是把位置留给 `ksoftirqd`。`/proc/softirqs` 里 `NET_RX` 的增量对应 `net_rx_action()` 被调用的次数，不对应数据包个数。
 
-### 8.3 把 NAPI 实例挂到当前 CPU
+### 4.9 CPU 下线时 pending 还在
 
-[`__napi_schedule()`](../../linux/net/core/dev.c#L6640)在保存、关闭本地 IRQ 后调用 `____napi_schedule()`。普通 softirq 模式下，后者将 NAPI 节点[加入当前 CPU 的 `poll_list`](../../linux/net/core/dev.c#L4917)，再根据 `sd->in_net_rx_action` 决定是否 raise `NET_RX_SOFTIRQ`。
+`ksoftirqd` 随 CPU 下线被停住之后，`wakeup_softirqd()` 再也叫不醒它。各子系统用 CPU hotplug 状态把自己的每 CPU 队列迁走。softirq 核心注册的是 `CPUHP_SOFTIRQ_DEAD` 上的 `takeover_tasklets()`（[softirq.c#L1071-L1097](../../linux/kernel/softirq.c#L1071-L1097)、[cpuhotplug.h#L75](../../linux/include/linux/cpuhotplug.h#L75)）。
 
-若当前 CPU 已在运行 `net_rx_action()`，新实例可以先入队，由正在运行的网络回调重新检查队列；否则需要设置 pending，通知外层 softirq 执行器。这也说明：**一个工作入队动作不一定对应一次 `softirq_raise` trace 事件。**
+这个回调先 `workqueue_softirq_dead(cpu)`，在当前 CPU 上为死亡 CPU 的 BH 池排队排空工作，并 `wait_for_completion()` 等它做完。同步等待是为了避免一个 CPU 的排空工作排到另一个正在下线的 CPU 上（[workqueue.c#L3737-L3765](../../linux/kernel/workqueue.c#L3737-L3765)）。排空函数把池标成 `POOL_BH_DRAINING`。注释写明死亡 CPU 的池不能再被 kick，工作改在当前 CPU 的 BH 里执行（[workqueue.c#L3704-L3715](../../linux/kernel/workqueue.c#L3704-L3715)）。`kick_bh_pool()` 看到这个标志后，不再向死亡 CPU 投递 `irq_work`，而是在当前 CPU 上置 softirq（[workqueue.c#L1235-L1248](../../linux/kernel/workqueue.c#L1235-L1248)）。若一次 `bh_worker()` 因为自己的轮数或时间限制没做完，就 `queue_work()` 再排一次，避免占住当前 CPU 的 BH（[workqueue.c#L3722-L3731](../../linux/kernel/workqueue.c#L3722-L3731)）。
 
-### 8.4 `net_rx_action()` 管理一轮网络处理
+随后在关中断的窗口里，若死亡 CPU 的 tasklet 链表非空，就把整条链表接到当前 CPU 的链表尾。无论链表是否为空，函数都会 `raise_softirq_irqoff(TASKLET_SOFTIRQ)` 和 `raise_softirq_irqoff(HI_SOFTIRQ)`。死亡 CPU 上不再有并发访问，所以这里不加那两条链表自己的锁。当前 CPU 接下来的 softirq 会跑到本 CPU 的 BH 池，以及刚接过来的 tasklet。
 
-[`net_rx_action()`](../../linux/net/core/dev.c#L7800)先读取网络预算，建立两个局部链表：
+其他向量不由这个函数迁移。头文件列出下线后可以留给原 CPU、不必再由 `ksoftirqd` 处理的掩码（[interrupt.h#L563-L575](../../linux/include/linux/interrupt.h#L563-L575)）：
 
-- `list`：本轮准备处理的 NAPI 实例。
-- `repoll`：本轮已经轮询过，但仍需要继续处理的实例。
+| 位 | 注释给出的迁移点 |
+| --- | --- |
+| `TIMER_SOFTIRQ`、`HRTIMER_SOFTIRQ` | `(hr)timers_dead_cpu()` |
+| `IRQ_POLL_SOFTIRQ` | `irq_poll_cpu_dead()` |
+| `RCU_SOFTIRQ` | `rcutree_migrate_callbacks()` 迁队列，`rcutree_report_cpu_dead()` 报告最后的静止状态 |
 
-它短暂关闭 IRQ，将 `sd->poll_list` 移到局部 `list`，随后重新打开 IRQ逐个轮询。这样，处理期间新到来的中断仍可以把新 NAPI 实例挂入 `sd->poll_list`。
+上表照抄头文件注释。周期定时器的迁移函数确实是 `timers_dead_cpu()`（[timer.c#L2515](../../linux/kernel/time/timer.c#L2515)、[cpu.c#L2105-L2108](../../linux/kernel/cpu.c#L2105-L2108)）。没有名为 `hrtimers_dead_cpu` 的函数；高精度定时器的下线回调是 `hrtimers_cpu_dying()`（[hrtimer.c#L2299](../../linux/kernel/time/hrtimer.c#L2299)、[cpu.c#L2170-L2173](../../linux/kernel/cpu.c#L2170-L2173)）。
 
-每次 [`napi_poll()`](../../linux/net/core/dev.c#L7702)先把实例从待处理链表摘下，再通过 [`__napi_poll()`](../../linux/net/core/dev.c#L7635)调用 `n->poll(n, n->weight)`。若普通分支需要继续轮询，就将该实例放入 `repoll`，避免一个繁忙实例在本轮立即反复占用入口。
+`irq_poll_cpu_dead()` 的实现可以把这条模式看清楚：它关闭 bottom half 和中断，把死亡 CPU 的 `blk_cpu_iopoll` 接到当前 CPU，置 `IRQ_POLL_SOFTIRQ`，再 `local_bh_enable()`。enable 时 pending 已经置上，于是当前 CPU 就地执行，避免这个 CPU 带着 pending 进入空闲（[irq_poll.c#L190-L202](../../linux/lib/irq_poll.c#L190-L202)）。
 
-一轮结束时，网络层按[收尾代码](../../linux/net/core/dev.c#L7853)整理三部分工作：尚未轮询的 `list`、处理期间新到达的 `sd->poll_list`、需要再次轮询的 `repoll`。整理后仍有工作，就再次设置 `NET_RX_SOFTIRQ` pending，把“继续处理”的决定交回外层 softirq 循环。
+nohz 在准备停下空闲 tick 时调用 `report_idle_softirq()`。CPU 已经不是 active 时，它先从 pending 里去掉 `SOFTIRQ_HOTPLUG_SAFE_MASK`；若还剩别的位，就打印警告（[tick-sched.c#L1131-L1164](../../linux/kernel/time/tick-sched.c#L1131-L1164)）。注释说明这种情况出现在 `ksoftirqd` 已经停住、软中断却仍被置位的下线窗口。掩码里的向量由各自的迁移回调负责，不在这里当成错误。
 
-### 8.5 网络层怎样避免漏掉执行期间的新入队
+块层另外注册了 `CPUHP_BLOCK_SOFTIRQ_DEAD`（[blk-mq.c#L5263-L5265](../../linux/block/blk-mq.c#L5263-L5265)），网络设备注册了 `CPUHP_NET_DEV_DEAD`（[dev.c#L13234-L13235](../../linux/net/core/dev.c#L13234-L13235)）。它们不在上面的“可忽略”掩码里。本章不展开每个队列怎样接到存活 CPU，只确定一件事：softirq 核心的下线回调只接管 tasklet 链表和 BH workqueue 的排空，不会自动把 `NET_RX` 或 `BLOCK` 的每 CPU 队列搬走。
 
-考虑 `net_rx_action()` 正准备返回，但新中断刚把 NAPI 实例加入 `sd->poll_list` 的情况。因为 `in_net_rx_action` 为真时入队路径可以不 raise，消费者必须承担最后一次队列检查。
+### 4.10 `/proc/softirqs` 数的是 action 被调用的次数
 
-源码在[局部队列都为空的分支](../../linux/net/core/dev.c#L7822)中：
+`show_softirqs()` 按向量名打印每个 possible CPU 的 `kstat_softirqs_cpu()`（[softirqs.c#L11-L26](../../linux/fs/proc/softirqs.c#L11-L26)）。计数在 `handle_softirqs()` 调用 `action` 之前增加。因此：
 
-1. 将 `sd->in_net_rx_action` 设为假。
-2. 使用 `barrier()`约束编译器重排。
-3. 再检查 `sd->poll_list`；若非空，回到 `start` 继续处理。
+- 同一轮里一个向量最多贡献 1。重启循环再进入它时再加 1。
+- 计数不包含 pending 位图里“已置位但还没跑”的状态，也不包含该 `action` 内部处理的对象个数。
+- `ksoftirqd` 和硬中断退出调用的是同一个 `handle_softirqs()`，`/proc/softirqs` 不区分这两种执行点。
 
-这样，新工作若在标志清除前入队，会被后面的队列检查发现；若在标志清除后入队，调度方就会负责 raise。这里的 `barrier()` 不能当作任意跨 CPU 发布数据所需的内存屏障：这段协议围绕当前 CPU 的 poll 链表和本地中断交错展开。
+## 5. 回顾
 
-### 8.6 `e1000e_poll()` 做实际收发处理
+softirq 核心保存两样东西：全局的 `softirq_vec[]` 给出每一类的函数，每 CPU 的 `__softirq_pending` 记录这一类在这个 CPU 上是否需要执行。函数没有参数。待处理对象生活在子系统自己的每 CPU 队列里，pending 的一次置位可以覆盖队列上的许多对象。
 
-在本文的 MSI 分支，[`e1000e_poll()`](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L2668)先尝试回收发送完成项，再调用 `adapter->clean_rx()` 处理接收。`clean_rx` 会根据[接收模式](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L3190)选择不同实现；以普通接收实现为例：
+执行点有固定的几处。硬中断退出在减去 `HARDIRQ_OFFSET` 之后，若已经不处于 `in_interrupt()` 并且 pending 非 0，默认就地调用 `handle_softirqs()`。最外层 `local_bh_enable()` 在软中断位段回到 0 时，经 `do_softirq()` 切到 irq stack 再调用它。普通任务上下文的 raise 只唤醒 `ksoftirqd`。这三处最终都进入同一步循环：关着中断拿走位图快照，开中断按低位到高位调用 `action`，再关中断看有没有新位。
 
-```text
-从 next_to_clean 取得描述符
-    ↓
-DD 位表示设备已经完成该描述符
-    ↓
-检查本次预算，增加 work_done
-    ↓
-dma_rmb() 后读取描述符和缓冲区信息
-    ↓
-整理 skb、交给后续接收流程、补充接收缓冲区
-    ↓
-推进 next_to_clean，直到没有完成项或预算耗尽
-```
+同一个 CPU 上，`SOFTIRQ_OFFSET` 使 `in_interrupt()` 在执行期间保持为真，硬中断退出不会再嵌套一层 softirq。不同 CPU 可以同时执行同一个 `action`。`local_bh_disable()` 加上的是 `SOFTIRQ_DISABLE_OFFSET`，只挡住本 CPU 启动 softirq，同时因为 `preempt_count` 非 0 而不能睡眠。它挡不住其他 CPU。`spin_lock_bh()` 才把这层本地推迟和跨 CPU 的自旋锁放在一起。
 
-预算与 DMA 读顺序见[描述符循环开始处](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L929)，交付数据与补充缓冲区见[循环后半段](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L1025)。补充缓冲区使用 `GFP_ATOMIC`，也反映了此处的非睡眠执行约束。
+一轮处理最多约 2 ms 的 jiffy 窗口、10 次进入，并且会在 `need_resched()` 置位后停止。这些条件都在两轮之间检查，不会从某个 `action()` 中间返回。停下来时剩余的位置着，`ksoftirqd` 被唤醒。默认 voluntary 模型下，从内核态被打断不会在中断出口立刻换任务；从用户态返回则会在需要重新调度时进入 `schedule()`。
 
-这里的 `work_done` 按该循环处理的描述符增加，其中可能包括随后被丢弃的接收项。分析预算时，应看驱动实际计数位置，不能把返回值机械等同于“成功送到应用的数据包数”。
+`HI_SOFTIRQ` 和 `TASKLET_SOFTIRQ` 上除了 tasklet 链表，还挂着 BH workqueue。同一个 tasklet 用 `TASKLET_STATE_RUN` 保证不同时在两个 CPU 上执行。e1000e 的接收路径则是这套机制的一个使用者：硬中断把 `napi_struct` 放进当前 CPU 的 `poll_list` 并置 `NET_RX_SOFTIRQ`，`net_rx_action()` 再按自己的预算决定要不要再次置位。
 
-### 8.7 处理未完成与完成，走不同的返回协议
+可以用下面几个问题检查这条主线：
 
-[`e1000e_poll()` 的返回逻辑](../../linux/drivers/net/ethernet/intel/e1000e/netdev.c#L2674)可以归纳为：
-
-| 驱动看到的情况 | 返回和状态处理 | 后续效果 |
-| --- | --- | --- |
-| 发送回收未完成，或接收 `work_done == budget` | 返回 `budget`，保留 NAPI 调度状态 | 普通网络轮询路径安排 repoll |
-| 工作少于预算，尝试完成 NAPI | 调用 `napi_complete_done()` | 由 NAPI 状态决定是否真正完成 |
-| `napi_complete_done()` 返回真，设备未 DOWN | MSI 路径调用 `e1000_irq_enable()` | 恢复设备通知，等待下一次中断 |
-| `napi_complete_done()` 返回假 | 不重新启用设备中断 | 继续遵守网络层的轮询或延迟通知安排 |
-
-返回恰好等于预算，表达的是“需要网络核心继续安排处理”的协议。e1000e 可能因发送回收未完成而返回这个值，所以它甚至不一定等于本次真实接收工作量。
-
-[`napi_complete_done()`](../../linux/net/core/dev.c#L6743)在完成时检查 `MISSED`：若处理期间有人尝试再次调度，就保留 `SCHED`、重新入队并返回假；没有这类需求时才释放调度状态。busy polling、GRO 相关超时和延迟硬中断配置还会影响返回结果，见[函数前半段](../../linux/net/core/dev.c#L6701)。驱动必须依据返回值决定能否重新启用中断。
-
-至此，普通接收路径形成一个完整循环：**中断安排轮询，轮询在预算内消费数据，未完成就继续安排，完成后恢复设备中断。** softirq 提供执行机会，NAPI 和驱动共同管理具体对象的状态。
-
-## 9. 三层预算：分别限制不同范围的工作
-
-外层 softirq、网络回调、单个 NAPI 实例各有自己的处理限制：
-
-| 层次 | 预算或停止条件 | 检查位置 | 剩余工作如何继续 |
-| --- | --- | --- | --- |
-| softirq 核心 | `msecs_to_jiffies(2)`、最多 10 轮、`need_resched()` | 一轮类别快照处理完之后 | 保留 pending，唤醒 `ksoftirqd` |
-| `net_rx_action()` | `netdev_budget`、`netdev_budget_usecs` | 每次 `napi_poll()` 返回之后 | 整理队列，重新 raise `NET_RX_SOFTIRQ` |
-| 单次 NAPI poll | `napi->weight` 作为传入预算 | 驱动自己的处理循环 | 返回预算值，请求再次轮询 |
-
-三处实现分别见[核心重新开始条件](../../linux/kernel/softirq.c#L639)、[网络预算检查](../../linux/net/core/dev.c#L7838)和 [NAPI 回调调用](../../linux/net/core/dev.c#L7639)。
-
-本版本网络层的[初始值](../../linux/net/core/hotdata.c#L14)是：
-
-```c
-.netdev_budget = 300,
-.netdev_budget_usecs = 2 * USEC_PER_SEC / HZ,
-```
-
-因此不能把 `netdev_budget_usecs` 一律写成 2000 微秒；它的初始值依赖 `HZ`。它与 `netdev_budget` 还通过[网络 sysctl 表](../../linux/net/core/sysctl_net_core.c#L554)暴露配置项，源码初始值不等于目标机器上的当前值。
-
-### 9.1 总预算为何可能被超过
-
-`net_rx_action()` 在 `napi_poll()` 返回后才减去工作量，而 `__napi_poll()` 传给驱动的是该实例的 `weight`。它不会把网络层剩余预算与 `weight` 取最小值后再调用驱动。
-
-例如，假设网络预算只剩 10，而下一个 NAPI 的 weight 为 64，它仍可能处理并返回 64，然后网络层的剩余预算变为负数并结束本轮。因此，300 是轮询之间的停止阈值，不能解释为这一轮绝不超过 300 个计数单位。这一行为可由[减预算的位置](../../linux/net/core/dev.c#L7839)和[回调参数](../../linux/net/core/dev.c#L7649)直接推导。
-
-### 9.2 网络用完预算，不一定立即切到线程
-
-网络回调用完预算，首先回到 `handle_softirqs()`。如果核心本轮快照中还有其他类别，会继续执行它们；只有随后重新检查 pending，才决定立即再来一轮，还是唤醒 `ksoftirqd`。
-
-因此，同一次硬中断退出可能执行多轮 `NET_RX_SOFTIRQ`；反过来，一次 `NET_RX_SOFTIRQ` 也可能轮询多个 NAPI 实例。硬中断次数、softirq 次数、NAPI poll 次数和包数之间都没有固定的一一对应关系。
-
-### 9.3 调大预算的收益与代价来自哪里
-
-从上述执行位置可以推导：增加某层预算，可能让每次进入该层时完成更多工作，也可能延长后续类别或其他任务等待的时间。若单个回调自身运行很久，外层 2 毫秒条件无法提前终止它。
-
-因此，分析性能问题时应先确认耗时集中在哪一层、队列是否积压、是否真的频繁触及预算，再决定调整。仅凭 `ksoftirqd` 占用较高，无法判断应该增加哪一个预算。
+1. 同一 CPU 上把 `NET_RX_SOFTIRQ` 连续置位两次，为什么 `softirq_vec[NET_RX_SOFTIRQ]` 仍然只会被当前这轮调用一次？
+2. 硬中断里调用 `raise_softirq_irqoff()` 为什么不唤醒 `ksoftirqd`，进程上下文调用 `raise_softirq()` 为什么不直接跑回调？
+3. `local_bh_disable()` 之后 `in_task()` 仍可能为真。为什么这里仍然不能睡眠？
+4. `handle_softirqs()` 的 2 个 jiffy 为什么挡不住一个一直不返回的 `action()`？
+5. 关闭 `threadirqs` 时，`ksoftirqd` 里的 `net_rx_action` 为什么和硬中断退出里调用的是同一个函数，却仍然不能睡眠？
+6. CPU 下线时 `takeover_tasklets()` 迁走了哪些队列？`NET_RX_SOFTIRQ` 的 `poll_list` 为什么不在其中？

@@ -21,10 +21,10 @@
 | --- | --- | --- |
 | `CONFIG_X86_64=y`、`CONFIG_SMP=y` | 既要考虑跨 CPU 并行，也要考虑本 CPU 上的交错 | [.config#L333](../../linux/.config#L333)、[.config#L362](../../linux/.config#L362) |
 | `CONFIG_PREEMPT_RT` 未设置 | `spinlock_t` 就是对 `raw_spinlock_t` 的包装，mutex 走非 RT 实现 | [.config#L139](../../linux/.config#L139)、[spinlock_types.h#L14](../../linux/include/linux/spinlock_types.h#L14)、[mutex_types.h#L11](../../linux/include/linux/mutex_types.h#L11) |
-| `CONFIG_PREEMPT_VOLUNTARY=y`、`CONFIG_PREEMPT_DYNAMIC=y`（因此 `CONFIG_PREEMPTION=y`、`CONFIG_PREEMPT_COUNT=y`） | 抢占计数总是维护；抢占模型在启动时选择，缺省为自愿抢占（见 3.4 节） | [.config#L136-L142](../../linux/.config#L136-L142)、[Kconfig.preempt#L126](../../linux/kernel/Kconfig.preempt#L126) |
+| `CONFIG_PREEMPT_VOLUNTARY=y`、`CONFIG_PREEMPT_DYNAMIC=y`；后者选择 `PREEMPT_BUILD`，因而 `CONFIG_PREEMPTION=y`、`CONFIG_PREEMPT_COUNT=y` | 抢占计数总是维护；抢占模型在启动时选择，缺省为自愿抢占（见 3.4 节） | [.config#L136-L142](../../linux/.config#L136-L142)、[Kconfig.preempt#L9-L11](../../linux/kernel/Kconfig.preempt#L9-L11)、[Kconfig.preempt#L122-L130](../../linux/kernel/Kconfig.preempt#L122-L130) |
 | `CONFIG_PREEMPT_RCU=y` | 普通 RCU 读侧临界区可以被抢占，但不能主动阻塞 | [.config#L168](../../linux/.config#L168) |
 | `CONFIG_QUEUED_SPINLOCKS=y`、`CONFIG_QUEUED_RWLOCKS=y`、`CONFIG_NR_CPUS=512` | 自旋锁底层是 qspinlock，32 位锁字采用 `NR_CPUS < 16K` 的布局 | [.config#L1123](../../linux/.config#L1123)、[.config#L1125](../../linux/.config#L1125)、[.config#L431](../../linux/.config#L431) |
-| `CONFIG_PARAVIRT_SPINLOCKS=y`、`CONFIG_PARAVIRT_XXL=y` | 自旋锁慢路径、解锁和本地中断开关都经过半虚拟化分派，原生指令只是其中一种运行结果 | [.config#L378](../../linux/.config#L378)、[.config#L380](../../linux/.config#L380) |
+| `CONFIG_PARAVIRT_XXL=y`、`CONFIG_PARAVIRT_SPINLOCKS=y` | 自旋锁慢路径、解锁和本地中断开关都经过半虚拟化分派，原生指令只是其中一种运行结果 | [.config#L378](../../linux/.config#L378)、[.config#L380](../../linux/.config#L380) |
 | `CONFIG_MUTEX_SPIN_ON_OWNER=y` | mutex 在睡眠前可能先乐观自旋 | [.config#L1119](../../linux/.config#L1119) |
 | `CONFIG_DEBUG_SPINLOCK`、`CONFIG_DEBUG_MUTEXES`、`CONFIG_DEBUG_LOCK_ALLOC`、`CONFIG_LOCK_STAT` 未设置 | 锁结构中没有调试字段，加锁路径没有统计分支 | [.config#L10660-L10666](../../linux/.config#L10660-L10666) |
 
@@ -57,7 +57,7 @@ new->prev = prev;
 WRITE_ONCE(prev->next, new);
 ```
 
-来源：[__list_add()，include/linux/list.h 第 161～167 行](../../linux/include/linux/list.h#L161)。（当前配置启用了 [CONFIG_LIST_HARDENED](../../linux/.config#L10064)和 [CONFIG_BUG_ON_DATA_CORRUPTION](../../linux/.config#L10065)，检查失败时 [CHECK_DATA_CORRUPTION()](../../linux/include/linux/bug.h#L95)直接 `BUG()`，上面的 `return` 实际不会执行。）
+来源：[__list_add()，include/linux/list.h 第 161～167 行](../../linux/include/linux/list.h#L161-L167)。当前配置同时启用了 [CONFIG_LIST_HARDENED](../../linux/.config#L10064)、[CONFIG_DEBUG_LIST](../../linux/.config#L10683)和 [CONFIG_BUG_ON_DATA_CORRUPTION](../../linux/.config#L10065)。有 `CONFIG_DEBUG_LIST` 时，[__list_add_valid()](../../linux/include/linux/list.h#L79)里的内联快检查不会编译进去，每次都调用 [__list_add_valid_or_report()](../../linux/lib/list_debug.c#L22)。检查失败时 [CHECK_DATA_CORRUPTION()](../../linux/include/linux/bug.h#L95)直接 `BUG()`；x86 的 [BUG()](../../linux/arch/x86/include/asm/bug.h#L84-L88)带 `__builtin_unreachable()`，所以上面的 `return` 不会执行。
 
 四次赋值之间存在“前驱已改、后继未改”的中间状态。即使把其中某个字段改成原子变量，也无法让四次赋值整体不可分割。这里需要保护的是**结构不变量**：插入、删除以及依赖这些指针的遍历必须遵守同一把锁。
 
@@ -92,7 +92,7 @@ WRITE_ONCE(prev->next, new);
 等待者：                                                  进入睡眠，再也没人来唤醒
 ```
 
-条件和数据都没有错，丢的是那一次唤醒，称为**丢失唤醒**（lost wakeup）。[set_current_state() 的注释](../../linux/include/linux/sched.h#L201-L225)给出了内核的标准写法：等待者**先**设置任务状态再检查条件，`set_current_state()` 带屏障，保证状态写入排在条件检查之前；唤醒端[在 try_to_wake_up() 中](../../linux/kernel/sched/core.c#L4191-L4199)先执行全屏障再检查任务状态，与之配对。这样，要么等待者看到新条件而不睡，要么唤醒者看到等待者已经改了状态，把它改回运行态。[___wait_event()](../../linux/include/linux/wait.h#L309-L313)同样先调用 `prepare_to_wait_event()` 入队并设置状态，再检查条件；mutex 的等待循环也是[先 set_current_state() 再尝试取锁](../../linux/kernel/locking/mutex.c#L686-L693)，注释写明这是为了与解锁端排序。
+条件和数据都没有错，丢的是那一次唤醒，称为**丢失唤醒**（lost wakeup）。[set_current_state() 的注释](../../linux/include/linux/sched.h#L201-L225)给出了内核的标准写法：等待者**先**设置任务状态再检查条件。`set_current_state()` 用 [smp_store_mb()](../../linux/include/linux/sched.h#L249)写状态，x86 上是 [xchg](../../linux/arch/x86/include/asm/barrier.h#L57)，状态写入因此排在随后的条件检查之前。同一段注释要求唤醒端在读 `p->__state` 之前有全屏障。实现上，[try_to_wake_up()](../../linux/kernel/sched/core.c#L4191-L4199)先取得 `pi_lock`，再调用 `smp_mb__after_spinlock()`，然后才检查状态。x86 没有单独定义这个宏，它落到 [kcsan_mb()](../../linux/include/linux/spinlock.h#L175-L176)；当前[未设置 CONFIG_KCSAN](../../linux/.config#L10554)，宏展开为空操作（[kcsan-checks.h 第 264 行](../../linux/include/linux/kcsan-checks.h#L264)）。[spinlock.h 第 168～171 行](../../linux/include/linux/spinlock.h#L168-L171)说明，TSO 架构上每条原子指令都隐含 `smp_mb()`，这里不再另加屏障。取得 `pi_lock` 时的原子操作因此提供这次全序。这样，要么等待者看到新条件而不睡，要么唤醒者看到等待者已经改了状态，把它改回运行态。[___wait_event()](../../linux/include/linux/wait.h#L309-L313)同样先调用 `prepare_to_wait_event()` 入队并设置状态，再检查条件；mutex 的等待循环也是[先 set_current_state() 再尝试取锁](../../linux/kernel/locking/mutex.c#L686-L693)，注释写明这是为了与解锁端排序。
 
 六个场景对应六个不同目标：
 
@@ -163,7 +163,7 @@ softirq 不会在本 CPU 上嵌套，依据是计数检查：[handle_softirqs()]
 
 **活锁。** 第 3.1 节的 CAS 循环“不保证有限次内一定成功”；seqcount 读者在写者持续更新时也会一直重试。重试协议用“可能多做几次”换来“读者或竞争者不阻塞”，前提是冲突不会一直持续。如果冲突本身会持续，就需要排队或者阻塞等待。
 
-**饥饿与公平。** 一把锁可以没有死锁、整体也在前进，但对某个等待者不公平。qspinlock 的排队部分基于 MCS 锁，[mcs_spinlock.h](../../linux/kernel/locking/mcs_spinlock.h#L7-L11)把 MCS 的性质概括为公平，并且每个 CPU 只在自己的本地变量上自旋。mutex 的情况有所不同：新来者可以在快路径或乐观自旋中直接拿到锁，而已经睡下的等待者被唤醒后还要重新竞争。为此，`owner` 的 bit 1 [MUTEX_FLAG_HANDOFF](../../linux/kernel/locking/mutex.h#L28-L29)要求解锁者把锁交给队首等待者。队首等待者醒来后以 `first` 为真调用 [__mutex_trylock_or_handoff()](../../linux/kernel/locking/mutex.c#L692)，取锁失败时[设置这个标志](../../linux/kernel/locking/mutex.c#L100-L104)。解锁者发现该标志后，不走 CAS 释放，而是[直接交接](../../linux/kernel/locking/mutex.c#L936-L937)给[队首等待者](../../linux/kernel/locking/mutex.c#L962-L963)。源码注释只说明了这个标志的作用，没有写设计动机；把它的目的理解为“限制新来者反复插队”，是本章的推断。
+**饥饿与公平。** 一把锁可以没有死锁、整体也在前进，但对某个等待者不公平。qspinlock 的排队部分基于 MCS 锁，[mcs_spinlock.h](../../linux/kernel/locking/mcs_spinlock.h#L7-L11)把 MCS 的性质概括为公平，并且每个 CPU 只在自己的本地变量上自旋。mutex 的情况有所不同：新来者可以在快路径或乐观自旋中直接拿到锁，而已经睡下的等待者被唤醒后还要重新竞争。为此，`owner` 的 bit 1 [MUTEX_FLAG_HANDOFF](../../linux/kernel/locking/mutex.h#L29-L33)要求解锁者把锁交给队首等待者。队首等待者醒来后以 `first` 为真调用 [__mutex_trylock_or_handoff()](../../linux/kernel/locking/mutex.c#L692)。锁仍由别人持有、且尚未处于交接时，[第 104 行](../../linux/kernel/locking/mutex.c#L104)置上 `MUTEX_FLAG_HANDOFF`。若 `owner` 上已有 `MUTEX_FLAG_PICKUP` 且任务就是当前任务，则走[第 100 行](../../linux/kernel/locking/mutex.c#L100)，清掉 `PICKUP` 并继续尝试取锁。解锁慢路径看到 `HANDOFF` 后，[跳出](../../linux/kernel/locking/mutex.c#L936-L937)把持有者清成“只留标志位”的 CAS 循环。等待链表非空时，队首来自 [list_first_entry()](../../linux/kernel/locking/mutex.c#L951-L955)，[__mutex_handoff()](../../linux/kernel/locking/mutex.c#L219-L235)再用 `atomic_long_try_cmpxchg_release()` 把 `owner` 写成该任务并置上 `MUTEX_FLAG_PICKUP`，调用点在[第 962～963 行](../../linux/kernel/locking/mutex.c#L962-L963)。源码注释只说明了这个标志的作用，没有写设计动机；把它的目的理解为“限制新来者反复插队”，是本章的推断。
 
 **优先级反转。** 本地 [rt-mutex 设计文档](../../linux/Documentation/locking/rt-mutex-design.rst#L34-L43)给出了典型场景：高优先级任务 A 等待低优先级任务 C 持有的锁，中优先级任务 B 抢占了 C，于是 A 被间接阻塞，而且等待时间没有上限。文档讨论的解法是[优先级继承](../../linux/Documentation/locking/rt-mutex-design.rst#L64-L71)（priority inheritance，PI）：C 在持锁期间临时继承 A 的优先级。当前配置 [CONFIG_RT_MUTEXES=y](../../linux/.config#L1015)，非 RT 内核中 rt_mutex 的用户之一是 PI futex（[CONFIG_FUTEX_PI=y](../../linux/.config#L279)），其状态中嵌有 [rt_mutex_base](../../linux/kernel/futex/futex.h#L162)。第 4.2 节的普通 mutex 按 FIFO 挂入等待者，不做优先级继承。
 
@@ -226,7 +226,7 @@ flowchart BT
 | `struct rw_semaphore` | 可睡眠的多读者或单写者 | 可睡眠的进程上下文 | [down_read()](../../linux/kernel/locking/rwsem.c#L1534)、[down_write()](../../linux/kernel/locking/rwsem.c#L1587) |
 | `struct semaphore` | 许可耗尽时睡眠，没有 owner | `down()` 需可睡眠；`up()`、`down_trylock()` 可在中断上下文调用 | [semaphore.h#L40](../../linux/include/linux/semaphore.h#L40)、[down()](../../linux/kernel/locking/semaphore.c#L80) |
 | `seqcount_t` / `seqlock_t` | 读者不阻塞，冲突时重试 | 写者必须串行；读者不能跟随可能失效的指针 | [write_seqlock()](../../linux/include/linux/seqlock.h#L861) |
-| RCU | 读者几乎无开销；回收者等待宽限期 | 不提供写者之间的互斥；读侧不能主动阻塞 | [rcu_read_lock()](../../linux/include/linux/rcupdate.h#L856)、[synchronize_rcu()](../../linux/kernel/rcu/tree.c#L3341) |
+| RCU | 读者几乎无开销；回收者等待宽限期 | 不提供写者之间的互斥；读侧可以被抢占，但不能主动阻塞（[rcupdate.h 第 856～858 行](../../linux/include/linux/rcupdate.h#L856-L858)） | [rcu_read_lock()](../../linux/include/linux/rcupdate.h#L863)、[synchronize_rcu()](../../linux/kernel/rcu/tree.c#L3341) |
 | `refcount_t` | 原子计数，不等待 | 递增前调用者必须已保证内存有效 | [refcount_inc_not_zero()](../../linux/include/linux/refcount.h#L320) |
 | completion | 未完成时睡眠 | 等待需可睡眠；`complete()` 可在中断或原子上下文调用（[completion.rst#L264](../../linux/Documentation/scheduler/completion.rst#L264)） | [complete()](../../linux/kernel/sched/completion.c#L50)、[wait_for_completion()](../../linux/kernel/sched/completion.c#L151) |
 
@@ -303,7 +303,7 @@ flowchart TB
 
 ### 3.1 原子读改写与比较交换
 
-读—改—写（read-modify-write，RMW）指读取旧值、计算新值并写回。x86 上 [arch_atomic_read()](../../linux/arch/x86/include/asm/atomic.h#L17-L24)和 [arch_atomic_set()](../../linux/arch/x86/include/asm/atomic.h#L26-L29)只是一次普通读、一次普通写；[arch_atomic_add()](../../linux/arch/x86/include/asm/atomic.h#L31-L36)和 `arch_atomic_inc()` 才用带锁前缀的指令把 RMW 合成一步。`LOCK_PREFIX` 在 SMP 构建中展开为 `lock` 前缀，并把前缀地址登记到 `.smp_locks` 段，供运行时按处理器数量改写（[alternative.h#L39](../../linux/arch/x86/include/asm/alternative.h#L39)）。
+读—改—写（read-modify-write，RMW）指读取旧值、计算新值并写回。x86 上 [arch_atomic_read()](../../linux/arch/x86/include/asm/atomic.h#L17-L24)和 [arch_atomic_set()](../../linux/arch/x86/include/asm/atomic.h#L26-L29)分别是一次 `__READ_ONCE`、一次 `__WRITE_ONCE`，没有 `lock` 前缀；[arch_atomic_add()](../../linux/arch/x86/include/asm/atomic.h#L31-L36)和 `arch_atomic_inc()` 才用带锁前缀的指令把 RMW 合成一步。`LOCK_PREFIX` 在 SMP 构建中展开为 `lock` 前缀，并把该前缀的地址放进 `.smp_locks` 段（[alternative.h 第 44～52 行](../../linux/arch/x86/include/asm/alternative.h#L44-L52)）。[第 39～41 行](../../linux/arch/x86/include/asm/alternative.h#L39-L41)说明锁前缀单独登记成一张地址表；[第 30～37 行](../../linux/arch/x86/include/asm/alternative.h#L30-L37)说明这类 SMP 替代可以在 UP 运行和 CPU 热插入之间改写。
 
 下面两段是**接口用法示意**，不是内核源码：
 
@@ -378,7 +378,7 @@ bool take_one(atomic_t *remaining)
 | release 操作 | 它**之前**的访问不会被排到它之后 | 不约束它之后的访问 |
 | acquire 操作 | 它**之后**的访问不会被排到它之前 | 不约束它之前的访问 |
 
-[barrier()](../../linux/include/linux/compiler.h#L82)是带 `memory` clobber 的空汇编。x86 上 [__smp_mb()](../../linux/arch/x86/include/asm/barrier.h#L53)使用 `lock addl $0`，而 [__smp_rmb()](../../linux/arch/x86/include/asm/barrier.h#L55)和 [__smp_wmb()](../../linux/arch/x86/include/asm/barrier.h#L56)都只是编译器屏障：x86 实现认为普通内存访问在这两种情况下不需要额外的硬件屏障指令。可见“接口强弱”要看契约，不能数汇编里有几条屏障。acquire/release 的单向保证见[内存屏障文档](../../linux/Documentation/memory-barriers.txt#L474)。
+[barrier()](../../linux/include/linux/compiler.h#L85)是带 `memory` clobber 的空汇编。x86 上 [__smp_mb()](../../linux/arch/x86/include/asm/barrier.h#L53)使用 `lock addl $0`，而 [__smp_rmb()](../../linux/arch/x86/include/asm/barrier.h#L55)和 [__smp_wmb()](../../linux/arch/x86/include/asm/barrier.h#L56)都只是编译器屏障：x86 实现认为普通内存访问在这两种情况下不需要额外的硬件屏障指令。可见“接口强弱”要看契约，不能数汇编里有几条屏障。acquire/release 的单向保证见[内存屏障文档](../../linux/Documentation/memory-barriers.txt#L474)。
 
 **原子接口的顺序契约。** 名字里有 `atomic` 不等于全屏障，规则来自 [atomic_t.txt 的 ORDERING 一节](../../linux/Documentation/atomic_t.txt#L160)：
 
@@ -409,7 +409,7 @@ sequenceDiagram
     Note over A,B: 允许出现 r0 == 0 且 r1 == 0
 ```
 
-本地内存模型用例 [SB+poonceonces.litmus](../../linux/tools/memory-model/litmus-tests/SB+poonceonces.litmus#L4)把“双零”标为 Sometimes；两侧都在写和读之间加 `smp_mb()` 后，[SB+fencembonceonces.litmus](../../linux/tools/memory-model/litmus-tests/SB+fencembonceonces.litmus#L4)把它标为 Never。只改一侧不能得到同样结论；用 release 写加 acquire 读也不够，[内存屏障文档](../../linux/Documentation/memory-barriers.txt#L501)说明 release+acquire 对不构成全屏障。
+本地内存模型用例 [SB+poonceonces.litmus](../../linux/tools/memory-model/litmus-tests/SB+poonceonces.litmus#L4)两侧都没有屏障，把“双零”标为 Sometimes；两侧都在写和读之间加 `smp_mb()` 后，[SB+fencembonceonces.litmus](../../linux/tools/memory-model/litmus-tests/SB+fencembonceonces.litmus#L4)把它标为 Never。这两份用例只覆盖“两侧都没有”和“两侧都有”，没有“只在一侧加 `smp_mb()`”的结果。release 写加 acquire 读也不构成全屏障，[内存屏障文档第 501～502 行](../../linux/Documentation/memory-barriers.txt#L501-L502)写明 RELEASE+ACQUIRE 对不保证充当全屏障。
 
 **例二：用 release/acquire 发布数据。** 这是锁交接最核心的顺序模式。下面是**一次性发布的简化代码**，假设只有一个发布者，`payload` 发布后不再修改，`ready` 不复用：
 
@@ -457,9 +457,9 @@ x86 上 [__smp_store_release()](../../linux/arch/x86/include/asm/barrier.h#L59-L
 - x86 原生的 [native_local_irq_save()](../../linux/arch/x86/include/asm/irqflags.h#L62)先保存标志再执行 `cli`。当前启用了 `CONFIG_PARAVIRT_XXL`，实际调用的 [arch_local_irq_save()](../../linux/arch/x86/include/asm/paravirt.h#L674)经过半虚拟化分派。`flags` 是这次调用前的中断状态，必须用 `restore` 恢复，不能用无条件的 `local_irq_enable()` 代替，否则会打开调用者原本关闭的中断。
 - [local_bh_disable()](../../linux/include/linux/bottom_half.h#L18-L21)增加的是 [SOFTIRQ_DISABLE_OFFSET](../../linux/include/linux/preempt.h#L55)（即 `2 * SOFTIRQ_OFFSET`），与真正执行 softirq 时的 `SOFTIRQ_OFFSET` 不同，所以 [interrupt_context_level()](../../linux/include/linux/preempt.h#L97)不会把“仅仅关了下半部”当成 softirq 上下文。[__local_bh_enable_ip()](../../linux/kernel/softirq.c#L427)在重新打开时会检查并处理积压的 softirq。
 
-**动态抢占的影响。** `CONFIG_PREEMPT_DYNAMIC` 让内核按 `CONFIG_PREEMPTION=y` 构建，但抢占模型在启动时才确定（[preempt.h#L509-L516](../../linux/include/linux/preempt.h#L509-L516)）。x86 的 [__preempt_schedule()](../../linux/arch/x86/include/asm/preempt.h#L125-L129)是一个 static call；[setup_preempt_mode()](../../linux/kernel/sched/core.c#L7776)解析 `preempt=` 启动参数，没有该参数时 [preempt_dynamic_init()](../../linux/kernel/sched/core.c#L7794-L7795)按 `CONFIG_PREEMPT_VOLUNTARY` 选择自愿模型。按[模型对照注释](../../linux/kernel/sched/core.c#L7636-L7640)和 [__sched_dynamic_update()](../../linux/kernel/sched/core.c#L7732-L7737)，自愿模型把 `preempt_schedule` 改成 NOP。
+**动态抢占的影响。** `CONFIG_PREEMPT_DYNAMIC` 让内核按 `CONFIG_PREEMPTION=y` 构建，但抢占模型在启动时才确定（[preempt.h#L509-L516](../../linux/include/linux/preempt.h#L509-L516)）。x86 的 [__preempt_schedule()](../../linux/arch/x86/include/asm/preempt.h#L125-L129)是一个 static call；[setup_preempt_mode()](../../linux/kernel/sched/core.c#L7776)解析 `preempt=` 启动参数，没有该参数时 [preempt_dynamic_init()](../../linux/kernel/sched/core.c#L7794-L7795)按 `CONFIG_PREEMPT_VOLUNTARY` 选择自愿模型。当前还有 [CONFIG_ARCH_HAS_PREEMPT_LAZY](../../linux/.config#L134)，启动参数可以是 `none`、`voluntary`、`full` 或 `lazy`（[core.c 第 7674～7686 行](../../linux/kernel/sched/core.c#L7674-L7686)）。按[模型对照注释](../../linux/kernel/sched/core.c#L7628-L7658)，`none` 和自愿模型把 `preempt_schedule` 改成 NOP（[第 7721～7737 行](../../linux/kernel/sched/core.c#L7721-L7737)）；`full` 和 `lazy` 都把它接到真正的 `preempt_schedule`；`lazy` 还会在[第 7760 行](../../linux/kernel/sched/core.c#L7760)打开 `dynamic_preempt_lazy`（[第 7743～7760 行](../../linux/kernel/sched/core.c#L7743-L7760)）。
 
-结论是：在缺省启动参数下，`preempt_enable()` 里的 `__preempt_schedule()` 调用点存在但不会进入调度；以 `preempt=full` 启动时它才是真正的抢占点。无论哪种模型，抢占计数都在维护，持有自旋锁期间都不会被抢占换出。禁止抢占也不是主动睡眠的许可，可睡眠锁的[调用上下文要求](../../linux/Documentation/locking/locktypes.rst#L26)依然有效。
+结论是：缺省启动参数下，`preempt_enable()` 里的 `__preempt_schedule()` 调用点存在，但 static call 是 NOP，不会进入调度。`preempt=full` 和 `preempt=lazy` 都会把这个调用点接到真正的抢占函数。无论哪种模型，抢占计数都在维护，持有自旋锁期间都不会被抢占换出。禁止抢占也不是主动睡眠的许可，可睡眠锁的[调用上下文要求](../../linux/Documentation/locking/locktypes.rst#L26)依然有效。
 
 ## 4. 把原语组装成锁
 
@@ -467,7 +467,7 @@ x86 上 [__smp_store_release()](../../linux/arch/x86/include/asm/barrier.h#L59-L
 
 设想一个小队列同时被任务和硬中断访问，更新不能睡眠。任务端使用 `spin_lock_irqsave()`，目标有两个：在本 CPU 上排除硬中断重入，在 CPU 之间取得独占权。
 
-**算法（简化逻辑，省略 lockdep 和跟踪钩子）：**
+**算法（简化逻辑，省略 lockdep 和跟踪钩子）。** 下面的解锁写成 [native_queued_spin_unlock()](../../linux/arch/x86/include/asm/qspinlock.h#L44-L47) 的 `smp_store_release`。当前配置的 [queued_spin_unlock()](../../linux/arch/x86/include/asm/qspinlock.h#L54-L58)先分派到 `pv_queued_spin_unlock()`，本节末尾说明为什么不把这条原生指令写成运行时必然结果。
 
 ```text
 加锁：
@@ -476,7 +476,7 @@ x86 上 [__smp_store_release()](../../linux/arch/x86/include/asm/barrier.h#L59-L
     CAS(锁字: 0 → LOCKED)，带 acquire 语义        ← 跨 CPU 竞争的快路径
     若失败：进入排队慢路径，直到取得锁才返回
 
-解锁：
+解锁（原生形态）：
     store_release(locked 字节, 0)                 ← 把临界区修改交给下一任
     按 flags 恢复本地 IRQ
     抢占计数 -1，必要时允许调度
@@ -527,7 +527,7 @@ queued_spin_lock_slowpath(lock, val);
 | 接口 | 加锁前对本 CPU 做什么 | 适用场景 |
 | --- | --- | --- |
 | `spin_lock()` | 只禁止抢占（[__raw_spin_lock()](../../linux/include/linux/spinlock_api_smp.h#L130-L135)） | 所有访问者都在进程上下文 |
-| `spin_lock_bh()` | 关下半部（[__raw_spin_lock_bh()](../../linux/include/linux/spinlock_api_smp.h#L123-L128)） | 与 softirq 共享 |
+| `spin_lock_bh()` | 关下半部并禁止抢占：[__raw_spin_lock_bh()](../../linux/include/linux/spinlock_api_smp.h#L123-L128)增加 [SOFTIRQ_LOCK_OFFSET](../../linux/include/linux/preempt.h#L177)，即 `SOFTIRQ_DISABLE_OFFSET + PREEMPT_LOCK_OFFSET` | 与 softirq 共享 |
 | `spin_lock_irqsave()` | 保存并关闭本地 IRQ，再禁止抢占 | 与硬中断共享，且不确定调用时中断是否已关 |
 | `spin_trylock()` | 禁止抢占后只尝试一次；失败则恢复抢占并返回 0（[__raw_spin_trylock()](../../linux/include/linux/spinlock_api_smp.h#L86-L95)） | 不允许等待，调用者必须处理失败 |
 
@@ -554,35 +554,35 @@ void __sched mutex_lock(struct mutex *lock)
 
 [__mutex_trylock_fast()](../../linux/kernel/locking/mutex.c#L150-L161)用 `atomic_long_try_cmpxchg_acquire()` 把 `owner` 从 0 改成 `current`。这与 qspinlock 的快路径同构：一次带 acquire 语义的 CAS。无竞争时 mutex 不会睡眠，但 `might_sleep()` 说明调用者**必须**处于可睡眠的上下文，不能因为“这次没睡”就在原子上下文里调用它。
 
-**慢路径。** [__mutex_lock_slowpath()](../../linux/kernel/locking/mutex.c#L1046-L1050)以 `TASK_UNINTERRUPTIBLE` 进入 `__mutex_lock_common()`。主要步骤与数据结构的对应关系如下：
+**慢路径。** [__mutex_lock_slowpath()](../../linux/kernel/locking/mutex.c#L1046-L1050)以 `TASK_UNINTERRUPTIBLE` 进入 `__mutex_lock_common()`。下图只画普通 mutex（`ww_ctx` 为空），省略 lockdep、跟踪和 `wake_q`。
 
 ```mermaid
 flowchart TD
-    S([进入慢路径]) --> A["preempt_disable()<br/>再试一次，或乐观自旋"]
+    S([进入慢路径]) --> A["preempt_disable()<br/>再试一次，或乐观自旋<br/>失败且 need_resched() 时先让出"]
     A -->|成功| OK1([preempt_enable，返回 0])
-    A -->|失败| B["持 wait_lock 后再试一次"]
-    B -->|成功| OK2([释放 wait_lock，返回 0])
-    B -->|失败| C["局部 waiter 挂到 wait_list 尾部<br/>设置 MUTEX_FLAG_WAITERS<br/>设置任务状态"]
-    C --> D{"trylock 成功？"}
-    D -->|是| E["摘除 waiter，恢复 RUNNING<br/>释放 wait_lock，返回 0"]
-    D -->|否| F{"有待处理信号？<br/>（仅可中断模式）"}
-    F -->|是| ERR["摘除 waiter，恢复 RUNNING<br/>释放 wait_lock，返回 -EINTR"]
-    F -->|否| G["释放 wait_lock → schedule()"]
-    G --> H["被唤醒：trylock 或接受交接<br/>队首可再做乐观自旋"]
-    H -->|成功| E
-    H -->|失败| I["重新取 wait_lock"] --> D
+    A -->|失败| B["取得 wait_lock 后再试一次"]
+    B -->|成功，尚未入队| OK2["释放 wait_lock<br/>preempt_enable，返回 0"]
+    B -->|失败| C["栈上 waiter 挂到 wait_list 尾部<br/>成为队首才设置 MUTEX_FLAG_WAITERS<br/>设置任务状态"]
+    C --> D{"持有 wait_lock 时 trylock？"}
+    D -->|成功| E["摘除 waiter，恢复 RUNNING<br/>释放 wait_lock，preempt_enable，返回 0"]
+    D -->|失败| F{"待处理信号？<br/>仅可中断等待"}
+    F -->|是| ERR["摘除 waiter，恢复 RUNNING<br/>释放 wait_lock，preempt_enable，返回 -EINTR"]
+    F -->|否| G["释放 wait_lock<br/>schedule_preempt_disabled()<br/>先把抢占计数降到可调度"]
+    G --> H["此时不持 wait_lock<br/>trylock 或接受交接<br/>队首可再乐观自旋"]
+    H -->|取到锁| I["重新取得 wait_lock"] --> E
+    H -->|未取到| J["重新取得 wait_lock"] --> D
 ```
 
 对应源码：
 
-1. [第 597～610 行](../../linux/kernel/locking/mutex.c#L597-L610)：关抢占后先 `__mutex_trylock()`，再尝试 `mutex_optimistic_spin()`。乐观自旋的依据是“持有者正在别的 CPU 上运行，很快会释放”，成功就不必入队。
-2. [第 612～621 行](../../linux/kernel/locking/mutex.c#L612-L621)：取得 `wait_lock` 后再试一次。锁可能在等 `wait_lock` 的过程中被释放。
+1. [第 597～610 行](../../linux/kernel/locking/mutex.c#L597-L610)：关抢占后先 `__mutex_trylock()`，再尝试 `mutex_optimistic_spin()`。乐观自旋的依据是“持有者正在别的 CPU 上运行，很快会释放”，成功就不必入队。若因 `need_resched()` 离开自旋，[第 492～498 行](../../linux/kernel/locking/mutex.c#L492-L498)会先 `schedule_preempt_disabled()`，再返回失败，然后才去拿 `wait_lock`。
+2. [第 612～621 行](../../linux/kernel/locking/mutex.c#L612-L621)：取得 `wait_lock` 后再试一次。锁可能在等 `wait_lock` 的过程中被释放。成功则跳到 `skip_wait`，此时 `waiter` 还没入队。
 3. [第 630～644 行](../../linux/kernel/locking/mutex.c#L630-L644)：把栈上的 `waiter` 挂到 `wait_list` 尾部（FIFO）。[__mutex_add_waiter()](../../linux/kernel/locking/mutex.c#L197-L199)在它成为第一个等待者时设置 `MUTEX_FLAG_WAITERS`，告诉解锁者“必须走唤醒路径”。随后设置任务状态。
-4. [第 646～676 行](../../linux/kernel/locking/mutex.c#L646-L676)：循环中先 trylock，再在持有 `wait_lock` 的情况下[检查信号](../../linux/kernel/locking/mutex.c#L663-L666)，然后[先释放 `wait_lock` 再调度](../../linux/kernel/locking/mutex.c#L674-L676)。持有内部自旋锁睡眠是不允许的，而且解锁者需要拿到 `wait_lock` 才能处理队列。
-5. [第 692～707 行](../../linux/kernel/locking/mutex.c#L692-L707)：醒来后用 `__mutex_trylock_or_handoff()` 取锁或接受交接；位于队首的等待者还可以再次乐观自旋。
-6. 成功出口 [第 712～740 行](../../linux/kernel/locking/mutex.c#L712-L740)和出错出口 [第 742～753 行](../../linux/kernel/locking/mutex.c#L742-L753)都会把 `waiter` 从链表[摘除](../../linux/kernel/locking/mutex.c#L726)、恢复 `TASK_RUNNING`、释放 `wait_lock` 并恢复抢占。
+4. [第 646～676 行](../../linux/kernel/locking/mutex.c#L646-L676)：循环中先在持有 `wait_lock` 时 trylock，再[检查信号](../../linux/kernel/locking/mutex.c#L663-L666)，然后[释放 `wait_lock`](../../linux/kernel/locking/mutex.c#L674)，再调用 [schedule_preempt_disabled()](../../linux/kernel/sched/core.c#L7112-L7116)。[该函数的注释](../../linux/kernel/sched/core.c#L7108-L7110)要求调用前抢占计数为 1：进入慢路径时的 `preempt_disable()` 还在，`wait_lock` 已经放下。它先把计数减到 0 再 `schedule()`，返回后重新 `preempt_disable()`。持有内部自旋锁时不能睡眠，解锁者也要拿到 `wait_lock` 才能处理队列。
+5. [第 686～707 行](../../linux/kernel/locking/mutex.c#L686-L707)：醒来后先设置任务状态，再用 `__mutex_trylock_or_handoff()` 取锁或接受交接；位于队首的等待者还可以再次乐观自旋。这两步都不持有 `wait_lock`。
+6. 睡眠之后在不持有 `wait_lock` 的情况下取到锁，会经[第 711 行](../../linux/kernel/locking/mutex.c#L711)重新取得它，再进入 `acquired`（[第 712～726 行](../../linux/kernel/locking/mutex.c#L712-L726)）[摘除 waiter](../../linux/kernel/locking/mutex.c#L726)并恢复 `TASK_RUNNING`。循环里已经持有 `wait_lock` 且 trylock 成功时，[第 655～656 行](../../linux/kernel/locking/mutex.c#L655-L656)直接 `goto acquired`，不再加一次锁。入队前那次 trylock 成功则经[第 616～620 行](../../linux/kernel/locking/mutex.c#L616-L620)跳到 `skip_wait`（[第 730 行](../../linux/kernel/locking/mutex.c#L730)），只释放 `wait_lock` 并 `preempt_enable()`，不摘节点。普通 mutex 的出错出口 `err`（[第 742～745 行](../../linux/kernel/locking/mutex.c#L742-L745)）会摘除已经入队的 `waiter`。这些出口都会释放 `wait_lock` 并恢复抢占。
 
-第 6 步维护了第 2.3 节提到的不变量：`wait_list` 中的节点总是对应一个仍在等待、栈帧仍然有效的任务。如果出错路径漏掉摘除，链表里就会留下指向已退出栈帧的节点。
+第 6 步维护了第 2.3 节提到的不变量：`wait_list` 中的节点总是对应一个仍在等待、栈帧仍然有效的任务。如果出错路径漏掉摘除，链表里就会留下指向已退出栈帧的节点。`skip_wait` 不摘节点，是因为那条路径还没有入队。
 
 **返回值。** 普通 `mutex_lock()` 以不可中断方式等待，不会因为信号而失败，所以它没有返回值。[mutex_lock_interruptible()](../../linux/kernel/locking/mutex.c#L991-L999)成功返回 0，被信号打断返回 `-EINTR`；返回 `-EINTR` 时调用者没有持有锁，不能进入临界区。
 
@@ -602,9 +602,11 @@ flowchart TD
 
 [refcount_t](../../linux/include/linux/refcount_types.h#L7-L17)在计数饱和时停止变化，避免回绕导致错误释放。[refcount_inc_not_zero()](../../linux/include/linux/refcount.h#L320-L336)的注释明确要求调用者“已经保证对象内存稳定”，例如处在 RCU 读侧或持有集合锁；对一个可能已经释放的指针做递增，已经太晚了。[refcount_dec_and_test()](../../linux/include/linux/refcount.h#L435-L451)在递减时提供 release 语义，在归零时提供 acquire 语义，使释放操作排在所有使用者的最后一次访问之后。它们只做计数，不会替你调用释放函数。
 
-**RCU 是另一条路。** 写者先让新读者无法再找到旧对象，再等待所有可能持有旧指针的读者离开读侧临界区，然后回收。[synchronize_rcu()](../../linux/kernel/rcu/tree.c#L3303)同步等待一个宽限期，[call_rcu()](../../linux/kernel/rcu/tree.c#L3241)把回收交给回调。它等待的只是“已经存在的读者”，[新读者可以与回调并行运行](../../linux/include/linux/rcupdate.h#L833-L843)。
+**RCU 是另一条路。** 写者先让新读者无法再找到旧对象，再等待所有可能持有旧指针的读者离开读侧临界区，然后回收。[synchronize_rcu()](../../linux/kernel/rcu/tree.c#L3341)按[第 3304～3307 行的说明](../../linux/kernel/rcu/tree.c#L3304-L3307)同步等待一个宽限期，[call_rcu()](../../linux/kernel/rcu/tree.c#L3241)把回收交给回调。它等待的只是“已经存在的读者”，[新读者可以与回调并行运行](../../linux/include/linux/rcupdate.h#L833-L843)。
 
-当前配置的 RCU 读侧有一处容易误解的地方：[__rcu_read_lock()](../../linux/kernel/rcu/tree_plugin.h#L412-L420)只增加任务自己的读侧嵌套计数，不增加 `preempt_count`。因此[读侧可以被抢占，但不能主动阻塞](../../linux/include/linux/rcupdate.h#L856-L858)。自愿抢占模型下，读侧代码走到 [__cond_resched()](../../linux/kernel/sched/core.c#L7493-L7498)时仍可能经 [preempt_schedule_common()](../../linux/kernel/sched/core.c#L7127)以 [SM_PREEMPT](../../linux/kernel/sched/core.c#L7145)换出；[rcu_note_context_switch()](../../linux/kernel/rcu/tree_plugin.h#L332)会把这次换出当作抢占处理，宽限期等到该任务离开读区才结束。直接调用 `schedule()` 或在读区内调用 `synchronize_rcu()` 则属于主动阻塞，超出约定。
+当前配置的 RCU 读侧有一处容易误解的地方：[__rcu_read_lock()](../../linux/kernel/rcu/tree_plugin.h#L412-L420)只增加任务自己的读侧嵌套计数，不增加 `preempt_count`。因此[读侧可以被抢占，但不能主动阻塞](../../linux/include/linux/rcupdate.h#L856-L858)。自愿抢占模型下，读侧代码走到 [__cond_resched()](../../linux/kernel/sched/core.c#L7493-L7498)时，若 `should_resched(0)` 为真且本地中断未关，仍会调用 [preempt_schedule_common()](../../linux/kernel/sched/core.c#L7127)，后者以 [SM_PREEMPT](../../linux/kernel/sched/core.c#L7145)进入 `__schedule()`。[第 6824 行](../../linux/kernel/sched/core.c#L6824)把 `sched_mode > SM_NONE` 记为抢占（`SM_PREEMPT` 为 1，[第 6533～6534 行](../../linux/kernel/sched/core.c#L6533-L6534)），[第 6847 行](../../linux/kernel/sched/core.c#L6847)把 `true` 传给 [rcu_note_context_switch()](../../linux/kernel/rcu/tree_plugin.h#L324)。`preempt` 为 true 时，[第 332 行](../../linux/kernel/rcu/tree_plugin.h#L332)针对自愿切换的警告条件不成立。[第 333～354 行](../../linux/kernel/rcu/tree_plugin.h#L333-L354)的入队不看这个参数：任务仍在读侧、且尚未标记 `blocked` 时，抢占切换和自愿切换都会挂入 `blkd_tasks`。[第 312～320 行](../../linux/kernel/rcu/tree_plugin.h#L312-L320)说明，宽限期要等到这些任务离开读侧。
+
+直接调用 [schedule()](../../linux/kernel/sched/core.c#L7058)走的是 `SM_NONE`。若当时仍在读侧，`preempt` 为 false，第 332 行的警告会触发，这属于主动阻塞。在读区内调用 `synchronize_rcu()` 同样超出[第 856～858 行](../../linux/include/linux/rcupdate.h#L856-L858)的约定。源码在[第 3346～3349 行](../../linux/kernel/rcu/tree.c#L3346-L3349)用 `RCU_LOCKDEP_WARN` 标出这一点。`PROVE_RCU` 由 [PROVE_LOCKING 派生](../../linux/kernel/rcu/Kconfig.debug#L8-L9)，当前[未设置 CONFIG_PROVE_LOCKING](../../linux/.config#L10659)，这个宏是空操作（[rcupdate.h 第 483 行](../../linux/include/linux/rcupdate.h#L483)），本构建不会在运行时检查。
 
 **completion 也不会自动结束对象生命周期。** 等待者因超时或信号提前返回时，等待路径会经 [__finish_swait()](../../linux/kernel/sched/completion.c#L103)把自己的节点摘下，但不会取消负责调用 `complete()` 的异步工作。本地 [completion 文档](../../linux/Documentation/scheduler/completion.rst#L78)要求 completion 所在内存必须覆盖双方的最后一次使用，包括等待方提前返回之后仍可能到来的 `complete()`。
 
@@ -617,7 +619,7 @@ flowchart TD
 | 原语 | 在锁中的作用 | 本章的例子 |
 | --- | --- | --- |
 | 原子 CAS | 让多个竞争者中只有一个完成“空闲 → 持有”的状态迁移 | `queued_spin_lock()` 改 `val`，`__mutex_trylock_fast()` 改 `owner` |
-| acquire/release | 让上一任持有者的修改对下一任可见 | qspinlock 的 `smp_store_release(&lock->locked, 0)`，mutex 的 `try_cmpxchg_release` |
+| acquire/release | 让上一任持有者的修改对下一任可见 | 原生 qspinlock 解锁的 `smp_store_release(&lock->locked, 0)`，mutex 的 `try_cmpxchg_release` |
 | 本地上下文控制 | 防止本 CPU 上的打断者与持锁者互相等待 | `spin_lock_irqsave()` 先关 IRQ、关抢占再争锁 |
 
 在此之上，自旋锁直接组合三者；mutex 用 `owner` 表示长期独占，用内部 `wait_lock` 保护等待链表；引用计数、RCU 和 completion 分别补上生命周期与事件等待的需求。
