@@ -21,7 +21,7 @@
 
 | 配置 | 对本章的影响 | 依据 |
 | --- | --- | --- |
-| `CONFIG_SMP=y`、`CONFIG_NR_CPUS=512` | 编入多处理器调度与全部负载均衡代码 | [.config#L362](../../linux/.config#L362)、[.config#L431](../../linux/.config#L431) |
+| `CONFIG_SMP=y`、`CONFIG_NR_CPUS=512` | 支持多 CPU，最多 512 个。本版本 `fair.c`、`topology.c` 中的负载均衡代码已不再以 `CONFIG_SMP` 为编译条件：`fair.o` 无条件编译，`topology.c` 被无条件包含进 `build_utility.c` | [.config#L362](../../linux/.config#L362)、[.config#L431](../../linux/.config#L431)、[sched/Makefile#L37](../../linux/kernel/sched/Makefile#L37)、[build_utility.c#L86](../../linux/kernel/sched/build_utility.c#L86) |
 | `CONFIG_SCHED_SMT=y`、`CONFIG_SCHED_CLUSTER=y`、`CONFIG_SCHED_MC=y` | x86 拓扑表包含 SMT、CLS、MC 三个层次 | [.config#L835-L837](../../linux/.config#L835-L837)、[smpboot.c#L481-L491](../../linux/arch/x86/kernel/smpboot.c#L481-L491) |
 | `CONFIG_NUMA=y` | 在拓扑表之上追加 NODE 与 NUMA 层次 | [.config#L469](../../linux/.config#L469)、[topology.c#L2052-L2060](../../linux/kernel/sched/topology.c#L2052-L2060) |
 | `CONFIG_NUMA_BALANCING=y`，`CONFIG_NUMA_BALANCING_DEFAULT_ENABLED` 未设置 | NUMA 局部性相关的判断被编入，但多节点机器启动时默认关闭自动 NUMA 平衡（8.2 节） | [.config#L206-L207](../../linux/.config#L206-L207)、[mempolicy.c#L3210-L3226](../../linux/mm/mempolicy.c#L3210-L3226) |
@@ -29,21 +29,21 @@
 | `CONFIG_HZ=1000` | 1 jiffy = 1 ms，均衡间隔的毫秒值与 jiffies 数值相同 | [.config#L506](../../linux/.config#L506) |
 | `CONFIG_PREEMPTION=y`（`PREEMPT_DYNAMIC`，默认 voluntary） | 新空闲均衡最多摘下一个任务就停止（5.9 节）；这是编译条件，与运行时选择哪种抢占模式无关 | [.config#L136-L142](../../linux/.config#L136-L142)、[fair.c#L9916-L9924](../../linux/kernel/sched/fair.c#L9916-L9924) |
 | `CONFIG_PREEMPT_RT` 未设置 | `SCHED_NR_MIGRATE_BREAK` 为 32 | [.config#L139](../../linux/.config#L139)、[sched.h#L2818-L2822](../../linux/kernel/sched/sched.h#L2818-L2822) |
-| `CONFIG_FAIR_GROUP_SCHED=y`、`CONFIG_CFS_BANDWIDTH=y` | 任务负载要折算成层级负载 `task_h_load()`；不能把任务迁到目标 CPU 上被限流的组中 | [.config#L219-L220](../../linux/.config#L219-L220) |
-| `CONFIG_SCHED_MC_PRIO=y` | 编入 ITMT，平台支持时可在 MC/CLS/PKG 层打开 `SD_ASYM_PACKING`（8.3 节） | [.config#L432](../../linux/.config#L432)、[smpboot.c#L456-L473](../../linux/arch/x86/kernel/smpboot.c#L456-L473) |
+| `CONFIG_FAIR_GROUP_SCHED=y`、`CONFIG_CFS_BANDWIDTH=y` | 任务负载要折算成层级负载 `task_h_load()`；不能把任务迁到目标 CPU 上被限流的组中 | [.config#L219-L220](../../linux/.config#L219-L220)、[fair.c#L10145-L10152](../../linux/kernel/sched/fair.c#L10145-L10152)、[fair.c#L5902-L5905](../../linux/kernel/sched/fair.c#L5902-L5905)、[fair.c#L9672-L9673](../../linux/kernel/sched/fair.c#L9672-L9673) |
+| `CONFIG_SCHED_MC_PRIO=y` | 编入 ITMT（Intel Turbo Boost Max Technology 3.0，同一封装内个别核心的最高睿频更高），平台支持时可在 MC/CLS/PKG 层打开 `SD_ASYM_PACKING`（8.3 节） | [.config#L432](../../linux/.config#L432)、[itmt.c#L3-L12](../../linux/arch/x86/kernel/itmt.c#L3-L12)、[smpboot.c#L456-L491](../../linux/arch/x86/kernel/smpboot.c#L456-L491) |
 | `CONFIG_ENERGY_MODEL` 未设置 | 不编入能量感知调度（EAS）；`is_rd_overutilized()` 恒为真，相关跳过条件都不成立 | [.config#L610](../../linux/.config#L610)、[sched.h#L3491-L3497](../../linux/kernel/sched/sched.h#L3491-L3497)、[fair.c#L7006-L7009](../../linux/kernel/sched/fair.c#L7006-L7009) |
-| `CONFIG_SCHED_CORE`、`CONFIG_SCHED_PROXY_EXEC`、`CONFIG_UCLAMP_TASK` 未设置 | 核心调度 cookie 检查恒为“匹配”；`task_is_blocked()` 恒为假；不讨论 uclamp | [.config#L143](../../linux/.config#L143)、[.config#L193-L194](../../linux/.config#L193-L194)、[sched.h#L1507-L1522](../../linux/kernel/sched/sched.h#L1507-L1522)、[sched.h#L2305-L2311](../../linux/kernel/sched/sched.h#L2305-L2311) |
-| `CONFIG_SCHED_CLASS_EXT` 未出现在 `.config` 中 | 它依赖 `DEBUG_INFO_BTF`，而 `.config` 中也没有该项，sched_ext 未编入 | [Kconfig.preempt#L166-L168](../../linux/kernel/Kconfig.preempt#L166-L168) |
-| `CONFIG_SCHEDSTATS=y`、`CONFIG_DEBUG_FS=y` | 可从 `/proc/schedstat` 和 debugfs 观察均衡统计与参数（第 10 节） | [.config#L10650](../../linux/.config#L10650)、[.config#L10544](../../linux/.config#L10544) |
+| `CONFIG_SCHED_CORE`、`CONFIG_SCHED_PROXY_EXEC`、`CONFIG_UCLAMP_TASK` 未设置 | 核心调度 cookie 检查恒为“匹配”；`task_is_blocked()` 恒为假；不讨论 uclamp | [.config#L143](../../linux/.config#L143)、[.config#L193-L194](../../linux/.config#L193-L194)、[sched.h#L1507-L1522](../../linux/kernel/sched/sched.h#L1507-L1522)、[sched.h#L2305-L2311](../../linux/kernel/sched/sched.h#L2305-L2311)、[include/linux/sched.h#L1681-L1692](../../linux/include/linux/sched.h#L1681-L1692) |
+| `CONFIG_SCHED_CLASS_EXT` 未出现在 `.config` 中 | 它依赖 `DEBUG_INFO_BTF`；后者要求 `PAHOLE_VERSION >= 116`，而本配置为 0，所以两者都未启用，sched_ext 未编入 | [Kconfig.preempt#L166-L168](../../linux/kernel/Kconfig.preempt#L166-L168)、[Kconfig.debug#L377-L383](../../linux/lib/Kconfig.debug#L377-L383)、[.config#L26](../../linux/.config#L26) |
+| `CONFIG_SCHEDSTATS=y`、`CONFIG_DEBUG_FS=y` | 可从 `/proc/schedstat` 和 debugfs 观察均衡统计与参数（第 10 节）。统计代码已编入，但运行时默认不计数，需要另行打开 | [.config#L10650](../../linux/.config#L10650)、[.config#L10544](../../linux/.config#L10544)、[core.c#L4574](../../linux/kernel/sched/core.c#L4574) |
 
 另有几个**运行时条件**会改变结论，本章正文以括号中的情形为主线：
 
 - debugfs 中的 `migration_cost_ns`（默认 500000 ns）和 `nr_migrate`（默认 32）。[fair.c#L82](../../linux/kernel/sched/fair.c#L82)、[core.c#L186](../../linux/kernel/sched/core.c#L186)、[debug.c#L513-L514](../../linux/kernel/sched/debug.c#L513-L514)
-- 各 CPU 的容量是否相同（假设对称）。x86 上 `arch_scale_cpu_capacity()` 只有在 intel_pstate 判定为混合架构且没有 SMT 时才返回不同的值，见 8.3 节。
+- 各 CPU 的算力（capacity，即其他章所说的 CPU 容量）是否相同（假设对称）。x86 上 `arch_scale_cpu_capacity()` 只有在 intel_pstate 判定为混合架构且没有 SMT 时才返回不同的值（[intel_pstate.c#L1157-L1167](../../linux/drivers/cpufreq/intel_pstate.c#L1157-L1167)、[aperfmperf.c#L428-L434](../../linux/arch/x86/kernel/cpu/aperfmperf.c#L428-L434)），见 8.3 节。
 - ITMT 是否打开（假设未打开）。
 - 是否用 `isolcpus=`、cpuset 分区等把一部分 CPU 移出普通调度域（假设没有，见 3.5 节）。
 
-**本章边界。** 本章分析公平调度类在多个 CPU 之间的任务放置与迁移。以下内容只说明接口和交互点：PELT 信号的计算；EEVDF 在单个运行队列内的选择规则；自动 NUMA 平衡的页面扫描与任务交换（`task_numa_migrate()`）；cpuset 分区如何生成调度域（见 [cpuset 章 6.1 节](../cgroup2/cpuset.md)）；组调度中 `h_load` 的含义（见 [cpu 控制器章 3.2 节](../cgroup2/cpu.md)）；实时与 deadline 调度类的推拉迁移（第 9 节只做对照）。
+**本章边界。** 本章分析公平调度类在多个 CPU 之间的任务放置与迁移。以下内容只说明接口和交互点：PELT 信号的计算；EEVDF 在单个运行队列内的选择规则；自动 NUMA 平衡的页面扫描与任务交换（`task_numa_migrate()`）；cpuset 分区如何生成调度域（见 [cpuset 章 6.1 节](../cgroup2/cpuset.md)）；组调度中 `h_load` 的含义（见 [cpu 控制器章 3.1 节](../cgroup2/cpu.md)）；实时与 deadline 调度类的推拉迁移（第 9 节只做对照）。
 
 ## 1. 负载均衡要解决什么问题
 
@@ -53,10 +53,10 @@
 
 失衡的来源很多：任务被唤醒时放置得不理想；一部分任务睡眠或退出后，原本均衡的分布被打破；CPU 亲和性（`cpus_ptr`）把任务限制在部分 CPU 上；实时任务、中断占用了某些 CPU 的一部分算力。
 
-`fair.c` 中负载均衡部分开头的注释给出了目标：让每个任务得到与其权重成比例的算力。写成公式，就是让每个 CPU 上“加权负载 ÷ 算力”相等（[fair.c#L9315-L9431](../../linux/kernel/sched/fair.c#L9315-L9431)）。注释同时说明了实现上的两个关键手段：
+`fair.c` 中负载均衡部分开头的注释给出了目标：让每个任务得到与其权重成比例的算力。写成公式，就是让每个 CPU 上“加权负载 ÷ 算力”相等（[fair.c#L9320-L9324](../../linux/kernel/sched/fair.c#L9320-L9324)）。注释同时说明了实现上的两个关键手段：
 
-- 不在全部 CPU 之间两两比较，而是按硬件拓扑建一棵树，每一层只比较少数几个“组”，越往上层均衡越不频繁，总开销约为 O(n)。
-- 新进入空闲的 CPU 主动沿树向上找活干（work conserving），而不是等别人推任务过来。
+- 不在全部 CPU 之间两两比较，而是按硬件拓扑建一棵树，每一层只比较少数几个“组”，越往上层均衡越不频繁，总开销约为 O(n)（[fair.c#L9357-L9378](../../linux/kernel/sched/fair.c#L9357-L9378)）。
+- 新进入空闲的 CPU 主动沿树向上找活干（work conserving），而不是等别人推任务过来（[fair.c#L9400-L9404](../../linux/kernel/sched/fair.c#L9400-L9404)）。
 
 实际实现比公式复杂得多。源码会先把每个组分类（是否还有空闲算力、是否过载、是否因亲和性无法均衡等），再按类别选用“任务个数”“利用率”或“负载”中合适的一种度量（第 5 节）。
 
@@ -66,10 +66,10 @@
 
 | 手段 | 时间点 | 入口 | 本质 |
 | --- | --- | --- | --- |
-| **放置**（placement） | 任务被唤醒、fork 出新任务、执行 `exec` 时 | `select_task_rq_fair()` | 任务入队之前决定进入哪个 CPU 的运行队列，代价低，只看少量 CPU |
+| **放置**（placement） | 任务被唤醒、fork 出新任务、执行 `exec` 时 | `select_task_rq_fair()` | 唤醒、fork 时在任务入队之前决定进入哪个 CPU 的运行队列；exec 时为正在运行的任务另选 CPU，再把它迁过去。只看少量 CPU，代价低 |
 | **迁移**（migration） | 周期性 tick、CPU 即将空闲、空闲 CPU 被唤来代为均衡 | `sched_balance_rq()` | 把已经排在某个运行队列里的任务摘下来，挂到另一个运行队列 |
 
-迁移采用**拉取**（pull）模型：做均衡的 CPU 是目标 CPU（`dst_cpu`），它在自己所在的调度域内找最忙的 CPU，从那里把任务拉过来。只有一种例外：要搬的是源 CPU 上**正在运行**的任务时，目标 CPU 无法直接摘下它，只能请源 CPU 上的 stopper 线程把它推过来，这叫**主动均衡**（active balance，5.12 节）。
+迁移采用**拉取**（pull）模型：做均衡的 CPU 就是目标 CPU（`dst_cpu`），它在自己所在的调度域内找最忙的 CPU，从那里把任务拉过来。NOHZ 代理均衡时，由一个空闲 CPU 以被代理的空闲 CPU 作为 `dst_cpu` 执行（6.3 节）。只有一种例外：要搬的是源 CPU 上**正在运行**的任务时，目标 CPU 无法直接摘下它，只能请源 CPU 上的 stopper 线程（每 CPU 一个、以最高优先级运行的内核线程）把它推过来，这叫**主动均衡**（active balance，5.12 节）。
 
 ### 1.3 触发事件、执行上下文与输入输出
 
@@ -77,15 +77,16 @@
 | --- | --- | --- | --- |
 | 本 CPU 的 tick 发现均衡时间已到 | `sched_tick()` → `sched_balance_trigger()` → 触发 `SCHED_SOFTIRQ` → `sched_balance_softirq()` → `sched_balance_domains()` | tick 在时钟硬中断中判断；均衡在软中断中执行 | 周期性地逐层检查，必要时迁移 |
 | 本 CPU 的公平队列空了，将要运行 idle | `__pick_next_task()` → `pick_next_task_fair()` 或 `balance_fair()` → `sched_balance_newidle()` | `schedule()` 内部，关中断、持本 CPU 运行队列锁（中途会释放） | 立即逐层尝试拉任务 |
-| 忙 CPU 的 tick 发现有停了 tick 的空闲 CPU 需要均衡 | `nohz_balancer_kick()` → `kick_ilb()` → IPI → `nohz_csd_func()` → `SCHED_SOFTIRQ` → `_nohz_idle_balance()` | 发起方在 tick 中；被选中的空闲 CPU 在 IPI 返回前的软中断中执行 | 代替所有停 tick 的空闲 CPU 做周期均衡，或只更新它们的阻塞负载 |
+| 忙 CPU 的 tick 发现有停了 tick 的空闲 CPU 需要均衡 | `nohz_balancer_kick()` → `kick_ilb()` → IPI（核间中断，Inter-Processor Interrupt）→ `nohz_csd_func()` → `SCHED_SOFTIRQ` → `sched_balance_softirq()` → `nohz_idle_balance()` → `_nohz_idle_balance()` | 发起方在 tick 中；被选中的空闲 CPU 在 `SCHED_SOFTIRQ` 中执行，通常在 IPI 中断退出时处理（目标处于轮询空闲时可能不发 IPI，见 6.3 节） | 代替所有停 tick 的空闲 CPU 做周期均衡，或只更新它们的阻塞负载 |
 | 普通迁移多次失败，或必须搬运正在运行的任务 | `sched_balance_rq()` → `stop_one_cpu_nowait()` → `active_load_balance_cpu_stop()` | 源 CPU 上的 stopper 线程 | 把一个任务推到目标 CPU |
-| 唤醒、fork、exec | `select_task_rq()` → `select_task_rq_fair()` | 持有 `p->pi_lock` | 返回任务应入队的 CPU |
+| 唤醒、fork | `select_task_rq()` → `select_task_rq_fair()` | 持有 `p->pi_lock` | 返回任务应入队的 CPU |
+| exec | `sched_exec()` 直接调用 `p->sched_class->select_task_rq()`；选出别的 CPU 时用 `stop_one_cpu()` 执行 `migration_cpu_stop` 迁移当前任务（[core.c#L5462-L5479](../../linux/kernel/sched/core.c#L5462-L5479)） | 选择时持有 `p->pi_lock`；迁移由 stopper 线程完成 | 当前任务被迁到选出的 CPU |
 
 迁移路径的**输入**是：调度域树、各运行队列的任务数和 PELT 信号、各 CPU 的算力。**输出**是：被迁移的任务，以及调度域上的运行时状态（`balance_interval`、`nr_balance_failed`、`last_balance`）和运行队列的 `next_balance`。
 
 ### 1.4 总体结构
 
-下图展示迁移路径的分层。实线表示调用，最下层是所有触发路径共用的核心函数。
+下图展示迁移路径的分层，最下层是所有触发路径共用的核心函数。图中的边有三种含义：从“触发”指向“入口”、标注了软中断或 IPI 的边表示异步触发；其余入口之间、入口到核心的实线表示函数调用；“一次均衡”子图内部的实线表示 `sched_balance_rq()` 内的执行顺序，不是相互调用；虚线表示满足条件时才发出的异步请求。
 
 ```mermaid
 flowchart TB
@@ -105,17 +106,18 @@ flowchart TB
         C2["sched_balance_find_src_group()<br/>统计、分类、计算不均衡量"]
         C3["sched_balance_find_src_rq()<br/>最忙运行队列"]
         C4["detach_tasks() / attach_tasks()"]
-        C5["active_load_balance_cpu_stop()<br/>主动均衡"]
+        C5["active_load_balance_cpu_stop()<br/>主动均衡，源 CPU 的 stopper"]
     end
-    T1 -->|"raise_softirq"| E1
-    T2 --> E2
-    T3 -->|"IPI → softirq"| E3
-    E1 --> E4
+    T1 -->|"raise SCHED_SOFTIRQ"| E1
+    T2 -->|"经 pick_next_task_fair()<br/>或 balance_fair()"| E2
+    T3 -->|"IPI → nohz_csd_func()<br/>→ raise SCHED_SOFTIRQ"| E1
+    E1 -->|"有 NOHZ 请求"| E3
+    E1 -->|"否则，均衡本 CPU"| E4
     E3 -->|"对每个空闲 CPU"| E4
     E4 --> C1
     E2 -->|"逐层直接调用"| C1
     C1 --> C2 --> C3 --> C4
-    C4 -.->|"没拉到且满足条件"| C5
+    C4 -.->|"没拉到且满足条件<br/>stop_one_cpu_nowait()"| C5
 ```
 
 需要注意：
@@ -149,11 +151,13 @@ flowchart TB
 CPU 0 最终挂上的调度域链如下（3.4 节解释为什么只剩三层）：
 
 ```text
-层次     名称   CPU 0 的调度域范围        该域的调度组（环形链表，首组包含 CPU 0）
-level 2  NUMA   [0-15]                  {0-7} -> {8-15}
-level 1  MC     [0-7]                   {0,1} -> {2,3} -> {4,5} -> {6,7}
-level 0  SMT    [0,1]                   {0} -> {1}
+链中序号  sd->level  名称   CPU 0 的调度域范围   该域的调度组（环形链表，首组包含 CPU 0）
+2         5          NUMA   [0-15]             {0-7} -> {8-15}
+1         2          MC     [0-7]              {0,1} -> {2,3} -> {4,5} -> {6,7}
+0         0          SMT    [0,1]              {0} -> {1}
 ```
+
+两列编号含义不同。`sd->level` 在构建时按原始拓扑表逐层加 1（SMT 0、CLS 1、MC 2、PKG 3、NODE 4、NUMA 5，[topology.c#L2401-L2402](../../linux/kernel/sched/topology.c#L2401-L2402)），删除退化层后不重新编号；`relax_domain_level` 比较的就是它（3.2 节），debugfs 中的 `level` 文件显示的也是它。“链中序号”是沿 `parent` 链数出来的连续编号，`/proc/schedstat` 的 `domainN` 和 debugfs 的 `domainM` 目录名用的是这个序号（[stats.c#L136-L140](../../linux/kernel/sched/stats.c#L136-L140)、[debug.c#L623-L631](../../linux/kernel/sched/debug.c#L623-L631)、[debug.c#L583](../../linux/kernel/sched/debug.c#L583)）。
 
 CPU 9 的链则是 SMT `[8,9]`、MC `[8-15]`、NUMA `[0-15]`。每个 CPU 都有自己的一份 `sched_domain` 对象，但 CPU 0 与 CPU 1 在 MC 层看到的组 `{2,3}` 是**同一个** `sched_group` 对象（3.3 节）。
 
@@ -167,22 +171,22 @@ CPU 9 的链则是 SMT `[8,9]`、MC `[8-15]`、NUMA `[0-15]`。每个 CPU 都有
 | `groups` | 本域调度组环的首组，首组总是包含本 CPU | 构建时设置 |
 | `span_weight` | 范围内 CPU 个数 | 构建时设置 |
 | `flags` | `SD_*` 标志的组合（2.5 节） | 构建时设置 |
-| `level`、`name` | 层号（从 0 开始）与层名，如 `"MC"` | 构建时设置 |
-| `min_interval`、`max_interval` | 均衡间隔的下限和上限，单位**毫秒**；默认分别为范围内 CPU 数和它的 2 倍 | `sd_init()` 设置，可在 debugfs 调整 |
+| `level`、`name` | 层号与层名，如 `"MC"`。层号按原始拓扑表从 0 逐层编号，删除退化层后不重新编号（2.2 节） | 构建时设置 |
+| `min_interval`、`max_interval` | 均衡间隔的下限和上限，单位**毫秒**；默认分别为范围内 CPU 数和它的 2 倍 | `sd_init()` 设置；打开 `sched_verbose` 后可在 debugfs 调整（第 10 节） |
 | `balance_interval` | 当前均衡间隔，单位毫秒，初值为范围内 CPU 数 | 每次均衡后加倍或复位（5.11 节） |
 | `busy_factor` | CPU 忙时把间隔放大的倍数，默认 16 | `sd_init()` 设置 |
 | `imbalance_pct` | 失衡阈值百分比，如 117 表示“超过 17% 才算明显” | `sd_init()` 按层设置（3.2 节） |
 | `cache_nice_tries` | 允许连续失败多少次后才迁移“缓存热”任务 | `sd_init()` 按层设置 |
 | `imb_numa_nr` | NUMA 层允许保留的少量失衡对应的运行任务数阈值 | 构建时计算（8.2 节） |
 | `last_balance` | 上次在这一层做周期均衡的时刻，单位 jiffies | `sched_balance_domains()` 更新 |
-| `nr_balance_failed` | 连续失败次数 | `sched_balance_rq()` 递增或清零 |
+| `nr_balance_failed` | 连续失败次数 | `sched_balance_rq()` 递增或清零；主动均衡成功时由源 CPU 的 stopper 清零（5.12 节） |
 | `max_newidle_lb_cost`、`last_decay_max_lb_cost` | 在这一层做一次新空闲均衡的最大耗时（纳秒）及上次衰减时刻 | 新空闲均衡后更新，周期路径中衰减（6.2 节） |
 | `newidle_call`、`newidle_success`、`newidle_ratio` | 新空闲均衡的调用次数、成功次数及成功率（按 1024 计） | `update_newidle_stats()` 更新 |
 | `nohz_idle` | 本 CPU 是否已从所在 LLC 的忙 CPU 计数中扣除 | NOHZ 进出空闲时更新（6.3 节） |
-| `shared` | 指向同一 LLC 内各 CPU 共享的 `sched_domain_shared` | 构建时设置，引用计数 |
+| `shared` | 指向本层范围内各 CPU 共享的 `sched_domain_shared`，只有带 `SD_SHARE_LLC` 的层才有（2.6 节） | 构建时设置，引用计数 |
 | `lb_count[]` 等 | schedstat 统计，按空闲类型分三组 | `CONFIG_SCHEDSTATS` 下更新 |
 
-运行时字段（`last_balance`、`balance_interval`、`nr_balance_failed` 等）属于**每个 CPU 自己的那份**调度域对象，没有锁保护。它们通常由本 CPU 的均衡路径更新；NOHZ 代理均衡时，执行代理的 CPU 会更新被代理 CPU 的这份对象（6.3 节）。源码没有为这两类更新加同步，可以理解为把它们当作允许偶发竞争的启发式状态（分析）。
+运行时字段（`last_balance`、`balance_interval`、`nr_balance_failed` 等）属于**每个 CPU 自己的那份**调度域对象，没有锁保护。它们通常由本 CPU 的均衡路径更新，另有两类跨 CPU 的写者：NOHZ 代理均衡时，执行代理的 CPU 会更新被代理 CPU 的这份对象（6.3 节）；主动均衡成功时，源 CPU 上的 stopper 会把目标 CPU 那份调度域的 `nr_balance_failed` 清零（[fair.c#L12399-L12422](../../linux/kernel/sched/fair.c#L12399-L12422)）。源码没有为这些更新加同步，可以理解为把它们当作允许偶发竞争的启发式状态（分析）。
 
 ### 2.4 调度组与算力对象
 
@@ -202,7 +206,7 @@ CPU 9 的链则是 SMT `[8,9]`、MC `[8-15]`、NUMA `[0-15]`。每个 CPU 都有
 | `imbalance` | 下层因亲和性无法均衡时置 1 的标志，源码注释承认它与算力无关，只是借用这个共享对象存放 |
 | `cpumask[]`（经 `group_balance_mask()` 访问） | **均衡掩码**：组内哪些 CPU 有资格代表这个组做上一层的均衡 |
 
-两个对象都带 `ref` 引用计数，因为同一个组会被多个 CPU 的调度域引用（3.3 节）。
+两个对象都带 `ref` 引用计数：非 NUMA 层的同一个组会被多个 CPU 的调度域引用；NUMA 层的组虽然每 CPU 一份，但它们指向的算力对象仍被共享（3.3 节）。
 
 在非 NUMA 层，均衡掩码就等于组的范围；在 NUMA 层，由于组之间可能**重叠**，均衡掩码只包含那些“沿自己的调度域链向上会走到这个组”的 CPU（[topology.c#L901-L940](../../linux/kernel/sched/topology.c#L901-L940)）。`group_balance_cpu()` 返回均衡掩码中的第一个 CPU（[topology.c#L799-L802](../../linux/kernel/sched/topology.c#L799-L802)），它在 5.2 节决定“谁负责这一层”。
 
@@ -228,7 +232,7 @@ CPU 9 的链则是 SMT `[8,9]`、MC `[8-15]`、NUMA `[0-15]`。每个 CPU 都有
 
 ### 2.6 跨 CPU 共享的状态
 
-**`struct sched_domain_shared`**（[topology.h#L66-L71](../../linux/include/linux/sched/topology.h#L66-L71)）由共享 LLC 的各 CPU 共用一份：
+**`struct sched_domain_shared`**（[topology.h#L66-L71](../../linux/include/linux/sched/topology.h#L66-L71)）：每个带 `SD_SHARE_LLC` 的层（示例中为 SMT 和 MC 层）各有一份，由该层范围内的 CPU 共用（[topology.c#L1720-L1724](../../linux/kernel/sched/topology.c#L1720-L1724)）。NOHZ 计数和唤醒路径只通过每 CPU 缓存指针 `sd_llc`、`sd_llc_shared`（见下文）使用**最高**共享 LLC 层（示例中为 MC 层）的那一份：
 
 | 字段 | 含义 | 使用者 |
 | --- | --- | --- |
@@ -236,38 +240,38 @@ CPU 9 的链则是 SMT `[8,9]`、MC `[8-15]`、NUMA `[0-15]`。每个 CPU 都有
 | `has_idle_cores` | LLC 内可能有整核空闲 | 唤醒快路径 `select_idle_sibling()` |
 | `nr_idle_scan` | 唤醒时最多扫描多少个 CPU 找空闲 | 由周期均衡计算，唤醒快路径读取（7.4 节） |
 
-为避免每次都沿调度域链查找，构建完成后每个 CPU 还缓存了几个指针：`sd_llc`（最高的共享 LLC 层）、`sd_llc_shared`、`sd_numa`、`sd_asym_packing`、`sd_asym_cpucapacity` 等（[sched.h#L2076-L2083](../../linux/kernel/sched/sched.h#L2076-L2083)、[`update_top_cache_domain()`](../../linux/kernel/sched/topology.c#L671-L711)）。
+为避免每次都沿调度域链查找，构建完成后每个 CPU 还缓存了几个指针：`sd_llc`（最高的共享 LLC 层）、`sd_llc_shared`、`sd_numa`、`sd_asym_packing`、`sd_asym_cpucapacity` 等（[sched.h#L2076-L2083](../../linux/kernel/sched/sched.h#L2076-L2083)、[`update_top_cache_domain()`](../../linux/kernel/sched/topology.c#L671-L709)）。
 
 **`struct root_domain`**（[sched.h#L986-L1046](../../linux/kernel/sched/sched.h#L986-L1046)）表示一个相互独立的负载均衡分区。通常全系统只有一个；cpuset 建立独占分区时会出现多个。与公平调度负载均衡有关的是：
 
-- `overloaded`：分区内至少有一个 CPU 有多于一个可运行任务，或者有 misfit 任务。新空闲均衡在它为假时直接放弃（6.2 节）。某个 CPU 的可运行任务数从不足 2 变为 2 及以上时，`add_nr_running()` 立即把它置为真（[sched.h#L2744-L2757](../../linux/kernel/sched/sched.h#L2744-L2757)）；置为假只发生在顶层调度域的均衡中（[fair.c#L11355-L11363](../../linux/kernel/sched/fair.c#L11355-L11363)），通过 `READ_ONCE`/`WRITE_ONCE` 无锁读写（[sched.h#L1054-L1063](../../linux/kernel/sched/sched.h#L1054-L1063)）。
+- `overloaded`：分区内至少有一个 CPU 有多于一个可运行任务，或者有 misfit 任务（算力不对称时“装不下”所在 CPU、应迁到更强 CPU 的任务，8.3 节）。新空闲均衡在它为假时直接放弃（6.2 节）。某个 CPU 的可运行任务数从不足 2 变为 2 及以上时，`add_nr_running()` 立即把它置为真（[sched.h#L2744-L2757](../../linux/kernel/sched/sched.h#L2744-L2757)）；置为假只发生在顶层调度域的均衡中（[fair.c#L11355-L11363](../../linux/kernel/sched/fair.c#L11355-L11363)），通过 `READ_ONCE`/`WRITE_ONCE` 无锁读写（[sched.h#L1054-L1063](../../linux/kernel/sched/sched.h#L1054-L1063)）。
 - `overutilized`：只在 EAS 启用时有意义，本配置下不起作用。
 - `rto_mask`、`dlo_mask` 等：实时与 deadline 调度类的推拉迁移使用（第 9 节）。
 
 ### 2.7 对象关系
 
-下图以 CPU 0 和 CPU 1 为例展示对象关系。实线箭头表示“保存指针”，虚线表示“同一对象被多处引用”。
+下图以 CPU 0 和 CPU 1 为例展示对象关系。每条箭头都表示“保存指针”，边上标注字段名；节点中标有“共享”的对象被多处指针引用，靠引用计数管理。为突出关系，图中只画了 SMT、MC 两层，省略了 SMT 层的组和 `shared`、NUMA 层以及组的均衡掩码。
 
 ```mermaid
 flowchart LR
-    RQ0["rq(CPU0)<br/>sd, rd"] --> SMT0["sched_domain SMT<br/>CPU0 私有"]
-    RQ1["rq(CPU1)<br/>sd, rd"] --> SMT1["sched_domain SMT<br/>CPU1 私有"]
+    RQ0["rq(CPU0)"] -->|sd| SMT0["sched_domain SMT<br/>CPU0 私有"]
+    RQ1["rq(CPU1)"] -->|sd| SMT1["sched_domain SMT<br/>CPU1 私有"]
     SMT0 -->|parent| MC0["sched_domain MC<br/>CPU0 私有"]
     SMT1 -->|parent| MC1["sched_domain MC<br/>CPU1 私有"]
-    MC0 -->|groups| G01["sched_group {0,1}"]
+    MC0 -->|groups| G01["sched_group {0,1}<br/>共享，ref"]
     MC1 -->|groups| G01
-    G01 -->|next| G23["sched_group {2,3}"]
+    G01 -->|next| G23["sched_group {2,3}<br/>共享，ref"]
     G23 -->|next| G45["…{4,5} → {6,7} → 回到 {0,1}"]
-    G01 --> SGC01["sched_group_capacity<br/>capacity, imbalance"]
-    MC0 -->|shared| SHR["sched_domain_shared<br/>nr_busy_cpus …"]
-    MC1 -.->|shared| SHR
-    RQ0 --> RD["root_domain<br/>overloaded"]
-    RQ1 -.-> RD
+    G01 -->|sgc| SGC01["sched_group_capacity<br/>capacity, imbalance<br/>共享，ref"]
+    MC0 -->|shared| SHR["sched_domain_shared（MC 层）<br/>nr_busy_cpus …<br/>共享，ref"]
+    MC1 -->|shared| SHR
+    RQ0 -->|rd| RD["root_domain<br/>overloaded<br/>共享，refcount"]
+    RQ1 -->|rd| RD
 ```
 
 要点：
 
-- **调度域是每 CPU 私有的**，调度组、算力对象、`sched_domain_shared` 和 `root_domain` 是**共享**的，靠引用计数管理生命周期。
+- **调度域是每 CPU 私有的**；`sched_domain_shared` 和 `root_domain` 是**共享**的；调度组在非 NUMA 层由同层 CPU 共享，在 NUMA 层每 CPU 一份，但它指向的算力对象仍然共享（3.3 节）。共享对象靠引用计数管理生命周期。
 - `rq->sd` 只指向最底层；上层通过 `parent` 找到。`for_each_domain(cpu, sd)` 就是沿 `parent` 链遍历（[sched.h#L2015-L2024](../../linux/kernel/sched/sched.h#L2015-L2024)）。
 - MC 域的首组 `{0,1}` 是 CPU 0 和 CPU 1 共同的“本地组”，组环中的其他组是它们共同的“兄弟组”。
 
@@ -277,7 +281,7 @@ flowchart LR
 | --- | --- | --- |
 | 调度域链（`rq->sd`） | 在 CPU 热插拔锁和 `sched_domains_mutex` 下构建；用 `rcu_assign_pointer()` 发布；旧链用 `call_rcu()` 延迟释放（[topology.c#L644-L647](../../linux/kernel/sched/topology.c#L644-L647)、[topology.c#L769-L773](../../linux/kernel/sched/topology.c#L769-L773)） | RCU 读侧：`rcu_read_lock()` 或关抢占区间（[sched.h#L2012-L2024](../../linux/kernel/sched/sched.h#L2012-L2024)） |
 | 调度组、算力对象、`sched_domain_shared` | 随调度域构建；`ref` 归零时随调度域的 RCU 回调释放（[topology.c#L599-L631](../../linux/kernel/sched/topology.c#L599-L631)） | 同上 |
-| `root_domain` | `refcount` 记录挂接的运行队列数，归零后 `call_rcu()` 释放（[topology.c#L472-L515](../../linux/kernel/sched/topology.c#L472-L515)） | 同上 |
+| `root_domain` | `refcount` 记录挂接的运行队列数，以及 `sched_get_rd()` 取得的临时引用（RT 推送路径使用），归零后 `call_rcu()` 释放（[topology.c#L472-L528](../../linux/kernel/sched/topology.c#L472-L528)） | 同上 |
 | 远端运行队列的统计量（`nr_running`、PELT 平均值等） | 由远端 CPU 在自己的运行队列锁下更新 | 均衡统计阶段**不加锁**读取，只作为启发式依据；真正摘任务时再持锁重新检查 |
 | `sgc->imbalance`、`sgc->capacity` | 多个 CPU 可能同时写 | 不加锁；它们是启发式状态，偶发的竞争只影响一次判断 |
 | 任务在运行队列之间的移动 | — | 源、目标运行队列锁，加上 `TASK_ON_RQ_MIGRATING` 协议（5.10 节） |
@@ -295,7 +299,7 @@ flowchart LR
 | MC | `tl_mc_mask()` → `cpu_coregroup_mask()` | 共享 LLC 的 CPU | `SD_SHARE_LLC`，ITMT 打开时加 `SD_ASYM_PACKING` |
 | PKG | `tl_pkg_mask()` → `cpu_node_mask()` | 与本 CPU 同一 NUMA 节点的 CPU | ITMT 打开时为 `SD_ASYM_PACKING`，否则无 |
 
-范围函数与标志函数见 [topology.c#L1731-L1770](../../linux/kernel/sched/topology.c#L1731-L1770) 和 [smpboot.c#L598-L606](../../linux/arch/x86/kernel/smpboot.c#L598-L606)；`cpu_node_mask()` 的定义见 [topology.h#L263-L266](../../linux/include/linux/topology.h#L263-L266)。`build_sched_topology()` 还会做两处裁剪：每核只有一个线程时去掉 SMT 层；一个插槽内含多个 NUMA 节点时清空 PKG 层，交给 NUMA 层表达。
+范围函数见 [topology.c#L1731-L1770](../../linux/kernel/sched/topology.c#L1731-L1770) 和 [smpboot.c#L598-L606](../../linux/arch/x86/kernel/smpboot.c#L598-L606)，x86 的标志函数见 [smpboot.c#L456-L472](../../linux/arch/x86/kernel/smpboot.c#L456-L472)；`cpu_node_mask()` 的定义见 [topology.h#L263-L266](../../linux/include/linux/topology.h#L263-L266)。`build_sched_topology()` 还会做两处裁剪：每核只有一个线程时去掉 SMT 层；一个插槽内含多个 NUMA 节点时清空 PKG 层，交给 NUMA 层表达。
 
 `sched_init_smp()` 先调用 `sched_init_numa()`（[core.c#L8611-L8624](../../linux/kernel/sched/core.c#L8611-L8624)）。它统计节点距离表中有多少种不同的距离值，为每种距离生成一层：距离为本地距离的一层叫 NODE，其余各层叫 NUMA，并把这些层追加到拓扑层表末尾（[topology.c#L1931-L2069](../../linux/kernel/sched/topology.c#L1931-L2069)）。第 k 层中，CPU 的范围是“距离不超过第 k 种距离值的所有节点的 CPU”。示例机器只有 10 和 21 两种距离，于是在 PKG 之上追加 NODE（本节点）和 NUMA（两个节点）两层。
 
@@ -307,7 +311,7 @@ flowchart LR
 2. **按拓扑调整**（互斥分支，按顺序判断）：
    - 共享执行单元（SMT）：`imbalance_pct` = 110；
    - 共享 LLC：`imbalance_pct` = 117，`cache_nice_tries` = 1；
-   - NUMA：`cache_nice_tries` = 2，去掉 `SD_PREFER_SIBLING`，加上 `SD_SERIALIZE`；若该层距离大于 `node_reclaim_distance`（默认 `RECLAIM_DISTANCE` = 30，[mm/page_alloc.c#L3699](../../linux/mm/page_alloc.c#L3699)、[topology.h#L59](../../linux/include/linux/topology.h#L59)），再去掉 `SD_BALANCE_EXEC`、`SD_BALANCE_FORK`、`SD_WAKE_AFFINE`；
+   - NUMA：`cache_nice_tries` = 2，去掉 `SD_PREFER_SIBLING`，加上 `SD_SERIALIZE`；若该层距离大于 `node_reclaim_distance`（默认 `RECLAIM_DISTANCE` = 30，[mm/page_alloc.c#L3699](../../linux/mm/page_alloc.c#L3699)、[topology.h#L59](../../linux/include/linux/topology.h#L59)；x86 AMD Zen 平台上改为 32，[amd.c#L921-L926](../../linux/arch/x86/kernel/cpu/amd.c#L921-L926)），再去掉 `SD_BALANCE_EXEC`、`SD_BALANCE_FORK`、`SD_WAKE_AFFINE`；
    - 其他：`cache_nice_tries` = 1。
 3. **算力不对称时**：子域去掉 `SD_PREFER_SIBLING`，不把任务往算力不同的 CPU 上平摊。
 4. **共享 LLC 的层**：挂上该层的 `sched_domain_shared`，`nr_busy_cpus` 初始化为范围内 CPU 数。
@@ -326,7 +330,7 @@ flowchart LR
 
 ### 3.3 `build_sched_domains()`：构建、连组、算力、挂载
 
-`build_sched_domains()`（[topology.c#L2485-L2643](../../linux/kernel/sched/topology.c#L2485-L2643)）为一个 CPU 集合（一个分区）构建全部调度域，分五步：
+`build_sched_domains()`（[topology.c#L2484-L2633](../../linux/kernel/sched/topology.c#L2484-L2633)）为一个 CPU 集合（一个分区）构建全部调度域，分六步（下图从上到下），最后一步“挂载”在 3.4 节展开：
 
 ```mermaid
 flowchart TB
@@ -337,7 +341,7 @@ flowchart TB
     E --> F["cpu_attach_domain()：删除退化层，<br/>挂接 root_domain，发布 rq->sd"]
 ```
 
-**第二步**在 `build_sched_domain()` 中把新域挂到子域之上，并检查子域范围是否是父域的子集（[topology.c#L2395-L2421](../../linux/kernel/sched/topology.c#L2395-L2421)）。外层循环在某层范围已等于整个 CPU 集合时停止，因此单节点机器不会构建 NUMA 层。
+**第二步**在 `build_sched_domain()` 中把新域挂到子域之上，并检查子域范围是否是父域的子集（[topology.c#L2395-L2421](../../linux/kernel/sched/topology.c#L2395-L2421)）。对每个 CPU 逐层构建的循环在某层范围已等于整个 CPU 集合时停止（[topology.c#L2503-L2518](../../linux/kernel/sched/topology.c#L2503-L2518)），因此单节点机器不会构建 NUMA 层。
 
 **第三步**的关键在 `get_group()`（[topology.c#L1190-L1226](../../linux/kernel/sched/topology.c#L1190-L1226)）：一个组由“子域范围中的第一个 CPU”标识，组对象从该 CPU 那份存储中取。于是 CPU 0 和 CPU 1 在 MC 层为 `{2,3}` 建组时，都会取到 CPU 2 那份存储中的同一个 `sched_group`；第一次访问时初始化范围、均衡掩码、`flags = child->flags` 和初始算力，以后的访问只增加引用计数。`build_sched_groups()` 从本 CPU 开始环绕遍历域范围，跳过已被覆盖的 CPU，把组串成环，首组就是本 CPU 所在的组（[topology.c#L1236-L1269](../../linux/kernel/sched/topology.c#L1236-L1269)）。非 NUMA 层要求各 CPU 的范围要么完全相同要么互不相交，`topology_span_sane()` 负责检查，否则组环会被破坏（[topology.c#L2427-L2478](../../linux/kernel/sched/topology.c#L2427-L2478)）。
 
@@ -345,7 +349,7 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 
 **第四步**按 LLC 个数计算 NUMA 层允许的少量失衡，见 8.2 节。
 
-**第五步**中 `init_sched_groups_capacity()` 为每个组计算 `group_weight`、`cores`（去掉 SMT 兄弟后的核心数）和 `asym_prefer_cpu`，并由每个组的 `group_balance_cpu` 调用 `update_group_capacity()` 计算初始算力（[topology.c#L1281-L1321](../../linux/kernel/sched/topology.c#L1281-L1321)）。
+**第五步**中 `init_sched_groups_capacity()` 为每个组计算 `group_weight`、`cores`（去掉 SMT 兄弟后的核心数），仅在域带 `SD_ASYM_PACKING` 时计算 `asym_prefer_cpu`；然后，若本 CPU 是本地组（首组）的 `group_balance_cpu`，就调用 `update_group_capacity()` 计算这个组的初始算力（[topology.c#L1281-L1321](../../linux/kernel/sched/topology.c#L1281-L1321)）。
 
 ### 3.4 退化层的删除与挂载
 
@@ -353,8 +357,8 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 
 `cpu_attach_domain()`（[topology.c#L716-L776](../../linux/kernel/sched/topology.c#L716-L776)）用两条规则删除这些层（[topology.c#L170-L207](../../linux/kernel/sched/topology.c#L170-L207)）：
 
-- `sd_degenerate()`：范围只有 1 个 CPU；或只有一个组，且没有不依赖分组的标志（目前只有 `SD_WAKE_AFFINE`）。
-- `sd_parent_degenerate()`：父域与子域范围相同，并且父域的标志（只有一个组时先去掉需要分组的标志）都已包含在子域中。
+- `sd_degenerate()`：范围只有 1 个 CPU；或者“只有一个组，或没有任何需要分组的标志”，并且没有不依赖分组的标志（目前只有 `SD_WAKE_AFFINE`）。
+- `sd_parent_degenerate()`：父域本身满足 `sd_degenerate()`；或者父域与子域范围相同，并且父域的标志（只有一个组时先去掉需要分组的标志）都已包含在子域中。
 
 删除父域时把它的 `SD_PREFER_SIBLING` 传给子域，并修正祖父域首组的 `flags`。于是 CPU 0 最终只剩 SMT → MC → NUMA 三层，与 2.2 节的表一致。
 
@@ -365,11 +369,11 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 | 时机 | 入口 | 范围 |
 | --- | --- | --- |
 | 启动 | `sched_init_smp()` → `sched_init_domains(cpu_active_mask)` | active CPU 与 `HK_TYPE_DOMAIN` housekeeping 集合的交集，即排除 `isolcpus=` 隔离的 CPU（[topology.c#L2690-L2708](../../linux/kernel/sched/topology.c#L2690-L2708)） |
-| CPU 上下线、cpuset 分区变化、ITMT 开关等拓扑更新 | `partition_sched_domains()` | 比较新旧分区集合，只拆除消失的、只构建新增的（[topology.c#L2774-L2876](../../linux/kernel/sched/topology.c#L2774-L2876)）；cpuset 如何生成分区见 [cpuset 章 6.1 节](../cgroup2/cpuset.md) |
+| CPU 上下线、cpuset 分区变化、ITMT 开关等拓扑更新 | `partition_sched_domains()` | 通常比较新旧分区集合，只拆除消失的、只构建新增的（[topology.c#L2774-L2876](../../linux/kernel/sched/topology.c#L2774-L2876)）；但若 `arch_update_cpu_topology()` 报告拓扑变化，所有分区都拆除重建（[topology.c#L2784-L2787](../../linux/kernel/sched/topology.c#L2784-L2787)、[topology.c#L2804](../../linux/kernel/sched/topology.c#L2804)、[topology.c#L2825](../../linux/kernel/sched/topology.c#L2825)）。x86 上切换 ITMT 就属于这种情况（[itmt.c#L54-L57](../../linux/arch/x86/kernel/itmt.c#L54-L57)、[smpboot.c#L130-L138](../../linux/arch/x86/kernel/smpboot.c#L130-L138)）。cpuset 如何生成分区见 [cpuset 章 6.1 节](../cgroup2/cpuset.md) |
 
 不属于任何分区的 CPU 会被挂上 `NULL` 调度域（[topology.c#L2714-L2730](../../linux/kernel/sched/topology.c#L2714-L2730)）。`on_null_domain()` 为真时，`sched_balance_trigger()` 直接返回，`nohz_balance_enter_idle()` 也不把它加入 NOHZ 空闲集合，这类 CPU 完全不参与公平调度类的迁移均衡（[fair.c#L12570-L12573](../../linux/kernel/sched/fair.c#L12570-L12573)、[fair.c#L13257-L13270](../../linux/kernel/sched/fair.c#L13257-L13270)、[fair.c#L12843-L12845](../../linux/kernel/sched/fair.c#L12843-L12845)）。
 
-此外，CPU 上线、下线时会调用 `update_max_interval()`，把全局的最大均衡间隔设为 `HZ * 在线 CPU 数 / 10` 个 jiffies（[fair.c#L12440-L12447](../../linux/kernel/sched/fair.c#L12440-L12447)、[core.c#L8514-L8520](../../linux/kernel/sched/core.c#L8514-L8520)、[core.c#L8604](../../linux/kernel/sched/core.c#L8604)）。示例机器为 1600 jiffies，即 1.6 秒。
+此外，CPU 上线、下线时会调用 `update_max_interval()`，把全局的最大均衡间隔 `max_load_balance_interval` 设为 `HZ * num_online_cpus() / 10` 个 jiffies（[fair.c#L12440-L12447](../../linux/kernel/sched/fair.c#L12440-L12447)、[core.c#L8514-L8520](../../linux/kernel/sched/core.c#L8514-L8520)、[core.c#L8604](../../linux/kernel/sched/core.c#L8604)）。在线 CPU 数取调用时刻的值。x86 上新 CPU 的上线回调在 `ap_starting()` → `notify_cpu_starting()` 中执行，早于它把自己置入在线掩码（[smpboot.c#L211](../../linux/arch/x86/kernel/smpboot.c#L211)、[smpboot.c#L283](../../linux/arch/x86/kernel/smpboot.c#L283)、[smpboot.c#L304](../../linux/arch/x86/kernel/smpboot.c#L304)），所以按代码顺序推断，示例机器启动完成后该值为 `1000 × 15 / 10` = 1500 jiffies，约 1.5 秒（这是静态推断，未经运行验证）。
 
 ## 4. 运行队列上的均衡状态与负载度量
 
@@ -380,9 +384,9 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 | `sd`、`rd` | 本 CPU 的最底层调度域（RCU 保护）、所属根域 | [sched.h#L1208-L1209](../../linux/kernel/sched/sched.h#L1208-L1209) |
 | `cpu_capacity` | 留给公平调度类的算力，即扣除 RT、DL、中断和硬件压力后的部分 | [sched.h#L1211](../../linux/kernel/sched/sched.h#L1211) |
 | `next_balance` | 下次周期均衡的时刻（jiffies） | [sched.h#L1183](../../linux/kernel/sched/sched.h#L1183) |
-| `idle_balance` | 本次软中断以什么空闲类型做均衡，由 tick 或 NOHZ IPI 写入 | [sched.h#L1215-L1216](../../linux/kernel/sched/sched.h#L1215-L1216) |
-| `nohz_idle_balance`、`nohz_flags` | NOHZ 均衡请求标志（6.3 节） | [sched.h#L1130-L1136](../../linux/kernel/sched/sched.h#L1130-L1136) |
-| `nohz_tick_stopped`、`has_blocked_load`、`last_blocked_load_update_tick` | 是否已作为停 tick 空闲 CPU 登记；是否仍有待衰减的阻塞负载；上次衰减时刻 | 同上 |
+| `idle_balance` | 本次软中断以什么空闲类型做均衡，由 tick 或 NOHZ IPI 写入 | [sched.h#L1216](../../linux/kernel/sched/sched.h#L1216) |
+| `nohz_idle_balance`、`nohz_flags` | NOHZ 均衡请求标志：前者是本次软中断要处理的请求，后者是其他 CPU 原子地合并进来的待处理请求（6.3 节） | [sched.h#L1215](../../linux/kernel/sched/sched.h#L1215)、[sched.h#L1135](../../linux/kernel/sched/sched.h#L1135) |
+| `nohz_tick_stopped`、`has_blocked_load`、`last_blocked_load_update_tick` | 是否已作为停 tick 空闲 CPU 登记；是否仍有待衰减的阻塞负载；上次衰减时刻 | [sched.h#L1130-L1136](../../linux/kernel/sched/sched.h#L1130-L1136) |
 | `misfit_task_load` | 当前任务“装不下”本 CPU 时记录的负载，仅算力不对称时使用 | [sched.h#L1218](../../linux/kernel/sched/sched.h#L1218) |
 | `active_balance`、`push_cpu`、`active_balance_work` | 主动均衡进行中标志、推送目标、stopper 工作项 | [sched.h#L1220-L1223](../../linux/kernel/sched/sched.h#L1220-L1223) |
 | `cfs_tasks` | 本 CPU 上全部公平任务（含各级组内的任务）组成的链表 | [sched.h#L1229](../../linux/kernel/sched/sched.h#L1229) |
@@ -392,7 +396,7 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 
 ### 4.2 四种度量
 
-负载均衡使用以下几个量。它们都来自 PELT，是指数衰减的平均值，不是瞬时值：
+负载均衡使用以下四个量。前三个直接来自 PELT，是指数衰减的平均值，不是瞬时值；算力由 CPU 原始算力扣除 RT、DL、中断等占用的 PELT 平均值后得到：
 
 | 度量 | 取值函数 | 含义 | 量纲 |
 | --- | --- | --- | --- |
@@ -403,9 +407,9 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 
 依据：[fair.c#L7366-L7428](../../linux/kernel/sched/fair.c#L7366-L7428)、[fair.c#L8148-L8228](../../linux/kernel/sched/fair.c#L8148-L8228)、PELT 的单位说明见 [pelt.c#L258-L293](../../linux/kernel/sched/pelt.c#L258-L293)。
 
-三种度量各有用途。**负载**反映权重，用于 CPU 都已过载时按权重公平地分配；**利用率**反映 CPU 实际有多忙，用于判断还有没有空闲算力；**可运行度**能看出排队现象：两个 CPU 利用率都是 100%，排了 3 个任务的那个可运行度更高。
+前三种 PELT 度量各有用途。**负载**反映权重，用于 CPU 都已过载时按权重公平地分配；**利用率**反映 CPU 实际有多忙，用于判断还有没有空闲算力；**可运行度**能看出排队现象：两个 CPU 利用率都是 100%，排了 3 个任务的那个可运行度更高。
 
-**组调度下的折算。** 开启组调度后，任务自己的 `load_avg` 只反映它在**所在组**的队列中的份额。`task_h_load()` 自顶向下计算每层队列的层级负载 `h_load`，再把任务负载按比例折算成相对根队列的值（[fair.c#L10112-L10151](../../linux/kernel/sched/fair.c#L10112-L10151)）。迁移按负载计量时，用的就是这个折算值。
+**组调度下的折算。** 开启组调度后，任务自己的 `load_avg` 只反映它在**所在组**的队列中的份额。`task_h_load()` 自顶向下计算每层队列的层级负载 `h_load`，再把任务负载按比例折算成相对根队列的值（[fair.c#L10112-L10152](../../linux/kernel/sched/fair.c#L10112-L10152)）。迁移按负载计量时，用的就是这个折算值。
 
 **算力的计算。** `update_cpu_capacity()` 调用 `scale_rt_capacity()`：从 CPU 实际可用算力中减去 RT 与 DL 的利用率，再按中断占用比例缩放（[fair.c#L10252-L10293](../../linux/kernel/sched/fair.c#L10252-L10293)）。组算力由 `update_group_capacity()` 自下而上求和，并记录组内单 CPU 的最小、最大算力（[fair.c#L10295-L10349](../../linux/kernel/sched/fair.c#L10295-L10349)）。在对称 x86 机器上，每个逻辑 CPU 的原始算力都是 1024，所以一个 2 线程核心的组算力约为 2048，尽管两个 SMT 线程并不能提供两个独立核心的吞吐。源码通过 `group_smt_balance` 等特殊处理弥补这种近似（8.1 节），这一判断属于分析。
 
@@ -441,7 +445,7 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 | `dst_cpu`、`dst_rq`、`dst_grpmask` | 目标 CPU、运行队列，以及本地组的均衡掩码 |
 | `src_cpu`、`src_rq` | 选出的源（最忙）CPU |
 | `idle` | 空闲类型 |
-| `cpus` | 本次参与比较的 CPU：域范围与 active CPU 的交集，过程中会剔除全部被绑定的源 CPU |
+| `cpus` | 本次参与比较的 CPU：域范围与 active CPU 的交集。过程中会剔除任务全部被绑定的源 CPU，以及因 `LBF_DST_PINNED` 换下的原目标 CPU（5.11 节） |
 | `imbalance` | 需要迁移的量，单位由 `migration_type` 决定 |
 | `migration_type` | `migrate_load`（负载）、`migrate_util`（利用率）、`migrate_task`（任务个数）、`migrate_misfit`（一个 misfit 任务）（[fair.c#L9480-L9485](../../linux/kernel/sched/fair.c#L9480-L9485)） |
 | `flags` | `LBF_*` 标志，记录亲和性与重试情况（[fair.c#L9487-L9491](../../linux/kernel/sched/fair.c#L9487-L9491)） |
@@ -450,37 +454,60 @@ NUMA 层的范围可以部分重叠（[topology.c#L806-L897](../../linux/kernel/
 | `fbq_type` | NUMA 层对运行队列的过滤级别 |
 | `tasks` | 已摘下、待挂上的任务链表 |
 
+**执行约束。** 三条触发路径都在 RCU 读侧临界区内调用 `sched_balance_rq()`（[fair.c#L12511](../../linux/kernel/sched/fair.c#L12511)、[fair.c#L13142](../../linux/kernel/sched/fair.c#L13142)），函数内不能睡眠。周期路径和 NOHZ 路径运行在软中断中；新空闲路径运行在 `schedule()` 内，已释放本 CPU 运行队列锁，但中断和抢占仍关闭（[fair.c#L13113-L13118](../../linux/kernel/sched/fair.c#L13113-L13118)、[fair.c#L13137](../../linux/kernel/sched/fair.c#L13137)）。`env.cpus` 指向每 CPU 的临时掩码 `load_balance_mask`，`should_we_balance()` 也使用每 CPU 临时掩码（[fair.c#L7348-L7351](../../linux/kernel/sched/fair.c#L7348-L7351)、[fair.c#L12041](../../linux/kernel/sched/fair.c#L12041)）。这种用法依赖同一 CPU 上不会重入 `sched_balance_rq()`（分析）。
+
 整体流程可以先用伪代码把握：
 
 ```c
-/* 伪代码：sched_balance_rq() 的主线，省略统计与部分细节 */
+/* 伪代码：sched_balance_rq() 的主线，省略 schedstat 统计与 loop 计数的复位 */
 cpus = sd 范围 ∩ active CPU;
 redo:
-    if (!should_we_balance(env))           /* 本层不由我负责 */
-        { *continue_balancing = 0; goto balanced; }
-    if (sd 带 SD_SERIALIZE && 全局串行锁已被占用)
-        goto balanced;
-    group   = sched_balance_find_src_group(env);  /* 统计+判定+算 imbalance */
+    if (!should_we_balance(env))                 /* 本层不由我负责 */
+        { *continue_balancing = 0; goto out_balanced; }
+    if (sd 带 SD_SERIALIZE && 抢占全局串行标志失败)
+        goto out_balanced;
+    group = sched_balance_find_src_group(env);   /* 统计+判定+算 imbalance */
+    if (!group) goto out_balanced;
     busiest = sched_balance_find_src_rq(env, group);
-    if (!group || !busiest) goto balanced;
+    if (!busiest) goto out_balanced;
+    env.flags |= LBF_ALL_PINNED;                 /* 找到可去 dst 的任务时清除 */
     if (busiest->nr_running > 1) {
     more_balance:
-        锁 busiest; detach_tasks(); 解锁 busiest;   /* 全程关中断 */
-        锁 this_rq; attach_tasks(); 解锁 this_rq;
-        if (需要喘口气)              goto more_balance;
-        if (任务只是不能去 dst_cpu)  { 改用本地组另一 CPU 作 dst; goto more_balance; }
-        if (部分任务被绑定)          父层本地组 sgc->imbalance = 1;
-        if (busiest 上全部被绑定)    { 从 cpus 去掉 busiest; 还有候选则 goto redo; }
+        锁 busiest（关中断）; detach_tasks(); 解锁 busiest（中断仍关）;
+        若摘到任务: 锁 env.dst_rq; attach_tasks(); 解锁 env.dst_rq;
+        恢复中断;
+        if (LBF_NEED_BREAK)                      goto more_balance;
+        if (LBF_DST_PINNED && imbalance > 0)
+            { 从 cpus 去掉 dst_cpu; dst_cpu = new_dst_cpu; goto more_balance; }
+        if (LBF_SOME_PINNED && imbalance > 0)    父层本地组 sgc->imbalance = 1;
+        if (LBF_ALL_PINNED) {
+            从 cpus 去掉 busiest;
+            if (cpus 中还有本地组以外的 CPU)      goto redo;
+            goto out_all_pinned;
+        }
     }
     if (一个也没搬成) {
-        非新空闲时 sd->nr_balance_failed++;
-        if (need_active_balance()) 让 busiest 的 stopper 推一个任务过来;
+        if (非新空闲 && 非 misfit 迁移)          sd->nr_balance_failed++;
+        if (need_active_balance()) {
+            if (busiest 的当前任务不能在 this_cpu 上运行) goto out_one_pinned;
+            若 busiest->active_balance 为 0，置 1 并请 busiest 的 stopper 推一个任务;
+        }
     } else
         sd->nr_balance_failed = 0;
-    复位 balance_interval;  return 迁移数;
-balanced:
-    sd->nr_balance_failed = 0;  非新空闲时 balance_interval 加倍;
-    return 0;
+    if (没有发起主动均衡 || need_active_balance())
+        sd->balance_interval = sd->min_interval;  /* 失衡：复位间隔 */
+    goto out;
+out_balanced:
+    if (!LBF_ALL_PINNED) 清除父层本地组 sgc->imbalance;
+out_all_pinned:
+    sd->nr_balance_failed = 0;
+out_one_pinned:
+    ld_moved = 0;
+    if (非新空闲 && 非 misfit 迁移)
+        balance_interval 加倍，上限 max_interval（LBF_ALL_PINNED 时上限 MAX_PINNED_INTERVAL）;
+out:
+    若占用了 SD_SERIALIZE 串行标志，释放它;
+    return ld_moved;
 ```
 
 下面逐步展开。
@@ -497,7 +524,7 @@ balanced:
 4. 没有整核空闲的 CPU 时，由第一个“兄弟忙”的空闲 CPU 负责；
 5. 一个空闲 CPU 都没有时，由组的 `group_balance_cpu()` 负责。
 
-返回 0 时，`sched_balance_rq()` 把 `*continue_balancing` 置 0，`sched_balance_domains()` 便不再到更高层均衡（[fair.c#L12060-L12063](../../linux/kernel/sched/fair.c#L12060-L12063)、[fair.c#L12525-L12529](../../linux/kernel/sched/fair.c#L12525-L12529)）。在示例机器上，每个 CPU 都会做 SMT 层；MC 层每个核心只有一个 CPU 做；NUMA 层每个节点只有一个 CPU 做。这正是 fair.c 开头注释所说的“越往上，参与均衡的 CPU 越少”。
+返回 0 时，`sched_balance_rq()` 把 `*continue_balancing` 置 0，`sched_balance_domains()` 便不再到更高层均衡（[fair.c#L12060-L12063](../../linux/kernel/sched/fair.c#L12060-L12063)、[fair.c#L12525-L12529](../../linux/kernel/sched/fair.c#L12525-L12529)）。在示例机器上做周期均衡或 NOHZ 均衡时，每个 CPU 都会做 SMT 层；MC 层每个核心只有一个 CPU 做；NUMA 层每个节点只有一个 CPU 做。新空闲均衡不受这条限制（第 2 点）。这正是 fair.c 开头注释所说的“越往上，参与均衡的 CPU 越少”。
 
 ### 5.3 收集统计：`update_sd_lb_stats()` 与 `update_sg_lb_stats()`
 
@@ -517,7 +544,7 @@ balanced:
 | `group_type` | 分类结果（5.4 节） |
 | `avg_load` | 仅当组过载时计算：`group_load × 1024 / group_capacity` |
 
-依据 [`update_sg_lb_stats()`](../../linux/kernel/sched/fair.c#L10627-L10713)。`sum_h_nr_running` 使用 `h_nr_runnable` 而不是 `h_nr_queued`：EEVDF 允许已睡眠但滞后量为负的任务暂留在队列中（`sched_delayed`，延迟出队），它们排在队列里却不可运行，不应算作待迁移的任务。
+依据 [`update_sg_lb_stats()`](../../linux/kernel/sched/fair.c#L10627-L10713)。`sum_h_nr_running` 使用 `h_nr_runnable` 而不是 `h_nr_queued`（[sched.h#L679-L680](../../linux/kernel/sched/sched.h#L679-L680)）：EEVDF 允许已睡眠但滞后量为负的任务暂留在队列中（`sched_delayed`，延迟出队，[features.h#L49-L58](../../linux/kernel/sched/features.h#L49-L58)），它们排在队列里却不可运行，不应算作待迁移的任务。
 
 `update_sd_lb_stats()`（[fair.c#L11306-L11367](../../linux/kernel/sched/fair.c#L11306-L11367)）在遍历中还做了几件事：
 
@@ -550,7 +577,7 @@ balanced:
 - **有余量**：任务数小于 CPU 数；或者可运行度不超过算力的 117% 且利用率低于算力的约 85.5%。
 - 二者都不满足时为**满载**（前提是不属于中间几个特殊类别）。
 
-注意“满载”不等于“非过载”：一个 2 CPU 的组正好跑 2 个吃满 CPU 的任务，既没有余量也不过载，这正是源码注释特别说明的情形（[fair.c#L10432-L10438](../../linux/kernel/sched/fair.c#L10432-L10438)）。
+注意“没有余量”不等于“过载”：一个 2 CPU 的组正好跑 2 个吃满 CPU 的任务，既没有余量也不过载，这正是源码注释特别说明的情形（[fair.c#L10432-L10438](../../linux/kernel/sched/fair.c#L10432-L10438)）。
 
 `group_imbalanced` 来自算力对象上的 `imbalance` 标志（[fair.c#L10369-L10400](../../linux/kernel/sched/fair.c#L10369-L10400)）。源码注释举的例子是：两组各 4 个 CPU，4 个任务都只允许在第一组的 CPU 3 和第二组的三个 CPU 上运行。按组均衡会两组各放 2 个，结果 CPU 3 上挤 2 个任务，第二组却空着一个 CPU。下层均衡发现“有任务因亲和性搬不动”时，会把父层本地组的 `imbalance` 置 1（5.11 节），父层于是把这个组视为最需要帮助的组之一，绕开常规的平均值判断。
 
@@ -567,8 +594,8 @@ balanced:
    - asym packing：优先从优先级更低的 CPU 所在组拉；
    - misfit：misfit 负载更大者胜；
    - SMT 均衡：任一方有空闲 CPU 时按“有余量”规则比较，否则按“满载”规则；
-   - 满载：比较 `avg_load`，但满载组不计算 `avg_load`（都为 0），实际效果是保留先遇到的组，除非已选中的组是 SMT 组；
-   - 有余量：一个是 SMT 组、一个不是时，SMT 组上只有一个任务就不选它（不想把一个核心拉空），否则选它；然后选空闲 CPU 更少、任务更多的组。
+   - 满载：先比较 `avg_load`，但满载组不计算它（都为 0）。相等时，若当前最忙组是 SMT 组就保留它，否则改选候选组。实际效果是：选中遇到的第一个 SMT 组；没有 SMT 组时选最后遇到的满载组。源码注释说“选第一个”，与代码不一致，这里以代码为准（[fair.c#L10807-L10832](../../linux/kernel/sched/fair.c#L10807-L10832)）；
+   - 有余量：候选组与当前最忙组一个是 SMT 组、一个不是时，只有候选组是 SMT 组且可运行公平任务不超过 1 个才不选它（不想把一个核心拉空），其余情况一律改选候选组。否则选空闲 CPU 更少的组，空闲 CPU 数相同时选 `sum_nr_running` 更多的组（[fair.c#L10834-L10861](../../linux/kernel/sched/fair.c#L10834-L10861)）。
 
 ### 5.6 是否值得均衡：`sched_balance_find_src_group()`
 
@@ -592,18 +619,21 @@ flowchart TB
     B6 -->|是| F
     B6 -->|否| B7{"目标 CPU 空闲?"}
     B7 -->|否| N
-    B7 -->|是| B8{"SMT 组向非 SMT 组均衡?"}
+    B7 -->|是| B8{"最忙组为 SMT 均衡类型，<br/>且本地组不是 SMT 组?"}
     B8 -->|是| F
-    B8 -->|否| B9{"空闲 CPU 数相差不超过 1，<br/>或最忙组只有 1 个可运行公平任务?"}
+    B8 -->|否| B9{"最忙组多于 1 个 CPU 且<br/>本地空闲 CPU 数 ≤ 最忙组空闲 CPU 数 + 1，<br/>或最忙组只有 1 个可运行公平任务?"}
     B9 -->|是| N
     B9 -->|否| F
+    F --> B10{"imbalance 为 0?"}
+    B10 -->|是| N
+    B10 -->|否| R["返回最忙组"]
 ```
 
-图中省略了 EAS 相关的一个跳过条件，因为本配置下它恒不成立。需要注意三点：
+图中省略了 EAS 相关的一个跳过条件，因为本配置下它恒不成立。`calculate_imbalance()` 也可能算出 0（例如本地 `avg_load` 已不低于最忙组或全域平均、`sibling_imbalance()` 为 0、NUMA 层容忍少量失衡），此时同样视为均衡（[fair.c#L11701-L11704](../../linux/kernel/sched/fair.c#L11701-L11704)）。需要注意三点：
 
 - **只有本地组也过载时才比较 `avg_load`**，并且还要求最忙组超出本地 `imbalance_pct`，这是对“负载”这一度量的保守使用：只要任务还能找到空闲算力，就优先按任务数或空闲 CPU 数均衡。
-- **最忙组没有过载时，只有空闲的 CPU 才会去拉**（[fair.c#L11663-L11671](../../linux/kernel/sched/fair.c#L11663-L11671)）。忙 CPU 再拉任务只会把失衡挪到自己身上。
-- **空闲 CPU 数只差 1 不算失衡**，否则任务会在两个组之间来回搬。
+- **最忙组没有过载时，只有空闲的 CPU 才会去拉**（[fair.c#L11663-L11671](../../linux/kernel/sched/fair.c#L11663-L11671)）。忙 CPU 再拉任务只会把失衡挪到自己身上。例外是图中直接进入计算的几类强制情形：misfit、asym packing 和亲和性失衡，其中 `group_imbalanced` 不要求目标 CPU 空闲（[fair.c#L11595-L11613](../../linux/kernel/sched/fair.c#L11595-L11613)）。
+- **最忙组多于 1 个 CPU 时，空闲 CPU 数只差 1 不算失衡**，否则任务会在两个组之间来回搬（[fair.c#L11679-L11698](../../linux/kernel/sched/fair.c#L11679-L11698)）。
 
 源码在这里还用注释给出了一张“本地组类型 × 最忙组类型”的决策矩阵（[fair.c#L11547-L11564](../../linux/kernel/sched/fair.c#L11547-L11564)），可与上图对照阅读。
 
@@ -626,9 +656,9 @@ flowchart TB
 
 “本地有余量”的分支在除以 2 之前，还会在 NUMA 层调用 `adjust_numa_imbalance()`，容忍少量失衡（8.2 节）。
 
-**为什么共享 LLC 时不用利用率。** 源码只在 `!(sd->flags & SD_SHARE_LLC)` 时使用 `migrate_util`（[fair.c#L11430-L11458](../../linux/kernel/sched/fair.c#L11430-L11458)）。在共享 LLC 的层次（SMT、MC），即使组有余量，也按任务个数均衡；只有跨 LLC（如 NUMA 层）时，才按“本地组还能装多少利用率”来拉。源码没有直接解释这个选择，一种合理的理解是：同一 LLC 内搬任务代价低，按任务个数摊平最直接；跨 LLC 搬任务代价高，只在对方确实超载、本地确有余量时按余量搬。
+**为什么共享 LLC 时不用利用率。** 源码只在 `!(sd->flags & SD_SHARE_LLC)` 时使用 `migrate_util`（[fair.c#L11430-L11458](../../linux/kernel/sched/fair.c#L11430-L11458)）。在共享 LLC 的层次（SMT、MC），即使最忙组已经过载，只要本地组有余量，也按任务个数均衡；只有跨 LLC（如 NUMA 层）时，才按“本地组还能装多少利用率”来拉。源码没有直接解释这个选择，一种合理的理解是：同一 LLC 内搬任务代价低，按任务个数摊平最直接；跨 LLC 搬任务代价高，只在对方确实超载、本地确有余量时按余量搬。
 
-**`sibling_imbalance()`**（[fair.c#L10570-L10603](../../linux/kernel/sched/fair.c#L10570-L10603)）在两组核心数相同时，就是两组运行任务数之差；核心数不同时，按“每核任务数相等”归一化后取整。另外，本地组完全空、最忙组有多个任务而差值不超过 1 时，把结果提升到 2，确保除以 2 后至少搬一个任务。
+**`sibling_imbalance()`**（[fair.c#L10570-L10603](../../linux/kernel/sched/fair.c#L10570-L10603)）在目标 CPU 不空闲或最忙组没有任务时直接返回 0。因此，在组只有 1 个 CPU 的层（如 SMT 层）或带 `prefer_sibling` 的层上，忙 CPU 即使所在本地组有余量，也不会走这条路径从过载组拉任务，这项工作留给空闲 CPU。两组核心数相同时，结果就是两组运行任务数之差；核心数不同时，按“每核任务数相等”归一化后取整，并且在本地组完全空、最忙组有多个任务而结果不超过 1 时提升到 2，确保除以 2 后至少搬一个任务。
 
 **过载时的公式。** 两组都过载时，目标是让两组的 `avg_load`（每单位算力的负载）都向全域平均值 `sds->avg_load` 靠拢，并且不越过平均值：
 
@@ -643,7 +673,7 @@ env->imbalance = min(
 
 取两者较小值，既不把最忙组降到平均值以下，也不把本地组抬到平均值以上。
 
-**算例一：过载时按负载搬。** 某一层有两个组，各 2 个 CPU，组算力都是 2048。最忙组有 4 个持续运行的 nice 0 任务，本地组有 2 个。各任务的 `load_avg` 都约为 1024，利用率都把各自 CPU 吃满。
+**算例一：过载时按负载搬。** 某一层有两个组，各 2 个 CPU，组算力都是 2048。最忙组有 4 个持续运行的 nice 0 任务，本地组有 2 个。假设所有任务都在根任务组中：本配置启用了 `CONFIG_SCHED_AUTOGROUP`（[.config#L245](../../linux/.config#L245)），任务若位于 autogroup 或 cgroup 中，`cpu_load()` 反映的是组实体的份额，绝对数值会小得多。各任务的 `load_avg` 都约为 1024，利用率都把各自 CPU 吃满。
 
 | 量 | 最忙组 | 本地组 |
 | --- | --- | --- |
@@ -666,7 +696,7 @@ env->imbalance = min(
 - `imbalance` = 3 >> 1 = 1，按任务个数搬 1 个。
 - `sched_balance_find_src_rq()` 选可运行公平任务最多的 CPU 0，从中摘一个任务给 CPU 2。
 
-结果 CPU 0、1、2 各运行一个任务。
+结果 CPU 0、1、2 各运行一个任务。这个结果依赖两个运行时条件：`NI_RANDOM` 的掷骰让 MC 层这次新空闲均衡得以执行（6.2 节）；CPU 0 上排队的那个任务不是缓存热的。MC 层 `cache_nice_tries` 为 1，而新空闲均衡不递增 `nr_balance_failed`，所以若该任务停止运行还不到 `migration_cost_ns`，这次会失败，留给后续的周期均衡（5.9 节、5.11 节）。
 
 ### 5.8 选出最忙运行队列：`sched_balance_find_src_rq()`
 
@@ -705,12 +735,14 @@ env->imbalance = min(
 | 尚未失败过，且任务到了目标队列会是 ineligible | 拒绝 | `PLACE_LAG` 特性下，优先迁移 eligible 的任务（[fair.c#L9624-L9646](../../linux/kernel/sched/fair.c#L9624-L9646)） |
 | 每 CPU 内核线程 | 拒绝 | 它们必须留在原 CPU |
 | 目标 CPU 不在 `p->cpus_ptr` 中 | 拒绝，并设置 `LBF_SOME_PINNED`；非新空闲、非主动均衡且尚未选过替代目标时，在本地组均衡掩码中找一个任务允许的 CPU，记为 `new_dst_cpu` 并设置 `LBF_DST_PINNED` | 5.11 节 |
-| — | 清除 `LBF_ALL_PINNED` | 至少有一个任务能去目标 CPU |
+| — | 清除 `LBF_ALL_PINNED` | 至少有一个任务通过了亲和性检查。在此之前就被拒绝的任务（前四行）不会清除它，所以这个标志的确切含义是“检查过的任务没有一个通过亲和性检查”。另外，`detach_tasks()` 发现源队列只剩不超过 1 个任务时也会清除它（[fair.c#L9825-L9832](../../linux/kernel/sched/fair.c#L9825-L9832)） |
 | 任务正在源 CPU 上运行 | 拒绝 | 只能靠主动均衡 |
 | 主动均衡 | **允许** | 不再考虑缓存热度 |
 | 迁移会损害 NUMA 局部性，或任务缓存热 | 若失败次数已超过 `cache_nice_tries` 则允许，否则拒绝 | 见下 |
 
-**缓存热的判定** `task_hot()`（[fair.c#L9523-L9562](../../linux/kernel/sched/fair.c#L9523-L9562)）：非公平任务、`SCHED_IDLE` 任务、SMT 层（兄弟线程共享缓存）都视为不热；任务是本队列的 `next` 伙伴且目标队列非空时视为热；否则，若任务距上次开始运行不到 `migration_cost_ns`（默认 0.5 ms），视为热。启用 NUMA 平衡时，`migrate_degrades_locality()` 的判断优先：离开首选节点视为“热”，去往首选节点视为“不热”（[fair.c#L9570-L9615](../../linux/kernel/sched/fair.c#L9570-L9615)）。
+**缓存热的判定** `task_hot()`（[fair.c#L9523-L9562](../../linux/kernel/sched/fair.c#L9523-L9562)）：非公平任务、`SCHED_IDLE` 任务、SMT 层（兄弟线程共享缓存）都视为不热；任务是本队列的 `next` 伙伴且目标队列非空时视为热（`CACHE_HOT_BUDDY` 特性）；否则，若当前时刻距任务的 `se.exec_start` 不到 `migration_cost_ns`（默认 0.5 ms），视为热。`exec_start` 在任务运行期间随每次 `update_curr()` 推进到当前时刻（[fair.c#L1232-L1241](../../linux/kernel/sched/fair.c#L1232-L1241)），所以对排队任务而言，它大致是任务上次停止运行的时刻。
+
+启用自动 NUMA 平衡时，`migrate_degrades_locality()` 的判断优先于 `task_hot()`（[fair.c#L9570-L9615](../../linux/kernel/sched/fair.c#L9570-L9615)）。它只在 `SD_NUMA` 层、对有 NUMA 缺页统计的任务、跨节点迁移时起作用：离开首选节点时，若源队列上还有首选节点不是本节点的任务（`nr_running > nr_preferred_running`），视为“热”，否则回到 `task_hot()`；去往首选节点视为“不热”；两者都不是时，`CPU_IDLE` 均衡回到 `task_hot()`，其余情况比较两个节点的缺页权重。
 
 于是 `cache_nice_tries` 的含义很具体：在 MC 层（值为 1），第一次失败后仍然尊重缓存热度，**连续失败超过 1 次**才会搬走缓存热的任务；NUMA 层要超过 2 次；SMT 层不考虑缓存热度。
 
@@ -720,7 +752,7 @@ env->imbalance = min(
 
 ```mermaid
 sequenceDiagram
-    participant D as dst CPU（执行均衡）
+    participant D as 执行均衡的 CPU（通常即 dst CPU）
     participant SRQ as src rq 锁
     participant DRQ as dst rq 锁
     participant O as 其他 CPU（如唤醒者）
@@ -735,13 +767,15 @@ sequenceDiagram
     O-->>O: task_rq_lock(p) 成功，锁到 dst rq
 ```
 
+图中“执行均衡的 CPU”有两种例外：NOHZ 代理均衡时，它是 ILB CPU，dst CPU 是被代理的空闲 CPU（6.3 节）；发生 `LBF_DST_PINNED` 后，dst 会换成本地组的另一个 CPU（5.11 节）。挂任务时锁的始终是 `env->dst_rq`（[fair.c#L9981-L9995](../../linux/kernel/sched/fair.c#L9981-L9995)）。
+
 依据：
 
 - `deactivate_task()` 先把 `p->on_rq` 置为 `TASK_ON_RQ_MIGRATING` 再出队；`activate_task()` 入队后才置回 `TASK_ON_RQ_QUEUED`（[core.c#L2143-L2169](../../linux/kernel/sched/core.c#L2143-L2169)）。
-- `__task_rq_lock()` 在任务处于迁移态时释放锁并自旋等待，直到迁移完成后再重试（[core.c#L720-L737](../../linux/kernel/sched/core.c#L720-L737)）。
-- `sched_balance_rq()` 的注释明确说明：摘下的任务都带有迁移标记，因此可以放心释放源运行队列锁（[fair.c#L12104-L12129](../../linux/kernel/sched/fair.c#L12104-L12129)）。
+- `__task_rq_lock()` 和 `task_rq_lock()` 在任务处于迁移态时释放锁并自旋等待，直到迁移完成后再重试（[core.c#L720-L739](../../linux/kernel/sched/core.c#L720-L739)、[core.c#L744-L781](../../linux/kernel/sched/core.c#L744-L781)）。
+- `sched_balance_rq()` 的注释明确说明：摘下的任务都带有迁移标记，因此可以放心释放源运行队列锁（[fair.c#L12114-L12122](../../linux/kernel/sched/fair.c#L12114-L12122)）。
 
-这样做避免了同时获取两把运行队列锁时必须遵守的加锁顺序，也缩短了源队列被锁住的时间。整个过程在关中断状态下完成；源码没有说明原因，可以推断是为了让迁移态的窗口尽量短，因为其他 CPU 会在这段时间里自旋等待。
+这样做避免了同时获取两把运行队列锁时必须遵守的加锁顺序，也缩短了源队列被锁住的时间。整个过程在关中断状态下完成。源码有一处直接相关的事实：时钟硬中断中的 `sched_tick()` 也会获取本 CPU 运行队列锁（[core.c#L5612](../../linux/kernel/sched/core.c#L5612)），所以持运行队列锁期间必须关中断；两次加锁之间不恢复中断，`attach_tasks()` 便可以直接用不带 irqsave 的 `rq_lock()`。此外可以推断，这也让迁移态的窗口尽量短，因为其他 CPU 会在这段时间里自旋等待（分析）。
 
 `attach_task()` 入队后调用 `wakeup_preempt()`，如果迁来的任务应当抢占目标 CPU 上的当前任务（例如目标 CPU 正在运行 idle），就设置重新调度标志（[fair.c#L9954-L9961](../../linux/kernel/sched/fair.c#L9954-L9961)）。
 
@@ -754,24 +788,25 @@ sequenceDiagram
 | `LBF_NEED_BREAK` | 清除标志，回到 `more_balance` 继续从同一个源队列摘 |
 | `LBF_DST_PINNED` 且仍有 `imbalance` | 部分任务不能去 `dst_cpu`，但能去本地组的另一个 CPU：把原 `dst_cpu` 从 `cpus` 中去掉，改用 `new_dst_cpu` 作为目标，回到 `more_balance`。注释承认，这会让一个 CPU 替同组其他 CPU 拉任务，偶尔可能拉多，由后续均衡纠正 |
 | `LBF_SOME_PINNED` 且仍有 `imbalance` | 把**父域本地组**的 `sgc->imbalance` 置 1，让上一层把本地组当作 `group_imbalanced` 处理（5.4 节） |
-| `LBF_ALL_PINNED` | 源队列上的任务全被亲和性绑定：把源 CPU 从 `cpus` 中去掉；若还有不属于本地组的候选 CPU，回到 `redo` 重新选最忙组 |
+| `LBF_ALL_PINNED` | 源队列上检查过的任务都没通过亲和性检查：把源 CPU 从 `cpus` 中去掉；若还有不属于本地组的候选 CPU，回到 `redo` 重新选最忙组；否则跳到 `out_all_pinned`：保留父域本地组的 `imbalance` 标志留给上层处理，`nr_balance_failed` 清零，`balance_interval` 可以加倍到 `MAX_PINNED_INTERVAL`（[fair.c#L12183-L12200](../../linux/kernel/sched/fair.c#L12183-L12200)、[fair.c#L12280-L12311](../../linux/kernel/sched/fair.c#L12280-L12311)） |
 
 之后根据结果更新调度域状态（[fair.c#L12203-L12317](../../linux/kernel/sched/fair.c#L12203-L12317)）：
 
 - **一个也没搬成**：非新空闲且不是 misfit 迁移时，`nr_balance_failed` 加 1；再判断是否需要主动均衡（5.12 节）。新空闲均衡非常频繁，不计入失败次数，以免过快放宽缓存热约束、频繁触发主动均衡。
 - **搬成了**：`nr_balance_failed` 清零。
-- 上述两种“确实失衡”的情形都把 `balance_interval` 复位为 `min_interval`。例外是想做主动均衡、却发现源 CPU 的当前任务不能在目标 CPU 上运行：这时跳到 `out_one_pinned`，按已均衡的规则退避。
-- **判定为均衡**（`out_balanced`）：在没有出现“全部被绑定”时清除父域本地组的 `imbalance` 标志；`nr_balance_failed` 清零；若不是新空闲或 misfit 迁移，`balance_interval` **加倍**，直到 `max_interval`。全部被绑定时可以一直加倍到 `MAX_PINNED_INTERVAL`（512 ms）。
+- 上述两种“确实失衡”的情形都把 `balance_interval` 复位为 `min_interval`。严格地说，复位条件是“没有发起主动均衡，或重新调用 `need_active_balance()` 仍为真”（[fair.c#L12260-L12263](../../linux/kernel/sched/fair.c#L12260-L12263)）。
+- **例外：`out_one_pinned`**。想做主动均衡、却发现源 CPU 的当前任务不能在目标 CPU 上运行时跳到这里。它既不清零 `nr_balance_failed`（保留刚才的递增），也不清除父域的 `imbalance` 标志，只在不是新空闲或 misfit 迁移时把间隔加倍；此时 `LBF_ALL_PINNED` 可能仍置位，上限可达 `MAX_PINNED_INTERVAL`。
+- **判定为均衡**（`out_balanced`）：在没有出现“全部被绑定”时清除父域本地组的 `imbalance` 标志；`nr_balance_failed` 清零；若不是新空闲或 misfit 迁移，`balance_interval` **加倍**，直到 `max_interval`。全部被绑定时可以一直加倍到 `MAX_PINNED_INTERVAL`（512 ms）。`should_we_balance()` 返回 0、`SD_SERIALIZE` 抢占失败、找不到最忙组或最忙运行队列，都走这条路径。
 
 `balance_interval` 的这种“失衡就复位、均衡就加倍”的调节，使得系统稳定时各层的周期均衡逐渐变稀，一旦出现失衡又立即恢复到最高频率。
 
-**`SD_SERIALIZE`。** 带此标志的层（NUMA 层）进入统计前，必须用 `atomic_try_cmpxchg_acquire()` 把全局变量 `sched_balance_running` 从 0 改为 1，失败就当作已均衡直接返回，不重试；结束时用 `atomic_set_release()` 清零（[fair.c#L12013-L12026](../../linux/kernel/sched/fair.c#L12013-L12026)、[fair.c#L12065-L12071](../../linux/kernel/sched/fair.c#L12065-L12071)）。它只串行化 NUMA 层的均衡，下层仍并行进行。
+**`SD_SERIALIZE`。** 带此标志的层（NUMA 层）进入统计前，必须用 `atomic_try_cmpxchg_acquire()` 把全局变量 `sched_balance_running` 从 0 改为 1，失败就跳到 `out_balanced`，按已均衡处理，不重试；这意味着它也会清零 `nr_balance_failed`、在非新空闲时把间隔加倍。结束时在 `out` 处用 `atomic_set_release()` 清零（[fair.c#L12013-L12026](../../linux/kernel/sched/fair.c#L12013-L12026)、[fair.c#L12065-L12071](../../linux/kernel/sched/fair.c#L12065-L12071)、[fair.c#L12312-L12314](../../linux/kernel/sched/fair.c#L12312-L12314)）。它只串行化 NUMA 层的均衡，下层仍并行进行。
 
 ### 5.12 主动均衡
 
 当最忙 CPU 上唯一值得搬的是**正在运行**的任务时，普通的拉取无能为力。`need_active_balance()`（[fair.c#L11857-L11921](../../linux/kernel/sched/fair.c#L11857-L11921)）在以下任一条件成立时请求主动均衡：
 
-1. asym packing：目标 CPU 空闲且优先级更高（8.3 节）；
+1. asym packing：目标 CPU 空闲，并且优先级更高，或源 CPU 所在核心还有忙的兄弟线程（此时不看优先级，[fair.c#L11868-L11874](../../linux/kernel/sched/fair.c#L11868-L11874)，8.3 节）；
 2. 按任务个数均衡，且 `nr_balance_failed` 已超过 `cache_nice_tries + 2`；
 3. 目标 CPU 空闲，源 CPU 只有 1 个可运行公平任务，源 CPU 算力被 RT/中断明显削减，并且目标 CPU 的算力比源 CPU 高出 `imbalance_pct` 以上；
 4. misfit 迁移。
@@ -780,7 +815,7 @@ sequenceDiagram
 
 请求的过程（[fair.c#L12218-L12255](../../linux/kernel/sched/fair.c#L12218-L12255)）：在源运行队列锁下确认源 CPU 当前任务允许在目标 CPU 上运行；若源队列的 `active_balance` 为 0，置 1 并记下 `push_cpu = this_cpu`；释放锁后调用 `stop_one_cpu_nowait()`，在源 CPU 上排队执行 `active_load_balance_cpu_stop()`。`active_balance` 标志保证同一时刻只有一个主动均衡请求占用 `active_balance_work`。
 
-stopper 线程在源 CPU 上以最高优先级运行，原来正在运行的任务被抢占下来，变成可以摘取的普通排队任务。`active_load_balance_cpu_stop()`（[fair.c#L12362-L12438](../../linux/kernel/sched/fair.c#L12362-L12438)）重新检查两个 CPU 都仍 active、确实运行在源 CPU 上、源队列至少有 2 个任务，然后找到同时覆盖两个 CPU 的调度域，以 `LBF_ACTIVE_LB` 调用 `detach_one_task()` 摘下**一个**任务（主动均衡忽略缓存热度），释放源队列锁后挂到目标队列，最后清除 `active_balance`。成功时把该层的 `nr_balance_failed` 清零。
+stopper 线程在源 CPU 上以最高优先级运行，原来正在运行的任务被抢占下来，变成排队任务。`active_load_balance_cpu_stop()`（[fair.c#L12362-L12438](../../linux/kernel/sched/fair.c#L12362-L12438)）在源队列锁下重新检查：两个 CPU 都仍 active，自己确实运行在源 CPU 上且 `active_balance` 仍置位，源队列 `nr_running` 至少为 2（stopper 自身也计入，[stop_task.c#L43-L47](../../linux/kernel/sched/stop_task.c#L43-L47)）。然后在目标 CPU 的调度域链上找到覆盖源 CPU 的那一层，以 `LBF_ACTIVE_LB` 调用 `detach_one_task()`，从 `cfs_tasks` 表尾摘下第一个可迁移的任务（主动均衡忽略缓存热度，[fair.c#L9785-L9808](../../linux/kernel/sched/fair.c#L9785-L9808)）。摘下的不一定就是刚被抢占的那个任务。成功时把该层的 `nr_balance_failed` 清零。最后仍持源队列锁时清除 `active_balance`，释放锁后用 `attach_one_task()` 挂到目标队列。
 
 ## 6. 三条迁移触发路径
 
@@ -797,7 +832,7 @@ stopper 线程在源 CPU 上以最高优先级运行，原来正在运行的任�
 3. 计算本层间隔；若 `jiffies ≥ last_balance + interval`，就调用 `sched_balance_rq()`。若有任务迁移，重新判断本 CPU 是否还空闲，因为 `LBF_DST_PINNED` 可能使任务去了别的 CPU。
 4. 更新 `last_balance`，并把各层“下次到期时刻”中最早的一个写入 `rq->next_balance`。
 
-“忙”的判定是 `idle != CPU_IDLE && !sched_idle_cpu(cpu)`：一个只运行 `SCHED_IDLE` 任务的 CPU 在这里被当作“不忙”，按空闲 CPU 的间隔均衡（[fair.c#L7031-L7041](../../linux/kernel/sched/fair.c#L7031-L7041)）。
+“忙”的判定是 `idle != CPU_IDLE && !sched_idle_cpu(cpu)`（[fair.c#L12502](../../linux/kernel/sched/fair.c#L12502)）：一个只运行 `SCHED_IDLE` 任务的 CPU 在这里被当作“不忙”，按空闲 CPU 的间隔均衡（`sched_idle_cpu()` 见 [fair.c#L7031-L7041](../../linux/kernel/sched/fair.c#L7031-L7041)）。
 
 **间隔的计算** `get_sd_balance_interval()`（[fair.c#L12319-L12339](../../linux/kernel/sched/fair.c#L12319-L12339)）：
 
@@ -818,7 +853,7 @@ interval = clamp(interval, 1, max_load_balance_interval);
 | MC | 8 ms | 8 × 16 − 1 = 127 ms |
 | NUMA | 16 ms | 16 × 16 − 1 = 255 ms |
 
-这些是 `balance_interval` 尚未加倍时的值。系统持续均衡时，间隔会加倍到 `max_interval`，忙时相应翻倍；上限为 1600 jiffies（3.5 节）。
+这些是 `balance_interval` 尚未加倍时的值。系统持续均衡时，间隔会加倍到 `max_interval`，忙时相应翻倍；上限为 `max_load_balance_interval`，示例机器上约 1500 jiffies（3.5 节）。
 
 ### 6.2 新空闲均衡
 
@@ -833,7 +868,7 @@ interval = clamp(interval, 1, max_load_balance_interval);
 
 1. 算力不对称时清除本 CPU 的 misfit 状态（对称机器上这一步直接返回）；若有待处理的唤醒（`ttwu_pending`），马上就有任务可运行，直接返回 0。
 2. 记录 `idle_stamp` = 当前时刻，用于之后统计空闲时长；CPU 不是 active 时返回。
-3. **开销门槛**：若根域没有过载（没有任何 CPU 多于一个任务），或本 CPU 的平均空闲时长 `avg_idle` 小于最底层调度域的 `max_newidle_lb_cost`，不做均衡，只更新 `next_balance` 后返回。
+3. **开销门槛**：若根域未过载（`rd->overloaded` 为假，即没有 CPU 多于一个可运行任务，也没有 misfit 任务，2.6 节），或本 CPU 的平均空闲时长 `avg_idle` 小于最底层调度域的 `max_newidle_lb_cost`，就不做均衡，直接跳到出口：更新 `next_balance`，并像第 8 步的失败分支一样调用 `nohz_newidle_balance()`（[fair.c#L13128-L13134](../../linux/kernel/sched/fair.c#L13128-L13134)、[fair.c#L13211-L13219](../../linux/kernel/sched/fair.c#L13211-L13219)）。
 4. 释放本 CPU 运行队列锁，补做阻塞负载衰减。
 5. 自下而上遍历调度域。对每一层：若 `avg_idle` 小于“已花费时间 + 本层最大耗时”，停止；若本层有 `SD_BALANCE_NEWIDLE`：
    - `NI_RANDOM` 特性（默认开启，[features.h#L133-L136](../../linux/kernel/sched/features.h#L133-L136)）下按本层历史成功率掷一个 1024 面的骰子，没掷中就只记一次失败，跳过本层；
@@ -862,7 +897,7 @@ interval = clamp(interval, 1, max_load_balance_interval);
 
 **登记与注销。**
 
-- CPU 进入空闲并**真正停掉 tick** 时，`tick_nohz_stop_tick()` 之后调用 `nohz_balance_enter_idle()`（[tick-sched.c#L1232-L1235](../../linux/kernel/time/tick-sched.c#L1232-L1235)）。它设置本 CPU 的 `has_blocked_load`，把本 CPU 加入 `nohz.idle_cpus_mask`、`nr_cpus` 加 1，从所在 LLC 的 `nr_busy_cpus` 中减 1，置 `nohz.needs_update` 和 `nohz.has_blocked`（[fair.c#L12817-L12868](../../linux/kernel/sched/fair.c#L12817-L12868)）。
+- CPU 进入空闲时，`tick_nohz_idle_stop_tick()` 在 tick 由运行变为**真正停止**的那一刻调用 `nohz_balance_enter_idle()`（[tick-sched.c#L1224-L1235](../../linux/kernel/time/tick-sched.c#L1224-L1235)）。它设置本 CPU 的 `has_blocked_load`，把本 CPU 加入 `nohz.idle_cpus_mask`、`nr_cpus` 加 1，从所在 LLC 的 `nr_busy_cpus` 中减 1，置 `nohz.needs_update` 和 `nohz.has_blocked`。非 active 或挂 NULL 域的 CPU 直接返回；若本 CPU 已经登记过（中间没有出现忙 tick），只重新置 `has_blocked_load` 和 `nohz.has_blocked`（[fair.c#L12817-L12868](../../linux/kernel/sched/fair.c#L12817-L12868)）。
 - CPU 恢复忙碌后的**第一个 tick** 中，`nohz_balancer_kick()` 先调用 `nohz_balance_exit_idle()` 做反向操作（[fair.c#L12783-L12795](../../linux/kernel/sched/fair.c#L12783-L12795)）。CPU 下线前也会调用它（[core.c#L8465-L8468](../../linux/kernel/sched/core.c#L8465-L8468)）。
 
 注释特意说明：登记和注销故意不与每次进出空闲对齐，而是挂在停 tick 和下一个忙 tick 上，以免在微秒级频繁进出空闲时造成全局掩码的争用（[fair.c#L13013-L13027](../../linux/kernel/sched/fair.c#L13013-L13027)）。
@@ -892,7 +927,7 @@ interval = clamp(interval, 1, max_load_balance_interval);
 
 **踢醒的过程。** `kick_ilb()`（[fair.c#L12609-L12645](../../linux/kernel/sched/fair.c#L12609-L12645)）：完整均衡时先把 `nohz.next_balance` 推到下一个 jiffy，避免别的忙 CPU 紧接着重复踢；`find_new_ilb()` 在 NOHZ 空闲集合与 `HK_TYPE_KERNEL_NOISE` housekeeping 集合的交集中找一个确实空闲的 CPU（[fair.c#L12583-L12601](../../linux/kernel/sched/fair.c#L12583-L12601)），这样 `nohz_full` 隔离的 CPU 不会被选来做 ILB；若目标 CPU 已经带有全部请求位就不再重复；用 `atomic_fetch_or()` 把请求位合并到目标 CPU 的 `nohz_flags`，只有**第一个**设置请求位的发起者负责发送 IPI，因为目标的 `nohz_csd` 只有一个。
 
-IPI 到达后，`nohz_csd_func()` 原子地取走并清除请求位，若本 CPU 仍空闲，就把请求位存入 `rq->nohz_idle_balance`，置 `rq->idle_balance`，并触发 `SCHED_SOFTIRQ`（[core.c#L1314-L1331](../../linux/kernel/sched/core.c#L1314-L1331)）。
+IPI 到达后，`nohz_csd_func()` 原子地取走并清除请求位，若本 CPU 仍空闲，就把请求位存入 `rq->nohz_idle_balance`，置 `rq->idle_balance`，并触发 `SCHED_SOFTIRQ`（[core.c#L1314-L1331](../../linux/kernel/sched/core.c#L1314-L1331)）。若目标 CPU 正处于设置了 `TIF_POLLING_NRFLAG` 的轮询空闲，发起方只设置重新调度标志而不发 IPI（[core.c#L3844-L3849](../../linux/kernel/sched/core.c#L3844-L3849)）；`nohz_csd_func()` 改由 idle 线程在 `flush_smp_call_function_queue()` 中执行，挂起的软中断随后处理（[idle.c#L378](../../linux/kernel/sched/idle.c#L378)、[smp.c#L610-L626](../../linux/kernel/smp.c#L610-L626)）。运行时走哪条路径取决于目标 CPU 当时的空闲状态，静态分析无法确定。
 
 **代理均衡。** 软中断中，`sched_balance_softirq()` 先调用 `nohz_idle_balance()`，有请求就执行 `_nohz_idle_balance()` 并直接返回，不再做本 CPU 的普通均衡（[fair.c#L12996-L13011](../../linux/kernel/sched/fair.c#L12996-L13011)）。源码注释给出的原因是：先让各个空闲 CPU 都有机会拉任务，否则本 CPU 可能只在自己的域里拉到任务就结束了。
 
@@ -907,31 +942,35 @@ IPI 到达后，`nohz_csd_func()` 原子地取走并清除请求位，若本 CPU
 
 **内存序。** 登记与代理均衡之间存在竞争：一个 CPU 刚进入 NOHZ 空闲，ILB 可能已经开始遍历。源码用成对的屏障保证不会漏掉：登记方先写掩码和计数，`smp_mb__after_atomic()`，再写 `has_blocked`/`needs_update`；ILB 方先清 `has_blocked`/`needs_update`，`smp_mb()`，再读掩码（[fair.c#L12847-L12867](../../linux/kernel/sched/fair.c#L12847-L12867)、[fair.c#L12906-L12925](../../linux/kernel/sched/fair.c#L12906-L12925)）。于是，ILB 要么在掩码中看到新 CPU，要么之后看到它重新置起的 `has_blocked`，从而再安排一次更新。
 
-下面的时序图展示一次完整的 NOHZ 均衡。图中把 CPU 3、CPU 9 作为示例，并非固定角色。
+下面的时序图展示一次完整的 NOHZ 均衡，并用注释标出各步所在的执行上下文。图中把 CPU 3、CPU 9 作为示例，并非固定角色；图按发 IPI 的常见情形绘制，省略了 `update_rq_clock()`、请求位检查等细节。
 
 ```mermaid
 sequenceDiagram
-    participant B as CPU 3（忙，tick 中）
+    participant B as CPU 3（忙）
     participant N as nohz 全局状态
     participant I as CPU 9（ILB，停 tick 空闲）
     participant X as 其他停 tick 空闲 CPU
     Note over I,X: 之前停 tick 时 nohz_balance_enter_idle() 已登记
+    Note over B: tick（时钟硬中断）
     B->>B: sched_tick() → sched_balance_trigger()
     B->>B: nohz_balancer_kick()：nr_running ≥ 2，到期
     B->>N: kick_ilb()：next_balance = jiffies+1
-    B->>I: find_new_ilb() 选中 CPU 9，fetch_or nohz_flags，IPI
+    B->>I: find_new_ilb() 选中 CPU 9，fetch_or nohz_flags，发 IPI
+    Note over I: IPI 处理（硬中断）
     I->>I: nohz_csd_func()：取走标志，raise SCHED_SOFTIRQ
-    I->>I: sched_balance_softirq() → _nohz_idle_balance()
+    Note over I: 软中断
+    I->>I: sched_balance_softirq() → nohz_idle_balance() → _nohz_idle_balance()
     loop 遍历 idle_cpus_mask（从 CPU 10 开始环绕，最后是 CPU 9）
         I->>X: 更新阻塞负载；到期则 sched_balance_domains(rq_X, CPU_IDLE)
-        X-->>X: 被拉来任务时，wakeup_preempt() 使其离开空闲
+        I->>X: 拉到任务时 attach_task() → wakeup_preempt()，对 rq_X 请求重新调度
+        X-->>X: 收到重新调度请求，离开 idle 运行新任务
     end
     I->>N: 写回 nohz.next_balance、next_blocked
 ```
 
-**进入空闲前就地更新。** 新空闲均衡失败、本 CPU 预计空闲较久且空闲 CPU 的阻塞负载需要更新时，`nohz_newidle_balance()` 只在本 CPU 的 `nohz_flags` 中置 `NOHZ_NEWILB_KICK`（[fair.c#L13042-L13060](../../linux/kernel/sched/fair.c#L13042-L13060)）。随后 idle 循环 `do_idle()` 开头的 `nohz_run_idle_balance()` 在没有其他请求、也不需要重新调度时，直接调用 `_nohz_idle_balance(..., NOHZ_STATS_KICK)`。源码注释说明这样既不必唤醒别的空闲 CPU，也避开了本 CPU 进入空闲前关抢占、关中断的阶段，因为更新可能耗时较长（[idle.c#L276-L284](../../linux/kernel/sched/idle.c#L276-L284)、[fair.c#L13028-L13040](../../linux/kernel/sched/fair.c#L13028-L13040)）。
+**进入空闲前就地更新。** 新空闲均衡失败、本 CPU 预计空闲较久且空闲 CPU 的阻塞负载需要更新时，`nohz_newidle_balance()` 只在本 CPU 的 `nohz_flags` 中置 `NOHZ_NEWILB_KICK`（[fair.c#L13042-L13060](../../linux/kernel/sched/fair.c#L13042-L13060)）。随后 idle 循环 `do_idle()` 开头的 `nohz_run_idle_balance()` 在没有其他请求、也不需要重新调度时，直接调用 `_nohz_idle_balance(..., NOHZ_STATS_KICK)`。源码注释说明这样既不必唤醒别的空闲 CPU，也避开了本 CPU 进入空闲前关抢占、关中断的阶段，因为更新可能耗时较长（[idle.c#L276-L284](../../linux/kernel/sched/idle.c#L276-L284)、[fair.c#L13013-L13040](../../linux/kernel/sched/fair.c#L13013-L13040)）。
 
-**`nohz_full` 的影响。** 本配置启用了 `CONFIG_NO_HZ_FULL`。若用启动参数把某些 CPU 设为 `nohz_full`，它们只运行一个任务时也会停 tick，于是不会在 tick 中触发自己的周期均衡和 `nohz_balancer_kick()`；它们也不会被选为 ILB。这属于运行时配置，本章不展开。
+**`nohz_full` 的影响。** 本配置启用了 `CONFIG_NO_HZ_FULL`。若用启动参数 `nohz_full=` 把某些 CPU 移出 `HK_TYPE_KERNEL_NOISE` housekeeping 集合（[isolation.c#L190-L198](../../linux/kernel/sched/isolation.c#L190-L198)），它们只运行一个公平任务时也可以停 tick（[core.c#L1350-L1386](../../linux/kernel/sched/core.c#L1350-L1386)），于是不会在 tick 中触发自己的周期均衡和 `nohz_balancer_kick()`；为它们补做的远程 tick `sched_tick_remote()` 只调用 `task_tick`，不调用 `sched_balance_trigger()`（[core.c#L5685-L5725](../../linux/kernel/sched/core.c#L5685-L5725)）。它们也不会被选为 ILB。不加 `nohz_full=` 时，housekeeping 集合就是全部 CPU（[isolation.c#L61-L67](../../linux/kernel/sched/isolation.c#L61-L67)），本章主线不受影响。这属于运行时配置，本章不展开。
 
 ## 7. 放置：唤醒、fork 与 exec 时选择 CPU
 
@@ -947,7 +986,7 @@ sequenceDiagram
 
 `select_task_rq_fair()`（[fair.c#L8722-L8800](../../linux/kernel/sched/fair.c#L8722-L8800)）的逻辑：
 
-1. **唤醒时**记录唤醒关系；EAS 分支在本配置下不执行；计算 `want_affine`：`wake_wide()` 判定不需要“铺开”，且唤醒者所在 CPU 在任务允许范围内。
+1. **唤醒时**记录唤醒关系；若带 `WF_CURRENT_CPU` 且当前 CPU 在任务允许范围内，直接返回当前 CPU（[fair.c#L8750-L8752](../../linux/kernel/sched/fair.c#L8750-L8752)）；EAS 分支在本配置下不执行；计算 `want_affine`：`wake_wide()` 判定不需要“铺开”，且唤醒者所在 CPU 在任务允许范围内。
 2. 从唤醒者所在 CPU 开始向上遍历调度域：
    - 若 `want_affine`、本层有 `SD_WAKE_AFFINE` 且范围包含 `prev_cpu`，就在唤醒者 CPU 与 `prev_cpu` 之间做 `wake_affine()` 选择，然后停止遍历，走快路径；
    - 否则，若本层带 `sd_flag`（对应场景的 `SD_BALANCE_*`），就记下本层并继续向上；本层不带该标志且不需要亲和时停止。于是 `sd` 是从底层起连续带该标志的最高一层。
@@ -973,6 +1012,7 @@ sequenceDiagram
 ```c
 /* 伪代码：sched_balance_find_dst_cpu() */
 sd = 最高的带 sd_flag 的调度域;
+if (sd 范围与 p->cpus_ptr 无交集) return prev_cpu;
 while (sd) {
     if (!(sd->flags & sd_flag)) { sd = sd->child; continue; }
     group = sched_balance_find_dst_group(sd, p, cpu);   /* 最闲组，或 NULL 表示本地组就够好 */
@@ -993,7 +1033,7 @@ return new_cpu;
 
 唤醒快路径（[fair.c#L7980-L8105](../../linux/kernel/sched/fair.c#L7980-L8105)）只在 `target` 所在的 LLC 内找空闲 CPU，依次尝试：`target` 本身、与 `target` 共享缓存的 `prev_cpu`、任务最近用过的 CPU；之后在 LLC 域内扫描，SMT 系统中若 `has_idle_cores` 提示可能有整核空闲，就优先找整核空闲的 CPU。
 
-扫描范围由负载均衡计算的 `nr_idle_scan` 限制（`SIS_UTIL` 特性，[fair.c#L7845-L7907](../../linux/kernel/sched/fair.c#L7845-L7907)）。5.3 节提到，周期均衡在 LLC 层根据利用率总和计算这个值：LLC 越忙，扫描的 CPU 越少，利用率达到过载阈值（约 85%）时完全不扫描（[fair.c#L11229-L11299](../../linux/kernel/sched/fair.c#L11229-L11299)）。这是迁移均衡与放置之间的一条直接数据通道：周期均衡顺带估计“LLC 里大概还有多少空闲 CPU”，唤醒路径据此决定花多少代价去找。
+扫描范围由负载均衡计算的 `nr_idle_scan` 限制（`SIS_UTIL` 特性，[fair.c#L7845-L7907](../../linux/kernel/sched/fair.c#L7845-L7907)）：它为 0 时直接放弃扫描；逐个找空闲 CPU 时最多检查 `nr_idle_scan` 个；`has_idle_cores` 为真、按整核查找时不受这个数目限制（[fair.c#L7853-L7861](../../linux/kernel/sched/fair.c#L7853-L7861)、[fair.c#L7888-L7900](../../linux/kernel/sched/fair.c#L7888-L7900)）。5.3 节提到，周期均衡在 LLC 层根据利用率总和计算这个值：LLC 越忙，扫描的 CPU 越少，利用率达到过载阈值（约 85%）时完全不扫描（[fair.c#L11229-L11299](../../linux/kernel/sched/fair.c#L11229-L11299)）。这是迁移均衡与放置之间的一条直接数据通道：周期均衡顺带估计“LLC 里大概还有多少空闲 CPU”，唤醒路径据此决定花多少代价去找。
 
 快路径的完整细节（`select_idle_core()`、cluster 优先等）属于唤醒路径的话题，本章不再展开。
 
@@ -1017,13 +1057,13 @@ SMT 兄弟线程共享执行单元，两个任务挤在同一个核心上，各�
 - **`imb_numa_nr` 的计算**（[topology.c#L2537-L2593](../../linux/kernel/sched/topology.c#L2537-L2593)）：在共享 LLC 层之上的第一层，若每个节点只有一个 LLC，阈值为该层 CPU 数的 1/8；有多个 LLC 时为 LLC 个数；更高层按范围倍数放大。示例机器上，这个计算发生在构建阶段尚未删除的 PKG 层：8 个 CPU、1 个 LLC，阈值为 8 >> 3 = 1，NUMA 层按 16 / 16 的倍数得到 1。
 - **首选节点**：自动 NUMA 平衡启用时，任务有首选节点。`migrate_degrades_locality()` 让离开首选节点的迁移被当作“缓存热”处理，去往首选节点的迁移被鼓励；`fbq_type` 在 NUMA 层优先迁移没有首选节点或不在首选节点上的任务（[fair.c#L10867-L10895](../../linux/kernel/sched/fair.c#L10867-L10895)、[fair.c#L11728-L11750](../../linux/kernel/sched/fair.c#L11728-L11750)）。
 
-本配置在多节点机器上默认关闭自动 NUMA 平衡（第 0 节）。关闭时 `sched_numa_balancing` 静态键为假，`migrate_degrades_locality()` 直接返回 0；任务没有首选节点，`nr_numa_running` 恒为 0，`fbq_type` 分类不会过滤任何运行队列（[fair.c#L1650-L1654](../../linux/kernel/sched/fair.c#L1650-L1654)）。
+本配置在多节点机器上默认关闭自动 NUMA 平衡（第 0 节）。关闭时 `sched_numa_balancing` 静态键为假，`migrate_degrades_locality()` 直接返回 0；任务没有首选节点（`numa_preferred_nid` 保持初值 `NUMA_NO_NODE`，[init_task.c#L190](../../linux/init/init_task.c#L190)），`nr_numa_running` 恒为 0，`fbq_type` 分类不会过滤任何运行队列（[fair.c#L1650-L1654](../../linux/kernel/sched/fair.c#L1650-L1654)）。同理，`sched_balance_find_dst_group()` 在 NUMA 层“有余量”分支中按首选节点返回的两条判断也不会命中（[fair.c#L11177-L11189](../../linux/kernel/sched/fair.c#L11177-L11189)），只剩 `adjust_numa_imbalance()` 的容忍规则。
 
 ### 8.3 不对称：ITMT 与算力差异
 
 x86 上有两种不对称机制，都取决于运行时平台检测：
 
-**ITMT（asym packing）。** 部分处理器的个别核心能跑到更高频率。平台驱动调用 `sched_set_itmt_support()` 后，`sysctl_sched_itmt_enabled` 置 1，拓扑重建时 CLS、MC、PKG 层带上 `SD_ASYM_PACKING`（[itmt.c#L101-L134](../../linux/arch/x86/kernel/itmt.c#L101-L134)、[smpboot.c#L456-L473](../../linux/arch/x86/kernel/smpboot.c#L456-L473)）。各 CPU 的优先级由 `arch_asym_cpu_priority()` 给出（[itmt.c#L168](../../linux/arch/x86/kernel/itmt.c#L168)）。此时负载均衡会主动把任务往优先级更高的空闲 CPU 上集中：`group_asym_packing` 分类、按任务个数搬全部任务、必要时主动均衡；在核心之间比较优先级时，只有整核空闲才算（[fair.c#L10493-L10539](../../linux/kernel/sched/fair.c#L10493-L10539)）。
+**ITMT（asym packing）。** 部分处理器的个别核心能跑到更高频率。平台驱动调用 `sched_set_itmt_support()` 后，`sysctl_sched_itmt_enabled` 置 1，拓扑重建时 CLS、MC、PKG 层带上 `SD_ASYM_PACKING`（[itmt.c#L101-L134](../../linux/arch/x86/kernel/itmt.c#L101-L134)、[smpboot.c#L456-L491](../../linux/arch/x86/kernel/smpboot.c#L456-L491)）。各 CPU 的优先级由 `arch_asym_cpu_priority()` 给出（[itmt.c#L168](../../linux/arch/x86/kernel/itmt.c#L168)）。此时负载均衡会主动把任务往优先级更高的空闲 CPU 上集中：`group_asym_packing` 分类、按任务个数搬全部任务、必要时主动均衡；在核心之间比较优先级时，只有整核空闲才算（[fair.c#L10493-L10539](../../linux/kernel/sched/fair.c#L10493-L10539)）。
 
 **算力不对称与 misfit。** `arch_scale_cpu_capacity()` 在 x86 上默认返回 1024；只有 intel_pstate 判定为混合架构且系统没有 SMT 时，才启用混合算力缩放并关闭 ITMT（[aperfmperf.c#L428-L434](../../linux/arch/x86/kernel/cpu/aperfmperf.c#L428-L434)、[intel_pstate.c#L1157-L1167](../../linux/drivers/cpufreq/intel_pstate.c#L1157-L1167)）。此时调度域自动获得 `SD_ASYM_CPUCAPACITY`，tick 中的 `update_misfit_status()` 会在当前任务装不下本 CPU 时记录 `misfit_task_load`；“装得下”由 `fits_capacity()` 判断，要求利用率低于算力的 80%（[fair.c#L104](../../linux/kernel/sched/fair.c#L104)）（[fair.c#L5262-L5285](../../linux/kernel/sched/fair.c#L5262-L5285)、[fair.c#L13588-L13605](../../linux/kernel/sched/fair.c#L13588-L13605)），负载均衡用 `migrate_misfit` 把它迁到更强的 CPU，并避免把任务从强 CPU 拉到弱 CPU（[fair.c#L10739-L10760](../../linux/kernel/sched/fair.c#L10739-L10760)）。
 
@@ -1033,22 +1073,22 @@ x86 上有两种不对称机制，都取决于运行时平台检测：
 
 ### 8.5 组调度与带宽控制
 
-开启组调度后，任务负载要按层级比例折算（4.2 节）；带宽控制下，不能把任务迁到目标 CPU 上被限流的组队列中（5.9 节）。这两点的细节见 [cpu 控制器章 3.2 节](../cgroup2/cpu.md)。
+开启组调度后，任务负载要按层级比例折算（4.2 节）；带宽控制下，不能把任务迁到目标 CPU 上被限流的组队列中（5.9 节）。这两点的细节见 [cpu 控制器章 3.1 节](../cgroup2/cpu.md)。
 
 ### 8.6 隔离的 CPU
 
-`isolcpus=` 指定的 CPU 不在 `HK_TYPE_DOMAIN` housekeeping 集合中，启动时不会被放进调度域，挂的是 `NULL` 域（3.5 节），因此既不主动均衡，也不会被别人的均衡当作源或目标。cpuset 的 `isolated` 分区有类似效果，见 [cpuset 章 6.2 节](../cgroup2/cpuset.md)。
+`isolcpus=` 不带标志或带 `domain` 标志时，指定的 CPU 不在 `HK_TYPE_DOMAIN` housekeeping 集合中（[isolation.c#L217-L221](../../linux/kernel/sched/isolation.c#L217-L221)、[isolation.c#L247-L249](../../linux/kernel/sched/isolation.c#L247-L249)），启动时不会被放进调度域（[topology.c#L2704](../../linux/kernel/sched/topology.c#L2704)），挂的是 `NULL` 域（3.5 节），因此既不主动均衡，也不会被别人的均衡当作源或目标。cpuset 的 `isolated` 分区有类似效果，见 [cpuset 章 6.2 节](../cgroup2/cpuset.md)。
 
 ## 9. 对照：实时与 deadline 调度类的推拉迁移
 
-实时调度类和 deadline 调度类不使用上述基于调度域的周期均衡，而是在事件发生时立即推（push）或拉（pull），目标是“任何时刻优先级最高的 N 个实时任务在 N 个 CPU 上运行”，而不是按比例分配算力：
+实时调度类和 deadline 调度类不使用上述基于调度域的周期均衡，而是在事件发生时立即推（push）或拉（pull）。它们关心的是让高优先级的实时任务尽快在某个 CPU 上运行，而不是按比例分配算力（这是对推拉规则效果的概括，属于分析）：
 
 | 方面 | 公平调度类 | 实时调度类 |
 | --- | --- | --- |
 | 范围 | 调度域树，分层比较 | 整个 `root_domain` |
 | 何时 | 周期 tick、新空闲、NOHZ 代理 | 任务入队、被抢占、优先级变化、调度前 |
 | 方向 | 主要是拉；主动均衡时推 | 推：本 CPU 多出的可推任务推到运行着更低优先级任务的 CPU；拉：将要运行较低优先级任务时，从过载 CPU 拉更高优先级的任务 |
-| 全局状态 | `rd->overloaded` | `rd->rto_mask`、`rto_count` 标出有多个实时任务的 CPU（[rt.c#L344-L361](../../linux/kernel/sched/rt.c#L344-L361)） |
+| 全局状态 | `rd->overloaded` | `rd->rto_mask`、`rto_count` 标出有**可推送**实时任务的 CPU，即该任务已入队、未在运行、且允许在多个 CPU 上运行（[rt.c#L344-L361](../../linux/kernel/sched/rt.c#L344-L361)、[rt.c#L397-L411](../../linux/kernel/sched/rt.c#L397-L411)、[rt.c#L1446-L1447](../../linux/kernel/sched/rt.c#L1446-L1447)） |
 | 入口 | `sched_balance_rq()` | 推：`push_rt_tasks()`，常经 `queue_balance_callback()` 排队，在本次调度操作的后段持锁执行（[rt.c#L384-L395](../../linux/kernel/sched/rt.c#L384-L395)）；拉：`balance_rt()` → `pull_rt_task()`（[rt.c#L1594-L1615](../../linux/kernel/sched/rt.c#L1594-L1615)） |
 
 deadline 调度类的结构类似，入口是 `push_dl_tasks()`、`pull_dl_task()` 和 `balance_dl()`（[deadline.c#L2477](../../linux/kernel/sched/deadline.c#L2477)、[deadline.c#L2946-L2953](../../linux/kernel/sched/deadline.c#L2946-L2953)）。两者与公平调度类的交集是：RT 和 DL 的利用率会降低 `cpu_capacity`，从而影响公平任务的均衡（8.4 节）；`prev_balance()` 按调度类优先级依次调用各类的 `balance` 回调，高优先级类拉到任务后，公平调度类的新空闲均衡就不再执行（[core.c#L5937-L5966](../../linux/kernel/sched/core.c#L5937-L5966)）。
@@ -1057,12 +1097,12 @@ deadline 调度类的结构类似，入口是 `push_dl_tasks()`、`pull_dl_task(
 
 | 接口 | 内容 | 依据 |
 | --- | --- | --- |
-| `/proc/schedstat` | 每个 CPU 的每个调度域一行：按空闲类型分组的 `lb_count`、`lb_balanced`、`lb_failed`、各类 `lb_imbalance_*`、`lb_gained`、`lb_hot_gained`、`lb_nobusyq`、`lb_nobusyg`，以及主动均衡、exec/fork 放置、唤醒亲和计数 | [stats.c#L134-L160](../../linux/kernel/sched/stats.c#L134-L160) |
+| `/proc/schedstat` | 每个 CPU 的每个调度域一行：按空闲类型分组的 `lb_count`、`lb_balanced`、`lb_failed`、各类 `lb_imbalance_*`、`lb_gained`、`lb_hot_gained`、`lb_nobusyq`、`lb_nobusyg`，以及主动均衡、exec/fork 放置、唤醒亲和计数 | [stats.c#L134-L161](../../linux/kernel/sched/stats.c#L134-L161) |
 | `/sys/kernel/debug/sched/migration_cost_ns`、`nr_migrate` | 缓存热判定阈值；每次均衡最多检查的任务数 | [debug.c#L513-L514](../../linux/kernel/sched/debug.c#L513-L514) |
-| `/sys/kernel/debug/sched/domains/cpuN/domainM/` | 打开 `sched_verbose` 后出现，可查看和修改 `min_interval`、`max_interval`、`busy_factor`、`imbalance_pct`、`cache_nice_tries`、`max_newidle_lb_cost`，只读查看 `flags`、`groups_flags`、`level`、`name` | [debug.c#L566-L640](../../linux/kernel/sched/debug.c#L566-L640) |
-| `/sys/kernel/debug/sched/features` | 开关 `NI_RANDOM`、`SIS_UTIL`、`WA_*`、`LB_MIN`、`CACHE_HOT_BUDDY` 等特性 | [features.h#L47](../../linux/kernel/sched/features.h#L47)、[#L88](../../linux/kernel/sched/features.h#L88)、[#L119-L124](../../linux/kernel/sched/features.h#L119-L124)、[#L136](../../linux/kernel/sched/features.h#L136) |
+| `/sys/kernel/debug/sched/domains/cpuN/domainM/` | 启动参数 `sched_verbose` 或向 `/sys/kernel/debug/sched/verbose` 写 1 后出现，可查看和修改 `min_interval`、`max_interval`、`busy_factor`、`imbalance_pct`、`cache_nice_tries`、`max_newidle_lb_cost`，只读查看 `flags`、`groups_flags`、`level`（即 `sd->level`，与目录名中的序号 M 不一定相同，2.2 节）、`name` | [debug.c#L502](../../linux/kernel/sched/debug.c#L502)、[debug.c#L566-L640](../../linux/kernel/sched/debug.c#L566-L640)、[topology.c#L30](../../linux/kernel/sched/topology.c#L30) |
+| `/sys/kernel/debug/sched/features` | 开关调度特性。与本章有关的有：`NI_RANDOM`（6.2 节的掷骰子）、`SIS_UTIL`（7.4 节的扫描限额）、`WA_IDLE`/`WA_WEIGHT`/`WA_BIAS`（7.2 节 `wake_affine()` 的两步判断与对 `prev_cpu` 的偏置，[fair.c#L7541-L7572](../../linux/kernel/sched/fair.c#L7541-L7572)）、`CACHE_HOT_BUDDY`（5.9 节 `next` 伙伴视为热）、`LB_MIN`（默认关闭；打开后，尚未失败过的按负载迁移会跳过层级负载小于 16 的任务，[fair.c#L9873-L9875](../../linux/kernel/sched/fair.c#L9873-L9875)） | [features.h#L47](../../linux/kernel/sched/features.h#L47)、[#L88](../../linux/kernel/sched/features.h#L88)、[#L119-L124](../../linux/kernel/sched/features.h#L119-L124)、[#L136](../../linux/kernel/sched/features.h#L136) |
 
-`/proc/schedstat` 中的计数只在启用 schedstat 统计时累加（`schedstat_inc()` 受静态键控制，[stats.h#L37-L39](../../linux/kernel/sched/stats.h#L37-L39)），启动参数 `schedstats=` 或 sysctl `kernel.sched_schedstats` 可以打开（[core.c#L4640](../../linux/kernel/sched/core.c#L4640)）。
+`/proc/schedstat` 中的计数只在启用 schedstat 统计时累加（`schedstat_inc()` 受静态键控制，[stats.h#L37-L39](../../linux/kernel/sched/stats.h#L37-L39)），该静态键默认关闭（[core.c#L4574](../../linux/kernel/sched/core.c#L4574)）；启动参数 `schedstats=enable` 或 sysctl `kernel.sched_schedstats` 可以打开（[core.c#L4592-L4611](../../linux/kernel/sched/core.c#L4592-L4611)、[core.c#L4637-L4647](../../linux/kernel/sched/core.c#L4637-L4647)）。
 
 用源码解释几个常见现象：
 
@@ -1072,19 +1112,19 @@ deadline 调度类的结构类似，入口是 `push_dl_tasks()`、`pull_dl_task(
 | 刚运行过的任务很少被迁走 | 缓存热判定，`cache_nice_tries` 次失败内不迁（5.9 节） |
 | 系统稳定后 `lb_count` 增长变慢 | `balance_interval` 均衡时加倍（5.11 节） |
 | 绑核任务导致某些 CPU 长期过载 | `LBF_ALL_PINNED` 把源 CPU 排除，`balance_interval` 可退避到 512 ms；`group_imbalanced` 让上层尝试绕开（5.11 节、5.4 节） |
-| 空闲 CPU 唤醒频繁，但负载均衡并不频繁 | 新空闲均衡受 `avg_idle` 与 `max_newidle_lb_cost` 约束，并按成功率随机跳过（6.2 节） |
+| CPU 频繁进入空闲，但 `lb_count` 中新空闲一列的增长远少于进入空闲的次数 | 新空闲均衡受 `avg_idle` 与 `max_newidle_lb_cost` 约束，并按成功率随机跳过（6.2 节） |
 | `isolcpus` 的 CPU 上任务从不被搬走 | NULL 调度域，不参与均衡（8.6 节） |
 
 ## 11. 回顾
 
 本章的对象和流程可以归纳为“一棵树、一次判定、三条触发、一个镜像”：
 
-- **一棵树**：每个 CPU 有一条从 SMT 到 NUMA 的调度域链。调度域保存每层的均衡参数和运行时状态，是每 CPU 私有的；调度组和算力对象把同一层划分成可比较的单元，被多个 CPU 共享。树在启动和拓扑变化时由 `build_sched_domains()` 构建，经 `cpu_attach_domain()` 删除退化层后用 RCU 发布。
+- **一棵树**：每个 CPU 有一条从 SMT 到 NUMA 的调度域链。调度域保存每层的均衡参数和运行时状态，是每 CPU 私有的；调度组和算力对象把同一层划分成可比较的单元，非 NUMA 层的组由同层 CPU 共享，NUMA 层的组每 CPU 一份但共享算力对象。树在启动和拓扑变化时由 `build_sched_domains()` 构建，经 `cpu_attach_domain()` 删除退化层后用 RCU 发布。
 
-- **一次判定**：`sched_balance_rq()` 是所有迁移路径共用的核心。它先由 `should_we_balance()` 确定每组只有一个 CPU 负责上层；再统计各组的负载、利用率、可运行度和任务数，把组分为七类；根据本地组与最忙组的类别，选择按任务个数、利用率或负载来计算要搬多少；然后从最忙运行队列的最久未运行任务开始，经亲和性、限流、缓存热度、NUMA 局部性过滤后摘下任务，在不同时持有两把锁的前提下挂到目标运行队列。搬不动时，通过 `LBF_*` 标志改目标、标记上层失衡、排除源 CPU 或请求主动均衡；均衡的结果反过来调节 `balance_interval` 和 `nr_balance_failed`。
+- **一次判定**：`sched_balance_rq()` 是所有迁移路径共用的核心。它先由 `should_we_balance()` 确定每组只有一个 CPU 负责上层（新空闲均衡除外）；再统计各组的负载、利用率、可运行度和任务数，把组分为七类；根据本地组与最忙组的类别，选择按任务个数、利用率或负载来计算要搬多少；然后从最忙运行队列的最久未运行任务开始，经亲和性、限流、缓存热度、NUMA 局部性过滤后摘下任务，在不同时持有两把锁的前提下挂到目标运行队列。搬不动时，通过 `LBF_*` 标志改目标、标记上层失衡、排除源 CPU 或请求主动均衡；均衡的结果反过来调节 `balance_interval` 和 `nr_balance_failed`。
 
 - **三条触发**：tick 驱动的周期均衡按层间隔逐层检查；新空闲均衡在 CPU 即将空闲时立即拉任务，用预计空闲时长控制开销；NOHZ 空闲均衡让忙 CPU 在 tick 中判断，再唤醒一个空闲 CPU 代表所有停 tick 的空闲 CPU 执行周期均衡。
 
-- **一个镜像**：唤醒、fork、exec 时的放置用同一套组统计和分类，方向相反——找最闲的组和 CPU 放任务；唤醒还会先在唤醒者与原 CPU 之间做亲和选择，再在 LLC 内找空闲 CPU，扫描范围由周期均衡计算的 `nr_idle_scan` 控制。
+- **一个镜像**：fork、exec（以及设置了 `SD_BALANCE_WAKE` 的唤醒）走慢路径，复用同一套 `group_classify()` 分类，方向相反——找最闲的组和 CPU 放任务；普通唤醒走快路径：先在唤醒者与原 CPU 之间做亲和选择，再在 LLC 内找空闲 CPU，扫描个数受周期均衡计算的 `nr_idle_scan` 约束。
 
 这些机制共同体现了几个取舍：用分层和“每组一个代表”把开销控制在 O(n)；用多种度量与组分类代替单一的负载公式；在缓存、NUMA 局部性与均衡之间，用失败计数逐步放宽约束，而不是一开始就强行搬运。
