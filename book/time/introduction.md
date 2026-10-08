@@ -39,7 +39,7 @@
 
 有两点需要提前说明：
 
-- `CONFIG_NO_HZ_FULL=y` 只是把完全无 tick 的能力编进内核。`tick_nohz_full_running` 只在 [tick_nohz_full_setup()](../../linux/kernel/time/tick-sched.c#L600-L605) 中置为真，而这个函数由 `nohz_full=` 启动参数的解析路径调用（[isolation.c#L198](../../linux/kernel/sched/isolation.c#L198)）。没有这个参数时，系统的行为与“空闲时停 tick”（NO_HZ_IDLE）相同。
+- `CONFIG_NO_HZ_FULL=y` 只是把完全无 tick 的能力编进内核。`tick_nohz_full_running` 只在 [tick_nohz_full_setup()](../../linux/kernel/time/tick-sched.c#L600-L605) 中置为真。这个函数由 `nohz_full=` 启动参数的解析路径调用：[isolation.c#L198](../../linux/kernel/sched/isolation.c#L198) 把该参数注册给 `housekeeping_nohz_full_setup()`，后者经 `housekeeping_setup()` 在 [isolation.c#L176-L177](../../linux/kernel/sched/isolation.c#L176-L177) 调用它。没有这个参数时，tick 只在空闲路径上停止，行为与 `CONFIG_NO_HZ_IDLE` 的“空闲时停 tick”相同；本配置中 `CONFIG_NO_HZ_IDLE` 未设置，这里比较的是行为，不是配置项。
 - `CONFIG_HZ=1000` 下，`TICK_NSEC` 按 [vdso/jiffies.h#L9](../../linux/include/vdso/jiffies.h#L9) 的公式 `(NSEC_PER_SEC + HZ/2) / HZ` 计算，结果为 1 000 000 ns。
 
 ## 1. 时间子系统要解决什么问题
@@ -50,7 +50,7 @@
 
 | 硬件 | 能力 | 在内核中的抽象 |
 | --- | --- | --- |
-| TSC（时间戳计数器） | 每个 CPU 上单调累加的 64 位计数器，读一次只需一条指令 | 时钟源 `clocksource`，名为 `tsc` |
+| TSC（时间戳计数器） | 每个 CPU 上单调累加的 64 位计数器；内核经 [read_tsc()](../../linux/arch/x86/kernel/tsc.c#L1132-L1135) 调用 `rdtsc_ordered()` 读取，后者按 CPU 特性在 `rdtsc`、`lfence; rdtsc`、`rdtscp` 三种指令形式中选一种（[tsc.h#L39-L65](../../linux/arch/x86/include/asm/tsc.h#L39-L65)） | 时钟源 `clocksource`，名为 `tsc` |
 | HPET（高精度事件定时器） | 全局计数器，同时带若干比较器，可以产生中断 | 既能注册为时钟源 `hpet`，也能注册为时钟事件设备 |
 | 本地 APIC 定时器 | 每个 CPU 一个，可编程为周期或单次触发中断 | 时钟事件设备 `clock_event_device`，名为 `lapic` |
 | kvm-clock | 虚拟机中由宿主机共享的时间页 | 时钟源 `kvm-clock` |
@@ -198,7 +198,7 @@ x86 上几个时钟源的评级如下：
 | `xtime_interval`、`raw_interval` | 一个步长对应的（移位后）纳秒数 |
 | `ntp_error` | 已累计时间与 NTP 期望时间之间的误差 |
 
-可见内核只真正“维护”一条主时间线 MONOTONIC，其他时间线都表示为“MONOTONIC + 偏移”。设置墙上时间（`settimeofday()`）只修改 `offs_real` 这类偏移，不会让 MONOTONIC 跳变。
+可见推进时累加的是 REALTIME 的 `xtime_sec` 与 `tkr_mono.xtime_nsec`，而 MONOTONIC 的基准 `tkr_mono.base` 并不单独累加，而是在 [tk_update_ktime_data()](../../linux/kernel/time/timekeeping.c#L669-L683) 中由 `xtime_sec + wall_to_monotonic` 推导出来。因此 REALTIME 与 MONOTONIC 之差就是 `wall_to_monotonic`（`offs_real` 为其相反数）；BOOTTIME、TAI 则是在 MONOTONIC 上再加 `offs_boot`、`offs_tai`。`CLOCK_MONOTONIC_RAW` 另有 `tkr_raw` 独立累加。设置墙上时间（[do_settimeofday64()](../../linux/kernel/time/timekeeping.c#L1434-L1465)）同时改写 `xtime` 和 `wall_to_monotonic`，并保持两者之和不变，所以 MONOTONIC 不会跳变。
 
 **并发保护。** 全局 timekeeper 被包装在 [`struct tk_data`（timekeeping.c#L52-L57）](../../linux/kernel/time/timekeeping.c#L52-L57) 中：
 
@@ -215,7 +215,7 @@ struct tk_data {
 
 它采用“影子副本 + seqcount”的协议：
 
-- **写者**持有 `lock`，先在 `shadow_timekeeper` 上完成全部计算，然后在 `write_seqcount_begin()` / `write_seqcount_end()` 之间把影子整体 `memcpy` 到 `timekeeper`（[timekeeping_update_from_shadow()，timekeeping.c#L708-L755](../../linux/kernel/time/timekeeping.c#L708-L755)）。这样，持有 seqcount 写端的时间只包括拷贝和发布，不包括计算。
+- **写者**持有 `lock`，先在 `shadow_timekeeper` 上完成全部计算，然后在 `write_seqcount_begin()` / `write_seqcount_end()` 之间把影子整体 `memcpy` 到 `timekeeper`（[timekeeping_update_from_shadow()，timekeeping.c#L708-L755](../../linux/kernel/time/timekeeping.c#L708-L755)）。写端窗口内除了拷贝，还有派生字段（如 `tk_update_ktime_data()`）的更新，以及 vDSO、快速时间基准的发布；而 NTP 频率调整与时间累加都在窗口之前、在影子副本上完成（[timekeeping_adjust() 调用，timekeeping.c#L2368](../../linux/kernel/time/timekeeping.c#L2368)）。因此读者需要重试的窗口主要取决于这些发布动作的长度。
 - **读者**不加锁，用 `read_seqcount_begin()` / `read_seqcount_retry()` 包住读取；如果读的过程中有写者，就重试（见 3.1 节）。
 
 同一个发布点还会顺带更新 vDSO 数据页（`update_vsyscall()`）和供 NMI 使用的快速时间基准（`update_fast_timekeeper()`），见 [timekeeping.c#L732-L737](../../linux/kernel/time/timekeeping.c#L732-L737)。
@@ -260,7 +260,7 @@ LAPIC 定时器的评级默认为 100，带 `C3STOP`；如果 CPU 支持 ARAT（
 
 | 字段 | 含义 |
 | --- | --- |
-| `flags` | `TS_FLAG_*` 状态位（[tick-sched.h#L17-L31](../../linux/kernel/time/tick-sched.h#L17-L31)）：`INIDLE` 在空闲中、`STOPPED` tick 已停、`NOHZ` 低精度 nohz 模式、`HIGHRES` 高精度模式等 |
+| `flags` | `TS_FLAG_*` 状态位（[tick-sched.h#L17-L31](../../linux/kernel/time/tick-sched.h#L17-L31)）：`INIDLE` 在空闲中、`STOPPED` tick 已停、`NOHZ` 本 CPU 已启用 NO_HZ（由 [tick_nohz_activate()](../../linux/kernel/time/tick-sched.c#L1491-L1499) 设置，与是否处于高精度模式无关）、`HIGHRES` 高精度模式等 |
 | `sched_timer` | **嵌入**的 hrtimer，用来模拟周期 tick |
 | `last_tick` | 停 tick 前最后一次 tick 的到期时间，恢复时据此对齐 |
 | `next_tick` | tick 停止期间下一次被编程的时刻 |
@@ -318,9 +318,9 @@ struct timer_list {
 
 | 基 | 放什么定时器 | 依据 |
 | --- | --- | --- |
-| `BASE_LOCAL` | 带 `TIMER_PINNED`、必须在本 CPU 到期的定时器 | [get_timer_cpu_base()，timer.c#L914-L926](../../linux/kernel/time/timer.c#L914-L926) |
+| `BASE_LOCAL` | 带 `TIMER_PINNED`（且不带 `TIMER_DEFERRABLE`）、必须在本 CPU 到期的定时器 | [get_timer_cpu_base()，timer.c#L914-L926](../../linux/kernel/time/timer.c#L914-L926) |
 | `BASE_GLOBAL` | 不绑定 CPU 的定时器；本 CPU 空闲时可以由其他 CPU 代为处理 | 同上 |
-| `BASE_DEF` | 带 `TIMER_DEFERRABLE` 的定时器；不会为了它把空闲 CPU 叫醒 | 同上 |
+| `BASE_DEF` | 带 `TIMER_DEFERRABLE` 的定时器（无论是否同时带 `TIMER_PINNED`）；不会为了它把空闲 CPU 叫醒（[timer.h#L26-L29](../../linux/include/linux/timer.h#L26-L29)） | 同上 |
 
 `timer_base` 的核心是一个**分级时间轮**：`vectors[]` 是若干哈希桶（`hlist_head`），`pending_map` 位图记录哪些桶非空，`clk` 是这个时间轮当前走到的 jiffies 值，`next_expiry` 是最早到期的桶对应的时间，`lock` 保护整个基。
 
@@ -462,7 +462,7 @@ static inline u64 timekeeping_cycles_to_ns(const struct tk_read_base *tkr, u64 c
 
 （源码：[kernel/time/timekeeping.c#L378-L400](../../linux/kernel/time/timekeeping.c#L378-L400)，省略了慢路径分支）
 
-`& mask` 让不足 64 位的计数器在回绕后仍能得到正确的差值。慢路径处理两种异常：如果差值的最高位被置位，说明读到的计数比基准还小（例如不同 CPU 上的计数器不同步），此时直接返回基准值，避免时间回退；否则差值只是太大、乘法可能溢出，改用 128 位安全的乘法 `delta_to_ns_safe()`。
+`& mask` 让不足 64 位的计数器在回绕后仍能得到正确的差值。慢路径（差值大于 `max_cycles` 时进入）处理两种情况：如果差值的高位超出掩码的一半范围（即 `delta & ~(mask >> 1)` 非零，说明读到的计数比基准还小，例如不同 CPU 上的计数器不同步），就直接返回基准点的亚秒部分（`xtime_nsec >> shift`），相当于不前进，避免时间回退；否则差值只是太大、乘法可能溢出，改用 128 位安全的乘法 `delta_to_ns_safe()`。
 
 外层的 [ktime_get()（timekeeping.c#L814-L831）](../../linux/kernel/time/timekeeping.c#L814-L831) 用 seqcount 包住读取：
 
@@ -481,11 +481,11 @@ static inline u64 timekeeping_cycles_to_ns(const struct tk_read_base *tkr, u64 c
 这里有两点：
 
 - **读者完全不写共享数据**，所以多个 CPU 同时读时间不会争用缓存行。代价是读到一半遇到写者就要重试。
-- **读时间不依赖 tick**。只要基准点足够新（差值不超过 `max_cycles`），任何时刻读到的都是精确时间。tick 只负责定期把基准点往前挪。
+- **读时间不依赖 tick**。只要差值没有超出计数器的有效位宽（`& mask` 不丢失高位）、也不是负向移动，读到的都是精确时间；差值超过 `max_cycles` 时只是改走慢路径。tick 只负责定期把基准点往前挪。
 
 ### 3.2 推进时间：每个 tick 把差值“结算”进基准
 
-如果基准点一直不动，`delta` 会越来越大，最终超过 `max_cycles` 而无法安全相乘；NTP 对频率的调整也需要有一个点来生效。所以内核要定期把“基准点到现在”的周期数结算进基准，这一步叫做推进（advance）。
+如果基准点一直不动，`delta` 会越来越大：超过 `max_cycles` 后 `delta * mult` 可能溢出，读路径只能改走较慢的 `delta_to_ns_safe()`；超过计数器的有效位宽后，`& mask` 会丢掉高位，结果错误。NTP 对频率的调整也需要有一个点来生效。所以内核要定期把“基准点到现在”的周期数结算进基准，这一步叫做推进（advance）。
 
 入口是 [update_wall_time()（timekeeping.c#L2400-L2405）](../../linux/kernel/time/timekeeping.c#L2400-L2405)，核心是 [__timekeeping_advance()（timekeeping.c#L2328-L2387）](../../linux/kernel/time/timekeeping.c#L2328-L2387)。用伪代码概括：
 
@@ -504,7 +504,7 @@ static inline u64 timekeeping_cycles_to_ns(const struct tk_read_base *tkr, u64 c
     timekeeping_update_from_shadow()：seqcount 写端内把影子拷回，并更新 vDSO
 ```
 
-结算总是以 `cycle_interval`（一个 tick 的周期数）的整数倍进行，余下不足一步的周期数留在 `offset` 中，下次再算，读者在 3.1 节的公式里会自然地把它算进去。
+结算总是以 `cycle_interval`（一个 tick 的周期数）的整数倍进行：`cycle_last` 只前进整数步，余下不足一步的周期数仍留在 `cycle_last` 与计数器当前读数之间，下次再算。读者在 3.1 节的公式里会自然地把它算进去。
 
 “从大到小”的步长来自 [logarithmic_accumulation()（timekeeping.c#L2290-L2322）](../../linux/kernel/time/timekeeping.c#L2290-L2322)。源码注释（[#L2348-L2355](../../linux/kernel/time/timekeeping.c#L2348-L2355)）说明了原因：在 NO_HZ 下 CPU 可能长时间没有 tick，一次要结算很多个 `cycle_interval`；按 2 的幂分块结算，循环次数是 O(log n) 而不是 O(n)。
 
@@ -536,6 +536,8 @@ static inline u64 timekeeping_cycles_to_ns(const struct tk_read_base *tkr, u64 c
 
 此外还有一个兜底：如果某个 CPU 连续 `MAX_STALLED_JIFFIES`（5）次 tick 都看到 jiffies 没变，说明负责的 CPU 可能被卡住了（例如处于 `stop_machine()` 或虚拟机退出），它会自己强制更新一次（[tick-sched.c#L234-L247](../../linux/kernel/time/tick-sched.c#L234-L247)）。
 
+还需要补充：本节开头所说的“只需要一个 CPU 推进”针对的是 tick 路径。tick 已停止时，`irq_enter()` 经 [tick_irq_enter()](../../linux/kernel/time/tick-sched.c#L1551-L1555) 调用的 `tick_nohz_irq_enter()` 会调用 `tick_nohz_update_jiffies()`（[tick-sched.c#L1519-L1537](../../linux/kernel/time/tick-sched.c#L1519-L1537)），它在当前 CPU 上调用 `tick_do_update_jiffies64()`（[tick-sched.c#L710-L718](../../linux/kernel/time/tick-sched.c#L710-L718)）；恢复 tick 的 `tick_nohz_restart_sched_tick()` 也先调用它（[tick-sched.c#L1088-L1091](../../linux/kernel/time/tick-sched.c#L1088-L1091)）。这些路径与 tick 路径一样，经由 `jiffies_lock` 串行化。
+
 ### 3.4 按需编程硬件：从“最早到期时间”到一次中断
 
 在单次触发模式下，硬件只会在被编程的时刻中断一次，所以内核必须始终记住“本 CPU 下一个需要醒来的时刻”，并在它变化时重新编程。
@@ -558,7 +560,7 @@ hrtimer 一侧的规则是：本 CPU 所有 hrtimer 中最早的到期时间记�
 
 （源码：[kernel/time/clockevents.c#L326-L334](../../linux/kernel/time/clockevents.c#L326-L334)）
 
-这段代码体现了 1.2 节所说的两类硬件的配合：先用**时钟源**（经 `ktime_get()`）算出“距离目标还有多少纳秒”，再用**时钟事件设备**自己的 `mult/shift` 把纳秒换算成设备周期。如果目标时间已经过去，返回 `-ETIME`，由调用者决定是立即处理还是强制编程一个最小间隔。
+这段代码体现了 1.2 节所说的两类硬件的配合：先用**时钟源**（经 `ktime_get()`）算出“距离目标还有多少纳秒”，再用**时钟事件设备**自己的 `mult/shift` 把纳秒换算成设备周期。如果目标时间已经过去，返回 `-ETIME`，由调用者决定是立即处理还是强制编程一个最小间隔。另外，函数中还有一条快捷路径：设备带 `CLOCK_EVT_FEAT_KTIME` 时直接调用 `set_next_ktime()`，不做上面的换算（[clockevents.c#L322-L324](../../linux/kernel/time/clockevents.c#L322-L324)）；本配置中的 lapic 设备不带该特性（[apic.c#L495-L509](../../linux/arch/x86/kernel/apic/apic.c#L495-L509)）。
 
 ### 3.5 tick 的三种形态
 
@@ -578,7 +580,7 @@ stateDiagram-v2
 
 **周期模式。** 设备刚装上时是周期模式，中断处理函数是 [tick_handle_periodic()（tick-common.c#L108）](../../linux/kernel/time/tick-common.c#L108)，它调用 [tick_periodic()（tick-common.c#L86-L103）](../../linux/kernel/time/tick-common.c#L86-L103)：如果本 CPU 是 `tick_do_timer_cpu`，就加 jiffies、调用 `update_wall_time()`；然后所有 CPU 都执行 `update_process_times()`。
 
-**切换到单次模式。** 切换不是在注册时立刻发生的，而是在周期 tick 中检查：`update_process_times()` → `run_local_timers()` → [hrtimer_run_queues()（hrtimer.c#L1973-L2005）](../../linux/kernel/time/hrtimer.c#L1973-L2005) 调用 [tick_check_oneshot_change()（tick-sched.c#L1654-L1672）](../../linux/kernel/time/tick-sched.c#L1654-L1672)。该函数在 `check_clocks` 位被设置（新时钟源或新设备注册时由 [tick_clock_notify()](../../linux/kernel/time/tick-sched.c#L1628-L1634) 等设置）、时钟源可用于高精度（`timekeeping_valid_for_hres()`）且 tick 设备支持单次模式（[tick_is_oneshot_available()，tick-common.c#L72-L81](../../linux/kernel/time/tick-common.c#L72-L81)）时返回 1。需要注意，该函数上方的注释说它由 hrtimer 软中断周期调用（[tick-sched.c#L1649-L1652](../../linux/kernel/time/tick-sched.c#L1649-L1652)），但当前源码中的调用点在 `hrtimer_run_queues()`（[hrtimer.c#L1989](../../linux/kernel/time/hrtimer.c#L1989)），而后者由 `run_local_timers()` 在硬中断中调用，本书以代码为准。高精度模式默认开启（[`hrtimer_hres_enabled = true`，hrtimer.c#L698](../../linux/kernel/time/hrtimer.c#L698)，可用 `highres=` 启动参数关闭）。
+**切换到单次模式。** 切换不是在注册时立刻发生的，而是在周期 tick 中检查：`update_process_times()` → `run_local_timers()` → [hrtimer_run_queues()（hrtimer.c#L1973-L2005）](../../linux/kernel/time/hrtimer.c#L1973-L2005) 调用 [tick_check_oneshot_change()（tick-sched.c#L1654-L1672）](../../linux/kernel/time/tick-sched.c#L1654-L1672)。该函数在 `check_clocks` 位被设置（由 [tick_clock_notify()](../../linux/kernel/time/tick-sched.c#L1628-L1634) 设置，它在时钟源切换等路径中被调用）、时钟源可用于高精度（`timekeeping_valid_for_hres()`）且 tick 设备支持单次模式（[tick_is_oneshot_available()，tick-common.c#L72-L81](../../linux/kernel/time/tick-common.c#L72-L81)）时：若参数 `allow_nohz` 为假（高精度模式开启）则返回 1，随后由 `hrtimer_switch_to_hres()` 切换；若 `allow_nohz` 为真（即 `highres=off`），则改为调用 `tick_nohz_switch_to_nohz()` 并返回 0。需要注意，该函数上方的注释说它由 hrtimer 软中断周期调用（[tick-sched.c#L1649-L1652](../../linux/kernel/time/tick-sched.c#L1649-L1652)），但当前源码中的调用点在 `hrtimer_run_queues()`（[hrtimer.c#L1989](../../linux/kernel/time/hrtimer.c#L1989)），而后者由 `run_local_timers()` 在硬中断中调用，本书以代码为准。高精度模式默认开启（[`hrtimer_hres_enabled = true`，hrtimer.c#L698](../../linux/kernel/time/hrtimer.c#L698)，可用 `highres=` 启动参数关闭）。
 
 [hrtimer_switch_to_hres()（hrtimer.c#L723-L738）](../../linux/kernel/time/hrtimer.c#L723-L738) 完成切换：
 
@@ -614,7 +616,7 @@ stateDiagram-v2
 
 时间轮的设计依据写在 [timer.c#L83-L87](../../linux/kernel/time/timer.c#L83-L87) 的注释中：绝大多数超时定时器（网络、磁盘 I/O 等）在到期前就被取消了；即使真的到期，也说明正常流程已经出了问题，晚一点处理影响不大。因此它放弃了精确到期，换取插入删除的低开销和到期的批量处理。
 
-两套定时器在到期处理上是联动的：时间轮本身不编程硬件，它的到期检查由 tick 驱动。[run_local_timers()（timer.c#L2415-L2461）](../../linux/kernel/time/timer.c#L2415-L2461) 在每个 tick 里检查各个基的 `next_expiry`，只有当 `jiffies` 已经越过它时才触发 `TIMER_SOFTIRQ`（[#L2455-L2458](../../linux/kernel/time/timer.c#L2455-L2458)）。而在高精度模式下，tick 本身就是一个 hrtimer。所以在本配置的常见运行状态下，时间轮实际上是“搭着 hrtimer 的车”被驱动的。
+两套定时器在到期处理上是联动的：时间轮本身不编程硬件，它的到期检查由 tick 驱动。[run_local_timers()（timer.c#L2415-L2461）](../../linux/kernel/time/timer.c#L2415-L2461) 在每个 tick 里检查各个基的 `next_expiry`，当 `jiffies` 已经越过它，或 `BASE_DEF` 需要代为处理其他 CPU 委托过来的定时器（`tmigr_requires_handle_remote()`）时，才触发 `TIMER_SOFTIRQ`（[#L2455-L2458](../../linux/kernel/time/timer.c#L2455-L2458)）。而在高精度模式下，tick 本身就是一个 hrtimer。所以在本配置的常见运行状态下，时间轮实际上是“搭着 hrtimer 的车”被驱动的。
 
 ## 4. 实现主线：一次本地定时器中断
 
@@ -651,7 +653,7 @@ sequenceDiagram
 
 ### 4.2 逐层说明
 
-**驱动入口。** [sysvec_apic_timer_interrupt()（apic.c#L1052-L1062）](../../linux/arch/x86/kernel/apic/apic.c#L1052-L1062) 先确认中断（`apic_eoi()`），再调用 [local_apic_timer_interrupt()（apic.c#L1013-L1042）](../../linux/arch/x86/kernel/apic/apic.c#L1013-L1042)，后者只做一件事：调用 `evt->event_handler(evt)`。驱动不知道也不关心当前处于哪种模式。
+**驱动入口。** [sysvec_apic_timer_interrupt()（apic.c#L1052-L1062）](../../linux/arch/x86/kernel/apic/apic.c#L1052-L1062) 先确认中断（`apic_eoi()`），再调用 [local_apic_timer_interrupt()（apic.c#L1013-L1042）](../../linux/arch/x86/kernel/apic/apic.c#L1013-L1042)，后者先检查 `evt->event_handler` 是否为空（为空时视为伪中断，关闭定时器后返回），再统计中断次数，最后调用 `evt->event_handler(evt)`。驱动不知道也不关心当前处于哪种模式。
 
 **hrtimer 层。** [hrtimer_interrupt()（hrtimer.c#L1878-L1967）](../../linux/kernel/time/hrtimer.c#L1878-L1967) 持 `cpu_base->lock` 取当前时间，若软类 hrtimer 有到期的，就触发 `HRTIMER_SOFTIRQ`（[#L1902-L1906](../../linux/kernel/time/hrtimer.c#L1902-L1906)），然后执行硬类到期定时器。每个回调由 `__run_hrtimer()` 调用：调用前把定时器出队、记入 `base->running`，并**释放** `cpu_base->lock`（[hrtimer.c#L1778-L1786](../../linux/kernel/time/hrtimer.c#L1778-L1786)），回调返回后再重新加锁，根据返回值决定是否重新入队。释放锁使回调里可以再启动、取消其他 hrtimer。
 
@@ -661,7 +663,7 @@ sequenceDiagram
 2. `tick_sched_handle()` → [update_process_times()（timer.c#L2467-L2482）](../../linux/kernel/time/timer.c#L2467-L2482)：给当前任务记账、检查时间轮、通知 RCU、调用调度器的 `sched_tick()`、检查 POSIX CPU 定时器。
 3. 如果 tick 已被停止（`TS_FLAG_STOPPED`），返回 `HRTIMER_NORESTART`，由空闲代码或中断退出路径重新安排；否则用 `hrtimer_forward()` 把到期时间推后一个 `TICK_NSEC`，返回 `HRTIMER_RESTART`。
 
-**重新编程。** 所有到期回调处理完后，`hrtimer_interrupt()` 重新计算 `expires_next`，调用 `tick_program_event()` 编程下一次中断（[hrtimer.c#L1910-L1924](../../linux/kernel/time/hrtimer.c#L1910-L1924)）。如果编程时发现目标时刻已经过去，说明回调执行得太久，于是重试，最多 3 次；仍然失败就记录一次“挂起”（hang），把下一次中断推后一段与本次耗时相当、最多 100 ms 的时间，给系统喘息的机会（[#L1926-L1966](../../linux/kernel/time/hrtimer.c#L1926-L1966)）。
+**重新编程。** 所有到期回调处理完后，`hrtimer_interrupt()` 重新计算 `expires_next`，调用 `tick_program_event()` 编程下一次中断（[hrtimer.c#L1910-L1924](../../linux/kernel/time/hrtimer.c#L1910-L1924)）。如果编程时发现目标时刻已经过去，说明回调执行得太久，于是重新处理，最多尝试 3 次；第 3 次仍然失败就记录一次“挂起”（hang），把下一次中断推后一段与本次耗时相当、最多 100 ms 的时间，给系统喘息的机会（[#L1926-L1966](../../linux/kernel/time/hrtimer.c#L1926-L1966)）。
 
 **软中断。** 中断退出时，若有挂起的软中断，就执行 [run_timer_softirq()（timer.c#L2400-L2410）](../../linux/kernel/time/timer.c#L2400-L2410)（依次处理 `BASE_LOCAL`、`BASE_GLOBAL`、`BASE_DEF`，再处理其他空闲 CPU 委托过来的全局定时器）和 `hrtimer_run_softirq()`。两个软中断分别在 [timer.c#L2579](../../linux/kernel/time/timer.c#L2579) 和 [hrtimer.c#L2335](../../linux/kernel/time/hrtimer.c#L2335) 注册。
 
@@ -680,14 +682,14 @@ sequenceDiagram
 | 对象 / 操作 | 执行上下文 | 保护方式 |
 | --- | --- | --- |
 | 读 timekeeper（`ktime_get()` 等） | 任意可抢占或不可抢占上下文；NMI 使用专门的 `ktime_get_mono_fast_ns()` | seqcount 读端，读到并发写时重试 |
-| 推进 timekeeper | tick 中断（硬中断，关中断） | `tk_core.lock` + seqcount 写端 + 影子副本 |
-| `jiffies_64` 更新 | tick 中断，仅 `tick_do_timer_cpu` 一个 CPU | `jiffies_lock` + `jiffies_seq`；64 位快速检查用 acquire/release |
+| 推进 timekeeper | 主要在 tick 中断中经 `update_wall_time()` 推进（关中断）；空闲退出路径经 `tick_do_update_jiffies64()` 也会推进；`adjtimex` 等进程上下文路径经 `__timekeeping_advance()` 推进（[timekeeping.c#L2754](../../linux/kernel/time/timekeeping.c#L2754)） | `tk_core.lock`（raw 自旋锁）+ seqcount 写端 + 影子副本 |
+| `jiffies_64` 更新 | tick 中断，通常由 `tick_do_timer_cpu` 负责；tick 已停止时的中断入口和恢复路径也会在其他 CPU 上调用 `tick_do_update_jiffies64()` | `jiffies_lock` + `jiffies_seq`；64 位快速检查用 acquire/release |
 | hrtimer 队列 | 入队/出队在任意上下文；硬类回调在硬中断中执行，软类在软中断中执行 | 每 CPU 的 `hrtimer_cpu_base::lock`（raw 自旋锁），回调执行期间释放 |
 | 时间轮 | 入队/出队在任意上下文；回调在 `TIMER_SOFTIRQ` 中执行 | 每个 `timer_base::lock`（raw 自旋锁），回调执行期间释放；`running_timer` 标记正在执行的定时器 |
 | tick 设备与时钟事件设备的注册、替换 | 进程上下文或 CPU 热插拔路径 | `clockevents_lock`，关中断 |
 | 时钟源注册与选择 | 进程上下文 | `clocksource_mutex`；真正切换由 `timekeeping_notify()` 完成 |
 
-这些锁都是 `raw_spinlock_t`，原因是它们在硬中断中被获取。
+表中的自旋锁（`tk_core.lock`、`hrtimer_cpu_base::lock`、`timer_base::lock`、`jiffies_lock`、`clockevents_lock`）在源码中都定义为 `raw_spinlock_t`；其中前几个所保护的路径可能在硬中断中执行，因此选用 raw 版本，这一点是对设计的推断。`clocksource_mutex` 则是 `DEFINE_MUTEX` 定义的互斥锁，只用于进程上下文。
 
 ## 6. 后续章节路线
 
@@ -705,8 +707,8 @@ sequenceDiagram
 本章建立的主线可以概括为：
 
 - **两类硬件抽象**：`clocksource` 负责“读”，`clock_event_device` 负责“叫醒”。二者在 `clockevents_program_event()` 的换算部分（[clockevents.c#L326-L334](../../linux/kernel/time/clockevents.c#L326-L334)）中配合：用时钟源算出还差多少纳秒，再用时钟事件设备的系数换算成设备周期。
-- **一条主时间线**：全局唯一的 `timekeeper` 以“基准点 + 增量”的方式维护 `CLOCK_MONOTONIC`，其他时间线都表示为偏移。读者用 seqcount 无锁读取，写者在影子副本上计算后整体发布。
-- **tick 是一个被模拟的周期事件**：每个 CPU 的 `tick_device` 记录用哪个设备、什么模式；进入高精度模式后，tick 变成 `tick_sched` 中嵌入的一个 hrtimer。tick 负责推进 jiffies 和时间线（仅由 `tick_do_timer_cpu` 执行）、统计进程时间、驱动调度器和时间轮。CPU 空闲时，如果近期没有需要处理的事件，可以停止 tick。
+- **一条主时间线**：全局唯一的 `timekeeper` 以“基准点 + 增量”的方式推进 REALTIME 的 `xtime`，`CLOCK_MONOTONIC` 由它加上 `wall_to_monotonic` 推导，其他时间线表示为偏移。读者用 seqcount 无锁读取，写者在影子副本上计算后整体发布。
+- **tick 是一个被模拟的周期事件**：每个 CPU 的 `tick_device` 记录用哪个设备、什么模式；进入高精度模式后，tick 变成 `tick_sched` 中嵌入的一个 hrtimer。tick 负责推进 jiffies 和时间线（通常由 `tick_do_timer_cpu` 执行，见 3.3 节）、统计进程时间、驱动调度器和时间轮。CPU 空闲时，如果近期没有需要处理的事件，可以停止 tick。
 - **两套定时器**：时间轮以 jiffies 为单位，用分级桶换取 O(1) 操作，适合大多数会被取消的超时；hrtimer 以纳秒为单位，用红黑树保证精确到期，并直接决定硬件下一次在何时中断。
 
 把这些对象放回一次中断里看：LAPIC 中断 → `event_handler`（`hrtimer_interrupt`）→ 执行到期 hrtimer，其中包括 tick 的 `sched_timer` → 推进时间、触发时间轮软中断 → 按最早到期时间重新编程硬件。后续各章都是在这条主线的某一段上展开。
