@@ -768,7 +768,7 @@ env->imbalance = min(
 | 主动均衡 | **允许** | 不再考虑缓存热度 |
 | 迁移会损害 NUMA 局部性，或任务缓存热 | 若失败次数已超过 `cache_nice_tries` 则允许，否则拒绝 | 见下 |
 
-**缓存热的判定** `task_hot()`（[fair.c#L9523-L9562](../../linux/kernel/sched/fair.c#L9523-L9562)）：非公平任务、`SCHED_IDLE` 任务、SMT 层（兄弟线程共享缓存）都视为不热；任务是本队列的 `next` 伙伴且目标队列非空时视为热（`CACHE_HOT_BUDDY` 特性）。之后检查特殊阈值：`migration_cost_ns` 的无符号全 1 值（源码比较 `== -1`）视为热，0 视为不热；其他值按当前时刻距 `se.exec_start` 是否小于阈值判断，默认阈值为 500000 ns。核心调度 cookie 不匹配也会视为热，但本配置未启用核心调度。内核使用源队列的任务时钟，`exec_start` 在任务运行时由 `update_curr()` 更新（[fair.c#L1225-L1245](../../linux/kernel/sched/fair.c#L1225-L1245)），不能把这个差值无条件当作墙钟时间。
+**缓存热的判定** `task_hot()`（[fair.c#L9523-L9562](../../linux/kernel/sched/fair.c#L9523-L9562)）：非公平任务、`SCHED_IDLE` 任务、SMT 层（兄弟线程共享缓存）都视为不热；任务是本队列的 `next` 伙伴且目标队列非空时视为热（`CACHE_HOT_BUDDY` 特性）。之后检查特殊阈值：`migration_cost_ns` 的无符号全 1 值（源码比较 `== -1`）视为热，0 视为不热；其他值按当前时刻距 `se.exec_start` 是否小于阈值判断，默认阈值为 500000 ns。核心调度 cookie 不匹配也会视为热，但本配置未启用核心调度。内核使用源队列的任务时钟，`exec_start` 在任务被选中运行时由 `update_stats_curr_start()` 设置，运行期间由 `update_curr()` 调用 `update_se()` 刷新（[fair.c#L1452-L1459](../../linux/kernel/sched/fair.c#L1452-L1459)、[fair.c#L1232-L1249](../../linux/kernel/sched/fair.c#L1232-L1249)、[fair.c#L1302](../../linux/kernel/sched/fair.c#L1302)），不能把这个差值无条件当作墙钟时间。
 
 启用自动 NUMA 平衡时，`migrate_degrades_locality()` 的判断优先于 `task_hot()`（[fair.c#L9570-L9615](../../linux/kernel/sched/fair.c#L9570-L9615)）。它只在 `SD_NUMA` 层、对有 NUMA 缺页统计的任务、跨节点迁移时起作用：离开首选节点时，若源队列上还有首选节点不是本节点的任务（`nr_running > nr_preferred_running`），视为“热”，否则回到 `task_hot()`；去往首选节点视为“不热”；两者都不是时，`CPU_IDLE` 均衡回到 `task_hot()`，其余情况比较两个节点的缺页权重。
 
@@ -1030,7 +1030,7 @@ sequenceDiagram
 `wake_affine()`（[fair.c#L7563-L7581](../../linux/kernel/sched/fair.c#L7563-L7581)）只在两个 CPU 中选：
 
 - `wake_affine_idle()`：唤醒者 CPU 空闲且与 `prev_cpu` 共享缓存时，`prev_cpu` 也空闲就选 `prev_cpu`，否则选唤醒者 CPU；同步唤醒且 `nr_running - cfs_h_nr_delayed(rq) == 1` 时选唤醒者 CPU，delayed 任务不计入这个 1；`prev_cpu` 空闲则选 `prev_cpu`（[fair.c#L7504-L7515](../../linux/kernel/sched/fair.c#L7504-L7515)）。
-- 无法决定时，`wake_affine_weight()` 比较“把任务放过来后唤醒者 CPU 的负载”与“任务离开后 `prev_cpu` 的负载”。两侧都乘以对方的 `capacity_of()`。`WA_BIAS` 默认打开（[features.h#L124](../../linux/kernel/sched/features.h#L124)），此时唤醒者一侧再乘 100，`prev_cpu` 一侧再乘 `100 + (imbalance_pct - 100) / 2`。示例机器的 `imbalance_pct` 为 117，两侧系数是 108 和 100，多出来的 8 来自 `(117 - 100) / 2`。`prev_cpu` 一侧变大后，`this_eff_load < prev_eff_load` 更容易成立，所以偏置偏向唤醒者。只有唤醒者一侧更轻才选唤醒者 CPU（[fair.c#L7540-L7560](../../linux/kernel/sched/fair.c#L7540-L7560)）。
+- 无法决定时，`wake_affine_weight()` 比较“把任务放过来后唤醒者 CPU 的负载”与“任务离开后 `prev_cpu` 的负载”。两侧都乘以对方的 `capacity_of()`。`WA_BIAS` 默认打开（[features.h#L124](../../linux/kernel/sched/features.h#L124)），此时唤醒者一侧再乘 100，`prev_cpu` 一侧再乘 `100 + (imbalance_pct - 100) / 2`。示例机器的 `imbalance_pct` 为 117，两侧系数是 108 和 100，多出来的 8 来自 `(117 - 100) / 2`。`prev_cpu` 一侧变大后，`this_eff_load < prev_eff_load` 更容易成立，所以偏置偏向唤醒者。比较时只有唤醒者一侧更轻才选唤醒者 CPU；同步唤醒另有一条捷径：唤醒者自身的层级负载大于其所在 CPU 的负载时直接选唤醒者 CPU，否则先从唤醒者一侧扣除这部分负载再比较（[fair.c#L7520-L7560](../../linux/kernel/sched/fair.c#L7520-L7560)）。
 
 选出的 CPU 只是一个起点（`target`），随后还要交给快路径在其所在 LLC 内找空闲 CPU。
 
@@ -1084,12 +1084,12 @@ SMT 兄弟线程共享执行单元，两个任务挤在同一个核心上，各�
 
 - **更少、更串行**：NUMA 层间隔更长，`cache_nice_tries` = 2，并带 `SD_SERIALIZE`。
 - **容忍少量失衡**：`adjust_numa_imbalance()`（[fair.c#L1482-L1506](../../linux/kernel/sched/fair.c#L1482-L1506)）在目标一侧的运行任务数（加上将要迁入的 1 个）不超过 `imb_numa_nr` 时，把不超过 2 的失衡视为 0。注释给出的理由是：一对相互通信的任务留在同一节点，比为了“均匀”把它们拆到两个节点更好。
-- **`imb_numa_nr` 的计算**（[topology.c#L2537-L2593](../../linux/kernel/sched/topology.c#L2537-L2593)）：在共享 LLC 层之上的第一层，若每个节点只有一个 LLC，阈值为该层 CPU 数的 1/8；有多个 LLC 时为 LLC 个数；更高层按范围倍数放大。示例机器上，这个计算发生在构建阶段尚未删除的 PKG 层：8 个 CPU、1 个 LLC，阈值为 8 >> 3 = 1，NUMA 层按 16 / 16 的倍数得到 1。
+- **`imb_numa_nr` 的计算**（[topology.c#L2537-L2593](../../linux/kernel/sched/topology.c#L2537-L2593)）：在共享 LLC 层之上的第一层，用“该层 CPU 数 ÷ 子域（LLC 层）CPU 数”估算该层含几个 LLC：只有一个时阈值为该层 CPU 数的 1/8，有多个时为 LLC 个数，结果至少为 1；更高层按“本层 CPU 数 ÷ 第一个 `SD_NUMA` 层 CPU 数”的倍数放大（至少 1 倍）。示例机器上，这个计算发生在构建阶段尚未删除的 PKG 层：8 个 CPU、1 个 LLC，阈值为 8 >> 3 = 1，NUMA 层按 16 / 16 的倍数得到 1。
 - **首选节点**：自动 NUMA 平衡启用并积累访问统计后，任务可以形成首选节点，并非一启用每个任务就有首选节点。`migrate_degrades_locality()` 判断迁移是否损害局部性；`fbq_type` 在 NUMA 层优先迁移没有首选节点或不在首选节点上的任务（[fair.c#L10867-L10895](../../linux/kernel/sched/fair.c#L10867-L10895)、[fair.c#L11728-L11750](../../linux/kernel/sched/fair.c#L11728-L11750)）。
 
 本配置在多节点机器上默认关闭自动 NUMA 平衡（第 0 节）。关闭时 `sched_numa_balancing` 静态键为假，`migrate_degrades_locality()` 直接返回 0（[fair.c#L9576-L9580](../../linux/kernel/sched/fair.c#L9576-L9580)）。若启动后从未启用自动 NUMA 平衡，任务的首选节点保持 `NUMA_NO_NODE`：初始任务如此，新地址空间的任务会重置该字段，共享地址空间的新线程则继承它（[init_task.c#L190](../../linux/init/init_task.c#L190)、[fair.c#L3650-L3658](../../linux/kernel/sched/fair.c#L3650-L3658)）。在这个前提下，`nr_numa_running` 为 0，`fbq_type` 不因首选节点过滤运行队列（[fair.c#L1650-L1654](../../linux/kernel/sched/fair.c#L1650-L1654)）；目的组的 NUMA “有余量”分支也不会命中首选节点判断，仍会应用 `adjust_numa_imbalance()`（[fair.c#L11177-L11189](../../linux/kernel/sched/fair.c#L11177-L11189)）。
 
-不能把上述结果推广为“运行时关闭后立即清空首选节点”。开关路径只更新模式和静态键，没有遍历任务清理已有信息（[core.c#L4516-L4530](../../linux/kernel/sched/core.c#L4516-L4530)、[core.c#L4555-L4565](../../linux/kernel/sched/core.c#L4555-L4565)）；首选节点计数和目的组的相关判断也不检查这个静态键。已经形成的首选节点仍可能影响这两处决策。
+不能把上述结果推广为“运行时关闭后立即清空首选节点”。开关路径只更新模式和静态键（切到内存分层模式时另外重置各节点的提升阈值统计），没有遍历任务清理已有信息（[core.c#L4516-L4530](../../linux/kernel/sched/core.c#L4516-L4530)、[core.c#L4555-L4565](../../linux/kernel/sched/core.c#L4555-L4565)）；首选节点计数和目的组的相关判断也不检查这个静态键。已经形成的首选节点仍可能影响这两处决策。
 
 ### 8.3 不对称：ITMT 与算力差异
 

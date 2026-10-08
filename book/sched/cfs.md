@@ -95,7 +95,7 @@ debugfs 的 `base_slice_ns` 直接读写这个变量（[debug.c#L507](../../linu
 
 ### 1.2 在内核中的位置
 
-调度核心（`kernel/sched/core.c`）决定何时调度、怎样切换上下文，并通过 `struct sched_class` 中的函数指针，把“排队”和“挑选”交给各个调度类（[sched.h#L2413-L2482](../../linux/kernel/sched/sched.h#L2413-L2482)）。调度类在链接脚本中按优先级从高到低排列为 stop、deadline、rt、fair、ext、idle；当前配置没有 ext（[vmlinux.lds.h#L136-L145](../../linux/include/asm-generic/vmlinux.lds.h#L136-L145)），`sched_class_above()` 直接比较它们的地址（[sched.h#L2575](../../linux/kernel/sched/sched.h#L2575)）。`SCHED_NORMAL`、`SCHED_BATCH`、`SCHED_IDLE` 通常属于公平调度类，但选择调度类时先检查有效优先级；优先级继承使任务暂时提升到 RT/DL 优先级时，不能仅由 `policy` 判断当前调度类（[core.c#L7304-L7318](../../linux/kernel/sched/core.c#L7304-L7318)、[core.c#L7430-L7440](../../linux/kernel/sched/core.c#L7430-L7440)）。
+调度核心（`kernel/sched/core.c`）决定何时调度、怎样切换上下文，并通过 `struct sched_class` 中的函数指针，把“排队”和“挑选”交给各个调度类（[sched.h#L2413-L2484](../../linux/kernel/sched/sched.h#L2413-L2484)）。调度类在链接脚本中按优先级从高到低排列为 stop、deadline、rt、fair、ext、idle；当前配置没有 ext（[vmlinux.lds.h#L136-L145](../../linux/include/asm-generic/vmlinux.lds.h#L136-L145)），`sched_class_above()` 直接比较它们的地址（[sched.h#L2575](../../linux/kernel/sched/sched.h#L2575)）。`SCHED_NORMAL`、`SCHED_BATCH`、`SCHED_IDLE` 通常属于公平调度类，但选择调度类时先检查有效优先级；优先级继承使任务暂时提升到 RT/DL 优先级时，不能仅由 `policy` 判断当前调度类（[core.c#L7304-L7318](../../linux/kernel/sched/core.c#L7304-L7318)、[core.c#L7430-L7440](../../linux/kernel/sched/core.c#L7430-L7440)）。
 
 下图展示事件怎样经调度核心进入公平调度类。实线箭头表示调用，指向数据的箭头表示修改。
 
@@ -245,7 +245,7 @@ deadline = 请求开始时的 vruntime + r × w0 / w
 
 ### 2.4 实体在公平调度类中的状态
 
-下图是一个任务实体在公平调度类中的主要状态。它省略了组调度和带宽限流，“延迟出队”状态在 4.8 节详细说明。入队、选择与出队分别由 `enqueue_entity()`、`set_next_entity()` 和 `dequeue_entity()` 维护（[fair.c#L5418-L5482](../../linux/kernel/sched/fair.c#L5418-L5482)、[fair.c#L5631-L5671](../../linux/kernel/sched/fair.c#L5631-L5671)、[fair.c#L5558-L5605](../../linux/kernel/sched/fair.c#L5558-L5605)）。
+下图是一个任务实体在公平调度类中的主要状态。它省略了组调度和带宽限流，“延迟出队”状态在 4.8 节详细说明。入队、选择与出队分别由 `enqueue_entity()`、`set_next_entity()` 和 `dequeue_entity()` 维护（[fair.c#L5418-L5482](../../linux/kernel/sched/fair.c#L5418-L5482)、[fair.c#L5631-L5671](../../linux/kernel/sched/fair.c#L5631-L5671)、[fair.c#L5549-L5629](../../linux/kernel/sched/fair.c#L5549-L5629)）。
 
 ```mermaid
 stateDiagram-v2
@@ -458,7 +458,7 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 
 ### 4.2 维护 V：相对参考点上的加权平均
 
-**问题**。V 是 Σ(w_i × v_i) / Σw_i。vruntime 是 u64，会一直增长并最终回绕，权重最大可达 88761，直接累加 w_i × v_i 必然溢出。
+**问题**。V 是 Σ(w_i × v_i) / Σw_i。vruntime 是 u64，会一直增长并最终回绕，任务权重最大可达 88761（组实体的权重上限由 `MAX_SHARES` 决定，还可以更大，[sched.h#L538-L539](../../linux/kernel/sched/sched.h#L538-L539)），直接累加 w_i × v_i 必然溢出。
 
 **办法**。源码注释给出的变换是：选一个参考点 v0，只累加相对值（[fair.c#L650-L671](../../linux/kernel/sched/fair.c#L650-L671)）：
 
@@ -770,7 +770,7 @@ static inline void set_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity 
 
 1. **份额正确。** 从 t = 13 起，每 9 ms 中 B 运行 6 ms、A 运行 3 ms，正好是权重比 2:1。
 2. **每次换上都保护一个请求。** A 每次被换上都恰好运行 3 ms，即一个 slice，这期间的 tick 不会请求重新调度。
-3. **重新选中自己不续保护期。** t = 9 时 B 的 deadline 早于 A，B 被重新选中，但保护期没有更新；t = 10 的 tick 发现 B 已不在保护期，重新挑选时 B 已不合格，于是换成 A。t = 15～18 期间 B 同样每个 tick 都被重新挑选，因为只有它合格才继续运行。
+3. **重新选中自己不续保护期。** t = 9 时 B 的 deadline 早于 A，B 被重新选中，但保护期没有更新；t = 10 的 tick 发现 B 已不在保护期，重新挑选时 B 已不合格，于是换成 A。t = 15～18 期间 B 同样每个 tick 都被重新挑选：t = 15～17 只有它合格，t = 18 两者都合格而 B 的 deadline 更早，所以 B 继续运行。
 4. **合格条件控制份额，deadline 控制顺序。** t = 3、6、10、13、19 的切换都是因为当前实体变得不合格；t = 0、9、18 两者都合格时，由 deadline 决定先后。
 
 表中选择和 v、d、V 已用精确分数运算核对；验证对象是上述简化模型，不是内核运行实测。真实系统中 tick 有抖动，入队、唤醒等事件会插入额外的记账或挑选点，所以具体时刻会有差异。
@@ -883,7 +883,7 @@ return true
 | 任务退出 | [`task_dead_fair()`](../../linux/kernel/sched/fair.c#L8833-L8850) | 强制完成出队 |
 | `wait_task_inactive()` | 强制完成出队，注释说是为了避免总是等到 tick 超时 | [core.c#L2314-L2319](../../linux/kernel/sched/core.c#L2314-L2319) |
 
-这些强制完成路径直接使用 `DEQUEUE_SLEEP | DEQUEUE_DELAYED`，`dequeue_entity()` 因此跳过“尚不合格就继续延迟”的判断（[fair.c#L5558-L5577](../../linux/kernel/sched/fair.c#L5558-L5577)）。若此时 lag 仍为负，`finish_delayed_dequeue_entity()` 不会把负值清零。延迟任务还可以在 `migrate_load` 均衡中被搬动；这种非睡眠搬动保存 vlag 和相对 deadline，而不是等待它合格（[fair.c#L9661-L9670](../../linux/kernel/sched/fair.c#L9661-L9670)、[fair.c#L5596-L5600](../../linux/kernel/sched/fair.c#L5596-L5600)）。
+这些强制完成路径直接使用 `DEQUEUE_SLEEP | DEQUEUE_DELAYED`，`dequeue_entity()` 因此跳过“尚不合格就继续延迟”的判断（[fair.c#L5558-L5577](../../linux/kernel/sched/fair.c#L5558-L5577)）。若此时 lag 仍为负，`finish_delayed_dequeue_entity()` 不会把负值清零。延迟任务还可以在 `migrate_load` 均衡中被搬动；这种非睡眠搬动保存 vlag 和相对 deadline，而不是等待它合格（[fair.c#L9661-L9670](../../linux/kernel/sched/fair.c#L9661-L9670)、[fair.c#L5596-L5600](../../linux/kernel/sched/fair.c#L5596-L5600)）；`sched_delayed` 不会因此清除，任务在目标队列上入队时仍处于延迟状态，不计入 `h_nr_runnable`（[fair.c#L7115-L7116](../../linux/kernel/sched/fair.c#L7115-L7116)）。
 
 被唤醒时的处理：
 
@@ -938,7 +938,7 @@ v'                    = V − vlag'
 
 ### 5.1 调度类接口
 
-公平调度类在 [`DEFINE_SCHED_CLASS(fair)`](../../linux/kernel/sched/fair.c#L14095-L14133)中注册以下回调。表中只列与本章有关的部分：
+公平调度类在 [`DEFINE_SCHED_CLASS(fair)`](../../linux/kernel/sched/fair.c#L14095-L14142)中注册以下回调。表中只列与本章有关的部分：
 
 | 回调 | 公平调度类的实现 | 作用 | 本章 |
 | --- | --- | --- | --- |
@@ -994,7 +994,7 @@ wake_up_new_task(p)                           // fork.c 第 2642 行
 **两条唤醒路径**。`try_to_wake_up()` 先检查 `p->on_rq`（[core.c#L4205-L4227](../../linux/kernel/sched/core.c#L4205-L4227)）：
 
 - **`p->on_rq` 仍为 1**：任务还没真正离开队列，可能是还没执行到 `schedule()`，也可能处在延迟出队状态。[`ttwu_runnable()`](../../linux/kernel/sched/core.c#L3775-L3799)由唤醒者在自己所在的 CPU 上执行，它用 `__task_rq_lock()` 锁住任务所在 CPU 的 rq 后处理：延迟出队的任务以 `ENQUEUE_DELAYED` 重新入队（4.8 节）；任务不在 CPU 上运行时调用 `wakeup_preempt()`。这条路径**不选核**，任务留在原来那个 CPU 的队列上。
-- **`p->on_rq` 为 0**：通常等待原 CPU 清除 `on_cpu`，再选核、在选定 CPU 上执行 [`ttwu_do_activate()`](../../linux/kernel/sched/core.c#L3701-L3748)，以 `ENQUEUE_WAKEUP` 入队后检查抢占（[core.c#L4295-L4309](../../linux/kernel/sched/core.c#L4295-L4309)）。有一个更早的分支：任务已出队但仍处于原 CPU 的切换收尾中（`on_cpu == 1`），且允许排入 wake list 时，会先把唤醒交给原 CPU 的 wake list，不再执行本次 `select_task_rq()`（[core.c#L4282-L4284](../../linux/kernel/sched/core.c#L4282-L4284)）。因此不能把 `on_rq == 0` 简化为“必定先选核”。
+- **`p->on_rq` 为 0**：通常等待原 CPU 清除 `on_cpu`，再选核，然后由 `ttwu_queue()` 对选定 CPU 的 rq 执行 [`ttwu_do_activate()`](../../linux/kernel/sched/core.c#L3701-L3748)，以 `ENQUEUE_WAKEUP` 入队后检查抢占（[core.c#L4295-L4309](../../linux/kernel/sched/core.c#L4295-L4309)）。`ttwu_queue()` 要么由唤醒者持目标 rq 锁直接执行，要么经 wake list 交给目标 CPU 执行（[core.c#L3975-L3987](../../linux/kernel/sched/core.c#L3975-L3987)，见第 6 节）。有一个更早的分支：任务已出队但仍处于原 CPU 的切换收尾中（`on_cpu == 1`），且允许排入 wake list 时，会先把唤醒交给原 CPU 的 wake list，不再执行本次 `select_task_rq()`（[core.c#L4282-L4284](../../linux/kernel/sched/core.c#L4282-L4284)）。因此不能把 `on_rq == 0` 简化为“必定先选核”。
 
 [`wakeup_preempt()`](../../linux/kernel/sched/core.c#L2219-L2234)在被唤醒者与当前任务同属一个调度类时调用该类的回调；被唤醒者的调度类更高时直接 `resched_curr()`。因此在**这个唤醒接口**上，公平类不会要求抢占正在运行的 RT 类任务，而 RT 类唤醒会要求公平类当前任务让出 CPU；这不排除 fair server 经 deadline 类获得服务（1.4 节）。
 
