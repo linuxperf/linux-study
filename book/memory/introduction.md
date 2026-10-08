@@ -47,7 +47,7 @@
 
 有两点需要提前说明：
 
-- `CONFIG_LRU_GEN` 未设置时，`lru_gen_enabled()` 恒返回 `false`（[mm_inline.h#L312-L317](../../linux/include/linux/mm_inline.h#L312-L317)），所以 [shrink_node()](../../linux/mm/vmscan.c#L6057-L6059) 中进入 `lru_gen_shrink_node()` 的分支在本配置下不会执行。[内存回收](reclaim.md)一章中关于 MGLRU 的内容，对当前构建只具有对照意义。
+- `CONFIG_LRU_GEN` 未设置时，`lru_gen_enabled()` 恒返回 `false`（[mm_inline.h#L312-L317](../../linux/include/linux/mm_inline.h#L312-L317)），所以 [shrink_node()](../../linux/mm/vmscan.c#L6057-L6059) 中进入 `lru_gen_shrink_node()` 的分支在本配置下不会执行。[内存回收](reclaim.md)一章因此只分析传统 LRU。
 - 透明大页、NUMA 自动均衡（`CONFIG_NUMA_BALANCING=y`，[.config#L206](../../linux/.config#L206)）、KSM（[.config#L1227](../../linux/.config#L1227)）等功能即使编入，实际是否生效也取决于运行时开关，本章不把它们画进主线。
 
 ## 1. 内存子系统要解决什么问题

@@ -736,7 +736,7 @@ scan = scan - scan × protection / (cgroup_size + 1)
 - `reclaim_idx` 为最高 zone，所有 zone 都可回收；
 - `may_swap` 由 `MEMCG_RECLAIM_MAY_SWAP` 决定，`proactive` 区分主动回收。
 
-它从当前节点的 zonelist 出发调用 `do_try_to_free_pages()`，注释说明这样可以把压力平均地施加到各节点。此后 `do_try_to_free_pages()` → `shrink_node()` 的流程见[内存回收](../memory/reclaim.md)第 3.4 节和第 5 节，memcg 回收的概述在该章第 9 节；与 memcg 相关的是 `shrink_node_memcgs()` 的遍历方式：
+它从当前节点的 zonelist 出发调用 `do_try_to_free_pages()`，注释说明这样可以把压力平均地施加到各节点。此后 `do_try_to_free_pages()` → `shrink_node()` 的流程见[内存回收](../memory/reclaim.md)第 5.2、5.3 节，memcg 回收与全局回收的差异在该章第 4.3、5.9 节；与 memcg 相关的是 `shrink_node_memcgs()` 的遍历方式：
 
 - 对子树中的每个组，取 `mem_cgroup_lruvec(memcg, pgdat)`，调用 `shrink_lruvec()` 扫描 LRU，再调用 `shrink_slab()` 回收该组在该节点上的 memcg 感知 slab 缓存。
 - 遍历由 [`mem_cgroup_iter()`](../../linux/mm/memcontrol.c#L1002-L1087)完成，它沿 cgroup 树做先序遍历，对每个组 `css_tryget()`。直接回收传入 reclaim cookie：目标组在每个节点上有一个共享的游标 `nodeinfo[nid]->iter.position` 和代数 `generation`，并发的回收者用 `cmpxchg()` 推进游标，分摊同一棵树上的工作；回收量达到目标就提前退出。kswapd 和要求完整遍历的回收不使用游标，每次走完整棵树（[vmscan.c#L5981-L5991](../../linux/mm/vmscan.c#L5981-L5991)）。
