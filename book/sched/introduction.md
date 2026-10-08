@@ -24,20 +24,20 @@
 
 与本章结论有关的配置如下。它们是编译条件，不代表某次运行一定经过对应路径。
 
-| 配置 | 对本章的影响 | 依据 |
-| --- | --- | --- |
-| `CONFIG_X86_64=y`、`CONFIG_SMP=y`、`CONFIG_NR_CPUS=512` | 多 CPU；每个 CPU 有一个运行队列 | [.config#L333](../../linux/.config#L333)、[.config#L362](../../linux/.config#L362)、[.config#L431](../../linux/.config#L431) |
-| `CONFIG_PREEMPT_DYNAMIC=y`，抢占模型选 `CONFIG_PREEMPT_VOLUNTARY=y` | 抢占基础设施（`CONFIG_PREEMPTION=y`、`CONFIG_PREEMPT_COUNT=y`）全部编入，但**启动后默认按 voluntary 模型运行**；可用启动参数 `preempt=none/voluntary/full/lazy` 改变（`lazy` 依赖 `CONFIG_ARCH_HAS_PREEMPT_LAZY=y`），由于 `CONFIG_DEBUG_FS=y`，运行时还可写 debugfs 的 `sched/preempt` 切换（3.5 节） | [.config#L133-L142](../../linux/.config#L133-L142)、[Kconfig.preempt#L126-L146](../../linux/kernel/Kconfig.preempt#L126-L146)、[sched_dynamic_mode()（core.c#L7671-L7690）](../../linux/kernel/sched/core.c#L7671-L7690)、[debug.c#L503-L505](../../linux/kernel/sched/debug.c#L503-L505)、[.config#L10544](../../linux/.config#L10544) |
-| `CONFIG_SCHED_CLASS_EXT` 未出现在 `.config` 中 | 它依赖 `DEBUG_INFO_BTF`；当前 `CONFIG_PAHOLE_VERSION=0` 不满足 BTF 所需的 `PAHOLE_VERSION >= 116`，因此 BTF 和 sched_ext 均未编入；`scx_enabled()` 恒为 `false`，系统中只有 5 个调度类 | [.config#L26](../../linux/.config#L26)、[Kconfig.debug#L377-L383](../../linux/lib/Kconfig.debug#L377-L383)、[Kconfig.preempt#L166-L168](../../linux/kernel/Kconfig.preempt#L166-L168)、[sched.h#L1784-L1785](../../linux/kernel/sched/sched.h#L1784-L1785) |
-| `CONFIG_SCHED_PROXY_EXEC` 未设置 | `rq->curr` 和 `rq->donor` 是同一个联合体成员，`task_is_blocked()` 恒为 `false`（`sched_proxy_exec()` 是返回 `false` 的桩函数），本章不讨论代理执行 | [.config#L194](../../linux/.config#L194)、[sched.h#L1171-L1179](../../linux/kernel/sched/sched.h#L1171-L1179)、[sched.h#L2305-L2311](../../linux/kernel/sched/sched.h#L2305-L2311)、[linux/sched.h#L1687-L1692](../../linux/include/linux/sched.h#L1687-L1692) |
-| `CONFIG_SCHED_CORE` 未设置 | `pick_next_task()` 直接调用 `__pick_next_task()`，没有 SMT 兄弟核之间的协同选择 | [.config#L143](../../linux/.config#L143)、[core.c#L6518-L6522](../../linux/kernel/sched/core.c#L6518-L6522) |
-| `CONFIG_FAIR_GROUP_SCHED=y`、`CONFIG_CFS_BANDWIDTH=y`、`CONFIG_SCHED_AUTOGROUP=y`，`CONFIG_RT_GROUP_SCHED` 未设置 | 公平调度类支持组调度；即使不使用 cgroup，autogroup 也会让任务进入按会话建立的任务组（2.5 节）。本章只指出组调度在数据结构上的位置，细节见 [cgroup v2 的 cpu 控制器](../cgroup2/cpu.md) | [.config#L216-L221](../../linux/.config#L216-L221)、[.config#L245](../../linux/.config#L245) |
-| `CONFIG_UCLAMP_TASK` 未设置 | 没有利用率钳制，`uclamp_*()` 调用为空 | [.config#L193](../../linux/.config#L193) |
-| `CONFIG_HZ=1000`、`CONFIG_NO_HZ_FULL=y`、`CONFIG_SCHED_HRTICK=y` | 周期 tick 的标称间隔为 1 ms；`nohz_full=` 指定的 CPU 在满足调度类、带宽和其他 tick 依赖条件时可以停 tick，只有一个可运行任务并不充分；HRTICK 虽然编入，但调度特性 `HRTICK` 默认关闭 | [.config#L104-L108](../../linux/.config#L104-L108)、[.config#L505-L507](../../linux/.config#L505-L507)、[sched_can_stop_tick()（core.c#L1350-L1400）](../../linux/kernel/sched/core.c#L1350-L1400)、[can_stop_full_tick()（tick-sched.c#L358-L377）](../../linux/kernel/time/tick-sched.c#L358-L377)、[features.h#L66-L67](../../linux/kernel/sched/features.h#L66-L67) |
-| `CONFIG_MMU_LAZY_TLB_REFCOUNT=y` | 借用 `active_mm` 的 lazy TLB 路径实际增加、归还 `mm_count` 引用（4.3 节） | [.config#L899](../../linux/.config#L899)、[sched/mm.h#L88-L112](../../linux/include/linux/sched/mm.h#L88-L112) |
-| `CONFIG_SCHED_SMT=y`、`CONFIG_SCHED_CLUSTER=y`、`CONFIG_SCHED_MC=y`、`CONFIG_NUMA=y` | x86 拓扑表为 SMT → CLS → MC → PKG，`sched_init_numa()` 在其后追加 NODE 层和若干 NUMA 层；实际层级在启动时按硬件裁剪，不起作用的层会被删除（2.6 节） | [.config#L835-L837](../../linux/.config#L835-L837)、[.config#L469](../../linux/.config#L469) |
-| `CONFIG_PARAVIRT_TIME_ACCOUNTING=y`，`CONFIG_IRQ_TIME_ACCOUNTING` 未设置 | 作为虚拟机运行且开启 steal time 时，被宿主机“偷走”的时间不计入任务运行时间；中断时间不单独扣除 | [.config#L148-L150](../../linux/.config#L148-L150)、[.config#L397](../../linux/.config#L397) |
-| `CONFIG_SCHEDSTATS=y`、`CONFIG_PSI=y`、`CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y` | 调度统计、压力统计和 schedutil 调频都挂在调度路径上；本章只提到调用点 | [.config#L10650](../../linux/.config#L10650)、[.config#L158](../../linux/.config#L158)、[.config#L696](../../linux/.config#L696) |
+| 配置                                                                                                              | 对本章的影响                                                                                                                                                                                                                                                                                           | 依据                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONFIG_X86_64=y`、`CONFIG_SMP=y`、`CONFIG_NR_CPUS=512`                                                           | 多 CPU；每个 CPU 有一个运行队列                                                                                                                                                                                                                                                                        | [.config#L333](../../linux/.config#L333)、[.config#L362](../../linux/.config#L362)、[.config#L431](../../linux/.config#L431)                                                                                                                                                                                                                                            |
+| `CONFIG_PREEMPT_DYNAMIC=y`，抢占模型选 `CONFIG_PREEMPT_VOLUNTARY=y`                                               | 抢占基础设施（`CONFIG_PREEMPTION=y`、`CONFIG_PREEMPT_COUNT=y`）全部编入，但**启动后默认按 voluntary 模型运行**；可用启动参数 `preempt=none/voluntary/full/lazy` 改变（`lazy` 依赖 `CONFIG_ARCH_HAS_PREEMPT_LAZY=y`），由于 `CONFIG_DEBUG_FS=y`，运行时还可写 debugfs 的 `sched/preempt` 切换（3.5 节） | [.config#L133-L142](../../linux/.config#L133-L142)、[Kconfig.preempt#L126-L146](../../linux/kernel/Kconfig.preempt#L126-L146)、[sched_dynamic_mode()（core.c#L7671-L7690）](../../linux/kernel/sched/core.c#L7671-L7690)、[debug.c#L503-L505](../../linux/kernel/sched/debug.c#L503-L505)、[.config#L10544](../../linux/.config#L10544)                                 |
+| `CONFIG_SCHED_CLASS_EXT` 未出现在 `.config` 中                                                                    | 它依赖 `DEBUG_INFO_BTF`；当前 `CONFIG_PAHOLE_VERSION=0` 不满足 BTF 所需的 `PAHOLE_VERSION >= 116`，因此 BTF 和 sched_ext 均未编入；`scx_enabled()` 恒为 `false`，系统中只有 5 个调度类                                                                                                                 | [.config#L26](../../linux/.config#L26)、[Kconfig.debug#L377-L383](../../linux/lib/Kconfig.debug#L377-L383)、[Kconfig.preempt#L166-L168](../../linux/kernel/Kconfig.preempt#L166-L168)、[sched.h#L1784-L1785](../../linux/kernel/sched/sched.h#L1784-L1785)                                                                                                              |
+| `CONFIG_SCHED_PROXY_EXEC` 未设置                                                                                  | `rq->curr` 和 `rq->donor` 是同一个联合体成员，`task_is_blocked()` 恒为 `false`（`sched_proxy_exec()` 是返回 `false` 的桩函数），本章不讨论代理执行                                                                                                                                                     | [.config#L194](../../linux/.config#L194)、[sched.h#L1171-L1179](../../linux/kernel/sched/sched.h#L1171-L1179)、[sched.h#L2305-L2311](../../linux/kernel/sched/sched.h#L2305-L2311)、[linux/sched.h#L1687-L1692](../../linux/include/linux/sched.h#L1687-L1692)                                                                                                          |
+| `CONFIG_SCHED_CORE` 未设置                                                                                        | `pick_next_task()` 直接调用 `__pick_next_task()`，没有 SMT 兄弟核之间的协同选择                                                                                                                                                                                                                        | [.config#L143](../../linux/.config#L143)、[core.c#L6518-L6522](../../linux/kernel/sched/core.c#L6518-L6522)                                                                                                                                                                                                                                                             |
+| `CONFIG_FAIR_GROUP_SCHED=y`、`CONFIG_CFS_BANDWIDTH=y`、`CONFIG_SCHED_AUTOGROUP=y`，`CONFIG_RT_GROUP_SCHED` 未设置 | 公平调度类支持组调度；即使不使用 cgroup，autogroup 也会让任务进入按会话建立的任务组（2.5 节）。本章只指出组调度在数据结构上的位置，细节见 [cgroup v2 的 cpu 控制器](../cgroup2/cpu.md)                                                                                                                 | [.config#L216-L221](../../linux/.config#L216-L221)、[.config#L245](../../linux/.config#L245)                                                                                                                                                                                                                                                                            |
+| `CONFIG_UCLAMP_TASK` 未设置                                                                                       | 没有利用率钳制，`uclamp_*()` 调用为空                                                                                                                                                                                                                                                                  | [.config#L193](../../linux/.config#L193)                                                                                                                                                                                                                                                                                                                                |
+| `CONFIG_HZ=1000`、`CONFIG_NO_HZ_FULL=y`、`CONFIG_SCHED_HRTICK=y`                                                  | 周期 tick 的标称间隔为 1 ms；`nohz_full=` 指定的 CPU 在满足调度类、带宽和其他 tick 依赖条件时可以停 tick，只有一个可运行任务并不充分；HRTICK 虽然编入，但调度特性 `HRTICK` 默认关闭                                                                                                                    | [.config#L104-L108](../../linux/.config#L104-L108)、[.config#L505-L507](../../linux/.config#L505-L507)、[sched_can_stop_tick()（core.c#L1350-L1400）](../../linux/kernel/sched/core.c#L1350-L1400)、[can_stop_full_tick()（tick-sched.c#L358-L377）](../../linux/kernel/time/tick-sched.c#L358-L377)、[features.h#L66-L67](../../linux/kernel/sched/features.h#L66-L67) |
+| `CONFIG_MMU_LAZY_TLB_REFCOUNT=y`                                                                                  | 借用 `active_mm` 的 lazy TLB 路径实际增加、归还 `mm_count` 引用（4.3 节）                                                                                                                                                                                                                              | [.config#L899](../../linux/.config#L899)、[sched/mm.h#L88-L112](../../linux/include/linux/sched/mm.h#L88-L112)                                                                                                                                                                                                                                                          |
+| `CONFIG_SCHED_SMT=y`、`CONFIG_SCHED_CLUSTER=y`、`CONFIG_SCHED_MC=y`、`CONFIG_NUMA=y`                              | x86 拓扑表为 SMT → CLS → MC → PKG，`sched_init_numa()` 在其后追加 NODE 层和若干 NUMA 层；实际层级在启动时按硬件裁剪，不起作用的层会被删除（2.6 节）                                                                                                                                                    | [.config#L835-L837](../../linux/.config#L835-L837)、[.config#L469](../../linux/.config#L469)                                                                                                                                                                                                                                                                            |
+| `CONFIG_PARAVIRT_TIME_ACCOUNTING=y`，`CONFIG_IRQ_TIME_ACCOUNTING` 未设置                                          | 作为虚拟机运行且开启 steal time 时，被宿主机“偷走”的时间不计入任务运行时间；中断时间不单独扣除                                                                                                                                                                                                         | [.config#L148-L150](../../linux/.config#L148-L150)、[.config#L397](../../linux/.config#L397)                                                                                                                                                                                                                                                                            |
+| `CONFIG_SCHEDSTATS=y`、`CONFIG_PSI=y`、`CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y`                                          | 调度统计、压力统计和 schedutil 调频都挂在调度路径上；本章只提到调用点                                                                                                                                                                                                                                  | [.config#L10650](../../linux/.config#L10650)、[.config#L158](../../linux/.config#L158)、[.config#L696](../../linux/.config#L696)                                                                                                                                                                                                                                        |
 
 为便于区分同名文件，下文链接文字中的 `sched.h` 指 `kernel/sched/sched.h`，`linux/sched.h` 指 `include/linux/sched.h`，`asm/preempt.h` 指 x86 的 `arch/x86/include/asm/preempt.h`，`linux/preempt.h` 指通用的 `include/linux/preempt.h`。
 
@@ -47,11 +47,11 @@
 
 ### 1.1 三个问题，三组机制
 
-| 问题 | 机制 | 主要入口 |
-| --- | --- | --- |
-| 什么时候换人 | 任务主动阻塞时调用 `schedule()`；其他情况先设置 `TIF_NEED_RESCHED`，等到下一个**抢占点**再进入 `__schedule()` | [schedule()](../../linux/kernel/sched/core.c#L7048-L7060)、[resched_curr()](../../linux/kernel/sched/core.c#L1155-L1158) |
-| 换给谁 | 按**调度类**（scheduling class）的优先级从高到低询问，第一个给出任务的类胜出；类内部用各自的算法挑选 | [__pick_next_task()](../../linux/kernel/sched/core.c#L5972-L6023) |
-| 在哪个 CPU 上运行 | 唤醒、fork、exec 时由调度类的 `select_task_rq` 选 CPU；运行期间由负载均衡在 CPU 之间迁移任务 | [select_task_rq()](../../linux/kernel/sched/core.c#L3583-L3608)、[sched_balance_trigger()](../../linux/kernel/sched/fair.c#L13257-L13270) |
+| 问题              | 机制                                                                                                          | 主要入口                                                                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 什么时候换人      | 任务主动阻塞时调用 `schedule()`；其他情况先设置 `TIF_NEED_RESCHED`，等到下一个**抢占点**再进入 `__schedule()` | [schedule()](../../linux/kernel/sched/core.c#L7048-L7060)、[resched_curr()](../../linux/kernel/sched/core.c#L1155-L1158)                  |
+| 换给谁            | 按**调度类**（scheduling class）的优先级从高到低询问，第一个给出任务的类胜出；类内部用各自的算法挑选          | [__pick_next_task()](../../linux/kernel/sched/core.c#L5972-L6023)                                                                         |
+| 在哪个 CPU 上运行 | 唤醒、fork、exec 时由调度类的 `select_task_rq` 选 CPU；运行期间由负载均衡在 CPU 之间迁移任务                  | [select_task_rq()](../../linux/kernel/sched/core.c#L3583-L3608)、[sched_balance_trigger()](../../linux/kernel/sched/fair.c#L13257-L13270) |
 
 “什么时候换人”和“换给谁”是分开的。`__schedule()` 源码前的注释（[core.c#L6778-L6815](../../linux/kernel/sched/core.c#L6778-L6815)）列出了进入调度器的三种方式：显式阻塞；在中断返回、返回用户态等路径上检查 `TIF_NEED_RESCHED`；以及唤醒。注释特别指出，唤醒本身并不进入 `schedule()`，它只是把任务放回运行队列，必要时设置 `TIF_NEED_RESCHED`，真正的切换发生在“最近的可能时机”。
 
@@ -59,13 +59,13 @@
 
 用户通过 `sched_setattr()`、`sched_setscheduler()`、`nice()` 等系统调用为任务指定**调度策略**（policy）。内核把策略映射到**调度类**，每个调度类是一组实现了相同接口的函数。当前配置下有 5 个调度类，按优先级从高到低为：
 
-| 调度类 | 对应的用户策略 | 用途 | 类内的选择规则 |
-| --- | --- | --- | --- |
-| `stop_sched_class` | 无（内核内部） | 每个 CPU 一个 stopper 线程，用于 `stop_machine`、迁移正在运行的任务等，抢占一切且不可被抢占 | 运行队列上只有 `rq->stop` 一个任务 |
-| `dl_sched_class` | `SCHED_DEADLINE` | 按运行预算、相对截止时间和周期提供受准入控制约束的预约 | 绝对截止时间最早者（EDF，Earliest Deadline First） |
-| `rt_sched_class` | `SCHED_FIFO`、`SCHED_RR` | 固定优先级实时任务 | 最高优先级队列的队首；RR 有时间片 |
-| `fair_sched_class` | `SCHED_NORMAL`、`SCHED_BATCH`、`SCHED_IDLE` | 普通任务，按权重分享 CPU | EEVDF：在“应得服务”的任务中选虚拟截止时间最早者 |
-| `idle_sched_class` | 无（内核内部） | 每个 CPU 一个 idle 任务，没有其他任务时运行 | 总是返回 `rq->idle` |
+| 调度类             | 对应的用户策略                              | 用途                                                                                        | 类内的选择规则                                     |
+| ------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `stop_sched_class` | 无（内核内部）                              | 每个 CPU 一个 stopper 线程，用于 `stop_machine`、迁移正在运行的任务等，抢占一切且不可被抢占 | 运行队列上只有 `rq->stop` 一个任务                 |
+| `dl_sched_class`   | `SCHED_DEADLINE`                            | 按运行预算、相对截止时间和周期提供受准入控制约束的预约                                      | 绝对截止时间最早者（EDF，Earliest Deadline First） |
+| `rt_sched_class`   | `SCHED_FIFO`、`SCHED_RR`                    | 固定优先级实时任务                                                                          | 最高优先级队列的队首；RR 有时间片                  |
+| `fair_sched_class` | `SCHED_NORMAL`、`SCHED_BATCH`、`SCHED_IDLE` | 普通任务，按权重分享 CPU                                                                    | EEVDF：在“应得服务”的任务中选虚拟截止时间最早者    |
+| `idle_sched_class` | 无（内核内部）                              | 每个 CPU 一个 idle 任务，没有其他任务时运行                                                 | 总是返回 `rq->idle`                                |
 
 这 5 个类分别定义在 [stop_task.c#L96-L117](../../linux/kernel/sched/stop_task.c#L96-L117)、[deadline.c#L3307-L3339](../../linux/kernel/sched/deadline.c#L3307-L3339)、[rt.c#L2578-L2615](../../linux/kernel/sched/rt.c#L2578-L2615)、[fair.c#L14095-L14142](../../linux/kernel/sched/fair.c#L14095-L14142) 和 [idle.c#L546-L568](../../linux/kernel/sched/idle.c#L546-L568)。策略常量定义在 [uapi/linux/sched.h#L114-L121](../../linux/include/uapi/linux/sched.h#L114-L121)，其中 `SCHED_EXT = 7`；由于 sched_ext 没有编入，[normal_policy()（sched.h#L192-L199）](../../linux/kernel/sched/sched.h#L192-L199) 不把 `SCHED_EXT` 当作普通策略，[valid_policy()（sched.h#L216-L220）](../../linux/kernel/sched/sched.h#L216-L220) 因此不接受它。
 
@@ -166,26 +166,26 @@ flowchart TB
 
 与其他子系统的交互点：
 
-| 子系统 | 交互方式 | 依据 |
-| --- | --- | --- |
-| 时间子系统 | 每个 tick 调用 `sched_tick()` | [timer.c#L2479](../../linux/kernel/time/timer.c#L2479) |
-| 中断 / IPI（处理器间中断） | 中断返回时检查是否需要抢占；远程 CPU 通过重调度 IPI 通知 | [entry/common.c#L185-L211](../../linux/kernel/entry/common.c#L185-L211)、[x86 smp.c#L248-L255](../../linux/arch/x86/kernel/smp.c#L248-L255) |
-| 等待队列、锁 | 睡眠一方调用 `schedule()`，唤醒一方调用 `try_to_wake_up()` | [wait.h#L302-L331](../../linux/include/linux/wait.h#L302-L331)、[core.c#L7296-L7301](../../linux/kernel/sched/core.c#L7296-L7301) |
-| 内存管理 | 切换时按需切换地址空间，`mm == NULL` 的任务借用前一个任务的 `active_mm` | [core.c#L5315-L5341](../../linux/kernel/sched/core.c#L5315-L5341) |
-| 进程管理 | fork 时初始化调度状态并首次入队，exit 时最后一次调度 | [fork.c#L2155](../../linux/kernel/fork.c#L2155)、[fork.c#L2642](../../linux/kernel/fork.c#L2642)、[exit.c#L1020](../../linux/kernel/exit.c#L1020) |
-| cgroup | `cpu` 控制器把组变成公平类中的调度实体；cpuset 影响任务亲和性和调度域 | [cgroup v2 的 cpu 控制器](../cgroup2/cpu.md) |
-| cpuidle | idle 任务在 `do_idle()` 中进入 C 状态 | [idle.c#L276-L383](../../linux/kernel/sched/idle.c#L276-L383) |
+| 子系统                     | 交互方式                                                                | 依据                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 时间子系统                 | 每个 tick 调用 `sched_tick()`                                           | [timer.c#L2479](../../linux/kernel/time/timer.c#L2479)                                                                                            |
+| 中断 / IPI（处理器间中断） | 中断返回时检查是否需要抢占；远程 CPU 通过重调度 IPI 通知                | [entry/common.c#L185-L211](../../linux/kernel/entry/common.c#L185-L211)、[x86 smp.c#L248-L255](../../linux/arch/x86/kernel/smp.c#L248-L255)       |
+| 等待队列、锁               | 睡眠一方调用 `schedule()`，唤醒一方调用 `try_to_wake_up()`              | [wait.h#L302-L331](../../linux/include/linux/wait.h#L302-L331)、[core.c#L7296-L7301](../../linux/kernel/sched/core.c#L7296-L7301)                 |
+| 内存管理                   | 切换时按需切换地址空间，`mm == NULL` 的任务借用前一个任务的 `active_mm` | [core.c#L5315-L5341](../../linux/kernel/sched/core.c#L5315-L5341)                                                                                 |
+| 进程管理                   | fork 时初始化调度状态并首次入队，exit 时最后一次调度                    | [fork.c#L2155](../../linux/kernel/fork.c#L2155)、[fork.c#L2642](../../linux/kernel/fork.c#L2642)、[exit.c#L1020](../../linux/kernel/exit.c#L1020) |
+| cgroup                     | `cpu` 控制器把组变成公平类中的调度实体；cpuset 影响任务亲和性和调度域   | [cgroup v2 的 cpu 控制器](../cgroup2/cpu.md)                                                                                                      |
+| cpuidle                    | idle 任务在 `do_idle()` 中进入 C 状态                                   | [idle.c#L276-L383](../../linux/kernel/sched/idle.c#L276-L383)                                                                                     |
 
 ### 1.5 触发事件与输入输出
 
-| 触发事件 | 输入 | 输出 / 结果 |
-| --- | --- | --- |
-| 任务调用 `schedule()` 阻塞 | `current->__state` 非 `TASK_RUNNING` | 尝试阻塞（信号可取消，公平类可延迟出队），选择 `next`；只有 `next != prev` 才切换（4.2 节） |
-| `try_to_wake_up(p, state, flags)` | 任务 `p`、允许唤醒的状态掩码 | 状态匹配才认领唤醒；已在队列上的任务恢复状态，否则直接或异步入队；必要时设置目标 CPU 的 `need_resched`（4.4 节） |
-| 每个 tick 调用 `sched_tick()` | 当前任务、运行队列时钟 | 更新运行时间记账；时间片用完则设置 `need_resched`；必要时触发负载均衡软中断 |
-| 到达抢占点 | `TIF_NEED_RESCHED`（或 `TIF_NEED_RESCHED_LAZY`） | 调用 `__schedule(SM_PREEMPT)` 或 `schedule()` |
-| fork 产生新任务 | 父任务的调度属性 | 子任务初始化为 `TASK_NEW`，选 CPU 后首次入队 |
-| `sched_setattr()` / `nice()` | 新策略、优先级、参数 | 验证通过后修改属性；原本在队列上才摘下、重新入队，修改策略还可能更换调度类（4.6 节） |
+| 触发事件                          | 输入                                             | 输出 / 结果                                                                                                      |
+| --------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| 任务调用 `schedule()` 阻塞        | `current->__state` 非 `TASK_RUNNING`             | 尝试阻塞（信号可取消，公平类可延迟出队），选择 `next`；只有 `next != prev` 才切换（4.2 节）                      |
+| `try_to_wake_up(p, state, flags)` | 任务 `p`、允许唤醒的状态掩码                     | 状态匹配才认领唤醒；已在队列上的任务恢复状态，否则直接或异步入队；必要时设置目标 CPU 的 `need_resched`（4.4 节） |
+| 每个 tick 调用 `sched_tick()`     | 当前任务、运行队列时钟                           | 更新运行时间记账；时间片用完则设置 `need_resched`；必要时触发负载均衡软中断 `SCHED_SOFTIRQ`                      |
+| 到达抢占点                        | `TIF_NEED_RESCHED`（或 `TIF_NEED_RESCHED_LAZY`） | 调用 `__schedule(SM_PREEMPT)` 或 `schedule()`                                                                    |
+| fork 产生新任务                   | 父任务的调度属性                                 | 子任务初始化为 `TASK_NEW`，选 CPU 后首次入队                                                                     |
+| `sched_setattr()` / `nice()`      | 新策略、优先级、参数                             | 验证通过后修改属性；原本在队列上才摘下、重新入队，修改策略还可能更换调度类（4.6 节）                             |
 
 ### 1.6 本章边界
 
@@ -236,55 +236,57 @@ flowchart LR
 
 - 一个任务**同时嵌入**三种调度实体（`se`、`rt`、`dl`），所属调度类使用对应实体维护队列；这不表示任务始终挂在排序结构中，睡眠、节流和正在运行等状态都有例外。切换调度类时，对原本入队的任务从旧类摘下、再挂入新类（4.6 节）。stop 和 idle 类只使用特殊任务指针。
 - `rq->fair_server` 是 `rq` 中嵌入的一个 deadline 实体，它代表整个公平类参与 deadline 类的竞争（3.4 节）。
-- `rq->curr` 指向正在运行的任务。要区分“在运行队列上”（`p->on_rq` 非 0）和“在调度类的排序结构里”：正在运行的公平任务 `on_rq` 仍为 1，但它的 `se` 被 [set_next_entity()（fair.c#L5632-L5653）](../../linux/kernel/sched/fair.c#L5632-L5653) 移出红黑树，由 `cfs_rq->curr` 单独记录，被换下时再由 [put_prev_entity()（fair.c#L5700-L5720）](../../linux/kernel/sched/fair.c#L5700-L5720) 放回。另外，`__schedule()` 中刚被 `block_task()` 出队的 `prev`，在 `rq->curr` 更新为 `next` 之前仍是 `rq->curr`。
+- `rq->curr` 指向正在运行的任务。要区分“在运行队列上”（`p->on_rq` 非 0）和“在调度类的排序结构里”，对正在运行的任务，这两者可能不一致：
+  - **公平类把当前实体移出红黑树。** 正在运行的公平任务 `on_rq` 仍为 `TASK_ON_RQ_QUEUED`（1），但 [set_next_task_fair()（fair.c#L13778-L13791）](../../linux/kernel/sched/fair.c#L13778-L13791) 沿层级对任务的 `se` 及各级组实体调用 [set_next_entity()（fair.c#L5632-L5653）](../../linux/kernel/sched/fair.c#L5632-L5653)，把它们从所在 `cfs_rq` 的红黑树摘下，记为该 `cfs_rq->curr`。被换下（或调度属性变更时被临时放下）时，[put_prev_entity()（fair.c#L5700-L5720）](../../linux/kernel/sched/fair.c#L5700-L5720) 只在 `se->on_rq` 仍为 1 时把实体放回树中，随后清空 `cfs_rq->curr`；已睡眠出队的实体不会放回，延迟出队的实体会被放回，等下次被选中时再真正出队（3.3 节）。RT 和 deadline 类不这样处理，正在运行的任务仍留在各自队列中，只被移出可推送集合（[rt.c#L1654-L1655](../../linux/kernel/sched/rt.c#L1654-L1655)、[deadline.c#L2541-L2542](../../linux/kernel/sched/deadline.c#L2541-L2542)）。
+  - **`rq->curr` 也可能已经不在运行队列上。** `__schedule()` 先由 `try_to_block_task()` 处理 `prev`（[core.c#L6897-L6898](../../linux/kernel/sched/core.c#L6897-L6898)），再选择 `next`，最后才把 `rq->curr` 改为 `next`（[core.c#L6926](../../linux/kernel/sched/core.c#L6926)）。若 `block_task()` 真正完成了出队，在这段窗口里 `prev` 的 `on_rq` 已为 0，却仍是 `rq->curr`；若公平类选择了延迟出队，`prev` 的 `on_rq` 仍为 1（4.2 节）。
 
 ### 2.2 `task_struct` 中的调度字段
 
 [`struct task_struct`（linux/sched.h#L815）](../../linux/include/linux/sched.h#L815) 中与调度直接相关的字段集中在开头：
 
-| 字段 | 含义 | 依据 |
-| --- | --- | --- |
-| `__state` | 任务状态：`TASK_RUNNING`（0）表示可运行；非 0 包括睡眠、停止、`TASK_WAKING`、`TASK_NEW`、`TASK_DEAD` 等，不能一律当成已睡眠 | [linux/sched.h#L823](../../linux/include/linux/sched.h#L823)、[linux/sched.h#L105-L139](../../linux/include/linux/sched.h#L105-L139) |
-| `on_cpu` | 任务是否正在某个 CPU 上执行（包括切换过程中） | [linux/sched.h#L844](../../linux/include/linux/sched.h#L844) |
-| `wake_entry` | 远程唤醒时挂到目标 CPU 唤醒链表的节点 | [linux/sched.h#L845](../../linux/include/linux/sched.h#L845) |
-| `wake_cpu`、`recent_used_cpu` | 唤醒时选择 CPU 的起点与提示 | [linux/sched.h#L857-L858](../../linux/include/linux/sched.h#L857-L858) |
-| `on_rq` | 是否在运行队列上：0、`TASK_ON_RQ_QUEUED`（1）、`TASK_ON_RQ_MIGRATING`（2） | [linux/sched.h#L859](../../linux/include/linux/sched.h#L859)、[sched.h#L97-L98](../../linux/kernel/sched/sched.h#L97-L98) |
-| `prio` | **有效优先级**，调度器实际使用的值；可被优先级继承临时提升 | [linux/sched.h#L861](../../linux/include/linux/sched.h#L861) |
-| `static_prio` | 由 nice 值决定：`nice + 120` | [linux/sched.h#L862](../../linux/include/linux/sched.h#L862) |
-| `normal_prio` | 不考虑优先级继承时按策略算出的优先级 | [linux/sched.h#L863](../../linux/include/linux/sched.h#L863) |
-| `rt_priority` | 用户设置的实时优先级 1～99 | [linux/sched.h#L864](../../linux/include/linux/sched.h#L864) |
-| `se`、`rt`、`dl` | 三种调度实体，嵌入在任务中 | [linux/sched.h#L866-L868](../../linux/include/linux/sched.h#L866-L868) |
-| `dl_server` | 若任务是经由 deadline 服务器选中的，指向该服务器 | [linux/sched.h#L869](../../linux/include/linux/sched.h#L869) |
-| `sched_class` | 当前所属调度类 | [linux/sched.h#L873](../../linux/include/linux/sched.h#L873) |
-| `policy` | 调度策略 | [linux/sched.h#L915](../../linux/include/linux/sched.h#L915) |
-| `nr_cpus_allowed`、`cpus_ptr`、`cpus_mask` | 允许运行的 CPU 集合（亲和性） | [linux/sched.h#L917-L920](../../linux/include/linux/sched.h#L917-L920) |
-| `migration_disabled` | 非 0 时任务暂时不能迁移 | [linux/sched.h#L922](../../linux/include/linux/sched.h#L922) |
-| `pi_lock` | 保护唤醒以及策略、亲和性等属性的修改 | [linux/sched.h#L1229](../../linux/include/linux/sched.h#L1229) |
+| 字段                                       | 含义                                                                                                                        | 依据                                                                                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `__state`                                  | 任务状态：`TASK_RUNNING`（0）表示可运行；非 0 包括睡眠、停止、`TASK_WAKING`、`TASK_NEW`、`TASK_DEAD` 等，不能一律当成已睡眠 | [linux/sched.h#L823](../../linux/include/linux/sched.h#L823)、[linux/sched.h#L105-L139](../../linux/include/linux/sched.h#L105-L139) |
+| `on_cpu`                                   | 任务是否正在某个 CPU 上执行（包括切换过程中）                                                                               | [linux/sched.h#L844](../../linux/include/linux/sched.h#L844)                                                                         |
+| `wake_entry`                               | 远程唤醒时挂到目标 CPU 唤醒链表的节点                                                                                       | [linux/sched.h#L845](../../linux/include/linux/sched.h#L845)                                                                         |
+| `wake_cpu`、`recent_used_cpu`              | 唤醒时选择 CPU 的起点与提示                                                                                                 | [linux/sched.h#L857-L858](../../linux/include/linux/sched.h#L857-L858)                                                               |
+| `on_rq`                                    | 是否在运行队列上：0、`TASK_ON_RQ_QUEUED`（1）、`TASK_ON_RQ_MIGRATING`（2）                                                  | [linux/sched.h#L859](../../linux/include/linux/sched.h#L859)、[sched.h#L97-L98](../../linux/kernel/sched/sched.h#L97-L98)            |
+| `prio`                                     | **有效优先级**，调度器实际使用的值；可被优先级继承临时提升                                                                  | [linux/sched.h#L861](../../linux/include/linux/sched.h#L861)                                                                         |
+| `static_prio`                              | 由 nice 值决定：`nice + 120`                                                                                                | [linux/sched.h#L862](../../linux/include/linux/sched.h#L862)                                                                         |
+| `normal_prio`                              | 不考虑优先级继承时按策略算出的优先级                                                                                        | [linux/sched.h#L863](../../linux/include/linux/sched.h#L863)                                                                         |
+| `rt_priority`                              | 用户设置的实时优先级 1～99                                                                                                  | [linux/sched.h#L864](../../linux/include/linux/sched.h#L864)                                                                         |
+| `se`、`rt`、`dl`                           | 三种调度实体，嵌入在任务中                                                                                                  | [linux/sched.h#L866-L868](../../linux/include/linux/sched.h#L866-L868)                                                               |
+| `dl_server`                                | 若任务是经由 deadline 服务器选中的，指向该服务器                                                                            | [linux/sched.h#L869](../../linux/include/linux/sched.h#L869)                                                                         |
+| `sched_class`                              | 当前所属调度类                                                                                                              | [linux/sched.h#L873](../../linux/include/linux/sched.h#L873)                                                                         |
+| `policy`                                   | 调度策略                                                                                                                    | [linux/sched.h#L915](../../linux/include/linux/sched.h#L915)                                                                         |
+| `nr_cpus_allowed`、`cpus_ptr`、`cpus_mask` | 允许运行的 CPU 集合（亲和性）                                                                                               | [linux/sched.h#L917-L920](../../linux/include/linux/sched.h#L917-L920)                                                               |
+| `migration_disabled`                       | 非 0 时任务暂时不能迁移                                                                                                     | [linux/sched.h#L922](../../linux/include/linux/sched.h#L922)                                                                         |
+| `pi_lock`                                  | 保护唤醒以及策略、亲和性等属性的修改                                                                                        | [linux/sched.h#L1229](../../linux/include/linux/sched.h#L1229)                                                                       |
 
 `prio`、`normal_prio`、`static_prio` 三者的关系由 [effective_prio()（syscalls.c#L52-L63）](../../linux/kernel/sched/syscalls.c#L52-L63) 体现：先由策略算出 `normal_prio`；如果当前 `prio` 不在实时或 deadline 区间，就返回 `normal_prio`，否则保留当前有效值，以免覆盖优先级继承的提升。后一分支也会覆盖本来就是实时优先级的任务，不能仅据此断言任务已被继承提升。
 
 **三个状态变量。** 理解调度器并发协议的关键，是区分 `__state`、`on_rq` 和 `on_cpu` 这三个相互独立的变量。[core.c#L592-L618](../../linux/kernel/sched/core.c#L592-L618) 的注释给出了它们的修改规则：
 
-| 变量 | 回答的问题 | 谁修改 | 保护方式 |
-| --- | --- | --- | --- |
-| `__state` | 任务处于哪种调度状态？ | 任务自己设置状态；`try_to_wake_up()` 写回 `TASK_RUNNING` | 普通等待用 `set_current_state()` 的屏障；特殊状态用 `set_special_state()` 持 `pi_lock`；唤醒方也用 `pi_lock`（[linux/sched.h#L201-L267](../../linux/include/linux/sched.h#L201-L267)） |
-| `on_rq` | 任务是否在运行队列上？ | `activate_task()` 置为 `TASK_ON_RQ_QUEUED`；迁移时 `deactivate_task()` 置为 `TASK_ON_RQ_MIGRATING`；睡眠时 `block_task()` 经 `__block_task()` 清零 | 初始化之外在 `rq->__lock` 下修改，清零用 release 语义 |
-| `on_cpu` | 任务是否正在 CPU 上？ | `prepare_task()` 切入前置 1，`finish_task()` 切出后清 0 | `rq->__lock` 下修改，清零用 release 语义 |
+| 变量      | 回答的问题             | 谁修改                                                                                                                                             | 保护方式                                                                                                                                                                               |
+| --------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `__state` | 任务处于哪种调度状态？ | 任务自己设置状态；`try_to_wake_up()` 写回 `TASK_RUNNING`                                                                                           | 普通等待用 `set_current_state()` 的屏障；特殊状态用 `set_special_state()` 持 `pi_lock`；唤醒方也用 `pi_lock`（[linux/sched.h#L201-L267](../../linux/include/linux/sched.h#L201-L267)） |
+| `on_rq`   | 任务是否在运行队列上？ | `activate_task()` 置为 `TASK_ON_RQ_QUEUED`；迁移时 `deactivate_task()` 置为 `TASK_ON_RQ_MIGRATING`；睡眠时 `block_task()` 经 `__block_task()` 清零 | 初始化之外在 `rq->__lock` 下修改，清零用 release 语义                                                                                                                                  |
+| `on_cpu`  | 任务是否正在 CPU 上？  | `prepare_task()` 切入前置 1，`finish_task()` 切出后清 0                                                                                            | `rq->__lock` 下修改，清零用 release 语义                                                                                                                                               |
 
 `on_rq` 一行需要注意注释与实现的差异：注释（[core.c#L599-L604](../../linux/kernel/sched/core.c#L599-L604)）写的是“由 `deactivate_task()` 清零”，但当前实现中 [deactivate_task()（core.c#L2156-L2169）](../../linux/kernel/sched/core.c#L2156-L2169) 只把 `on_rq` 写为 `TASK_ON_RQ_MIGRATING`，供迁移代码在摘下与挂上之间使用。除了 fork 时 [__sched_fork()（core.c#L4458）](../../linux/kernel/sched/core.c#L4458) 对新任务的初始化，把 `on_rq` 写成 0 的只有 [__block_task()（sched.h#L2810）](../../linux/kernel/sched/sched.h#L2810)，调用者是 [block_task()（core.c#L2171-L2175）](../../linux/kernel/sched/core.c#L2171-L2175) 和延迟出队任务最终出队的路径（[fair.c#L7298-L7311](../../linux/kernel/sched/fair.c#L7298-L7311)）。本章以实现为准。
 
 几种典型组合：
 
-| `__state` | `on_rq` | `on_cpu` | 处境 |
-| --- | --- | --- | --- |
-| `TASK_RUNNING` | 1 | 1 | 正在运行 |
-| `TASK_RUNNING` | 1 | 0 | 可运行，在队列中等待 |
-| 非 0 | 1 | 1 | 已调用 `set_current_state()`，但还没在 `__schedule()` 中出队 |
-| 非 0 | 1 | 0 | 设置睡眠状态后、主动调用 `schedule()` 前被抢占，仍留在队列中（4.2 节） |
-| 非 0 | 0 | 1 | `__schedule()` 已把它出队，但 CPU 还没切换完 |
-| 非 0 | 0 | 0 | 完全睡眠 |
-| `TASK_WAKING` | 0 | 0 或 1 | 唤醒方已认领，正在选择 CPU、准备入队 |
-| `TASK_NEW` | 0 | 0 | fork 中，尚未首次入队 |
+| `__state`      | `on_rq` | `on_cpu` | 处境                                                                   |
+| -------------- | ------- | -------- | ---------------------------------------------------------------------- |
+| `TASK_RUNNING` | 1       | 1        | 正在运行                                                               |
+| `TASK_RUNNING` | 1       | 0        | 可运行，在队列中等待                                                   |
+| 非 0           | 1       | 1        | 已调用 `set_current_state()`，但还没在 `__schedule()` 中出队           |
+| 非 0           | 1       | 0        | 设置睡眠状态后、主动调用 `schedule()` 前被抢占，仍留在队列中（4.2 节） |
+| 非 0           | 0       | 1        | `__schedule()` 已把它出队，但 CPU 还没切换完                           |
+| 非 0           | 0       | 0        | 完全睡眠                                                               |
+| `TASK_WAKING`  | 0       | 0 或 1   | 唤醒方已认领，正在选择 CPU、准备入队                                   |
+| `TASK_NEW`     | 0       | 0        | fork 中，尚未首次入队                                                  |
 
 此外还有一个特例：公平类的**延迟出队**（delayed dequeue）。任务已睡眠（`__state` 非 0），但 `on_rq` 仍为 1，`p->se.sched_delayed` 为 1，它会在下次被选中时才真正出队（[core.c#L606-L609](../../linux/kernel/sched/core.c#L606-L609)，3.3 节）。
 
@@ -292,22 +294,22 @@ flowchart LR
 
 [`struct rq`（sched.h#L1120-L1323）](../../linux/kernel/sched/sched.h#L1120-L1323) 是调度器最核心的结构。它是一个每 CPU 变量 `runqueues`（[sched.h#L1353](../../linux/kernel/sched/sched.h#L1353)），通过 `cpu_rq(cpu)`、`this_rq()`、`task_rq(p)`、`cpu_curr(cpu)` 访问（[sched.h#L1361-L1364](../../linux/kernel/sched/sched.h#L1361-L1364)）。
 
-| 字段 | 含义 |
-| --- | --- |
-| `__lock` | 运行队列锁，`raw_spinlock_t`；保护本结构及其中嵌入的各类子队列 |
-| `nr_running` | 本 CPU 上各调度类入队任务的总数，不含 idle 任务；处于延迟出队状态的公平任务在真正出队前仍计入（[fair.c#L7233-L7235](../../linux/kernel/sched/fair.c#L7233-L7235)、[fair.c#L7292](../../linux/kernel/sched/fair.c#L7292)） |
-| `nr_switches` | 本 CPU 上发生的上下文切换次数 |
-| `ttwu_pending` | 远程唤醒链表上是否有待处理的任务 |
-| `cfs`、`rt`、`dl` | 三个嵌入的子队列：公平类、实时类、deadline 类 |
-| `fair_server` | 代表公平类的 deadline 实体（3.4 节） |
-| `nr_uninterruptible` | 处于不可中断睡眠的任务计数，用于计算系统负载；只有各 CPU 之和有意义 |
-| `curr`、`donor` | 当前运行的任务；当前配置下二者是同一个联合体成员 |
-| `dl_server` | 本次选择是否经由 deadline 服务器 |
-| `idle`、`stop` | 本 CPU 的 idle 任务和 stopper 任务 |
-| `clock`、`clock_task` | 运行队列时钟，单位纳秒（3.7 节） |
-| `rd`、`sd` | 根域（root domain）和最底层调度域，供负载均衡使用 |
-| `next_balance` | 下次周期性负载均衡的时刻，单位 jiffies |
-| `cpu` | 本运行队列所属 CPU 编号 |
+| 字段                  | 含义                                                                                                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `__lock`              | 运行队列锁，`raw_spinlock_t`；保护本结构及其中嵌入的各类子队列                                                                                                                                                            |
+| `nr_running`          | 本 CPU 上各调度类入队任务的总数，不含 idle 任务；处于延迟出队状态的公平任务在真正出队前仍计入（[fair.c#L7233-L7235](../../linux/kernel/sched/fair.c#L7233-L7235)、[fair.c#L7292](../../linux/kernel/sched/fair.c#L7292)） |
+| `nr_switches`         | 本 CPU 上发生的上下文切换次数                                                                                                                                                                                             |
+| `ttwu_pending`        | 远程唤醒链表上是否有待处理的任务                                                                                                                                                                                          |
+| `cfs`、`rt`、`dl`     | 三个嵌入的子队列：公平类、实时类、deadline 类                                                                                                                                                                             |
+| `fair_server`         | 代表公平类的 deadline 实体（3.4 节）                                                                                                                                                                                      |
+| `nr_uninterruptible`  | 处于不可中断睡眠的任务计数，用于计算系统负载；只有各 CPU 之和有意义                                                                                                                                                       |
+| `curr`、`donor`       | 当前运行的任务；当前配置下二者是同一个联合体成员                                                                                                                                                                          |
+| `dl_server`           | 本次选择是否经由 deadline 服务器                                                                                                                                                                                          |
+| `idle`、`stop`        | 本 CPU 的 idle 任务和 stopper 任务                                                                                                                                                                                        |
+| `clock`、`clock_task` | 运行队列时钟，单位纳秒（3.7 节）                                                                                                                                                                                          |
+| `rd`、`sd`            | 根域（root domain）和最底层调度域，供负载均衡使用                                                                                                                                                                         |
+| `next_balance`        | 下次周期性负载均衡的时刻，单位 jiffies                                                                                                                                                                                    |
+| `cpu`                 | 本运行队列所属 CPU 编号                                                                                                                                                                                                   |
 
 字段依次见 [sched.h#L1122-L1139](../../linux/kernel/sched/sched.h#L1122-L1139)、[sched.h#L1148-L1155](../../linux/kernel/sched/sched.h#L1148-L1155)、[sched.h#L1169-L1189](../../linux/kernel/sched/sched.h#L1169-L1189)、[sched.h#L1208-L1209](../../linux/kernel/sched/sched.h#L1208-L1209) 和 [sched.h#L1226](../../linux/kernel/sched/sched.h#L1226)。
 
@@ -319,17 +321,17 @@ flowchart LR
 
 [`struct sched_class`（sched.h#L2413-L2484）](../../linux/kernel/sched/sched.h#L2413-L2484) 是一张函数表。按职责可以分成几组：
 
-| 职责 | 方法 | 调用时机 |
-| --- | --- | --- |
-| 队列维护 | `enqueue_task`、`dequeue_task` | 任务变为可运行 / 不可运行，或属性修改前后 |
-| 选择 | `balance`、`pick_task`、`pick_next_task`（可选） | `__schedule()` 选下一个任务 |
-| 切换前后 | `put_prev_task`、`set_next_task` | 任务被换下 / 被换上 CPU |
-| 抢占判断 | `wakeup_preempt` | 新任务入队后，判断是否应抢占当前任务 |
+| 职责       | 方法                                                                                  | 调用时机                                  |
+| ---------- | ------------------------------------------------------------------------------------- | ----------------------------------------- |
+| 队列维护   | `enqueue_task`、`dequeue_task`                                                        | 任务变为可运行 / 不可运行，或属性修改前后 |
+| 选择       | `balance`、`pick_task`、`pick_next_task`（可选）                                      | `__schedule()` 选下一个任务               |
+| 切换前后   | `put_prev_task`、`set_next_task`                                                      | 任务被换下 / 被换上 CPU                   |
+| 抢占判断   | `wakeup_preempt`                                                                      | 新任务入队后，判断是否应抢占当前任务      |
 | 放置与迁移 | `select_task_rq`、`migrate_task_rq`、`task_woken`、`set_cpus_allowed`、`find_lock_rq` | 唤醒、fork、exec 选 CPU；迁移；亲和性变化 |
-| 记账 | `task_tick`、`update_curr` | 每个 tick；需要最新运行时间时 |
-| 生命周期 | `task_fork`、`task_dead` | fork、任务最后一次切出 |
-| 属性变化 | `switching_to`、`switched_from`、`switched_to`、`prio_changed`、`reweight_task` | 更换调度类、优先级或权重 |
-| CPU 上下线 | `rq_online`、`rq_offline` | CPU 加入或离开根域 |
+| 记账       | `task_tick`、`update_curr`                                                            | 每个 tick；需要最新运行时间时             |
+| 生命周期   | `task_fork`、`task_dead`                                                              | fork、任务最后一次切出                    |
+| 属性变化   | `switching_to`、`switched_from`、`switched_to`、`prio_changed`、`reweight_task`       | 更换调度类、优先级或权重                  |
+| CPU 上下线 | `rq_online`、`rq_offline`                                                             | CPU 加入或离开根域                        |
 
 `pick_task` 与 `pick_next_task` 的关系由注释（[sched.h#L2428-L2437](../../linux/kernel/sched/sched.h#L2428-L2437)）规定：`pick_next_task` 是可选的优化版本，它等价于“`pick_task()`，若选中则 `put_prev_task(prev)` 再 `set_next_task_first(next)`”。核心层的通用版本就是 [put_prev_set_next_task()（sched.h#L2507-L2520）](../../linux/kernel/sched/sched.h#L2507-L2520)。
 
@@ -342,28 +344,28 @@ flowchart LR
 
 ### 2.5 各类的子队列与调度实体
 
-| 调度类 | 队列结构 | 实体 | 组织方式 | 依据 |
-| --- | --- | --- | --- | --- |
-| fair | `struct cfs_rq` | `struct sched_entity` | 增强红黑树 `tasks_timeline`，按**虚拟截止时间**排序；每个节点额外维护子树最小 `vruntime` | [sched.h#L676-L698](../../linux/kernel/sched/sched.h#L676-L698)、[linux/sched.h#L570-L616](../../linux/include/linux/sched.h#L570-L616)、[fair.c#L582-L590](../../linux/kernel/sched/fair.c#L582-L590) |
-| rt | `struct rt_rq` | `struct sched_rt_entity` | `rt_prio_array`：100 条链表 + 位图，下标即 `prio` | [sched.h#L309-L312](../../linux/kernel/sched/sched.h#L309-L312)、[sched.h#L827-L854](../../linux/kernel/sched/sched.h#L827-L854)、[linux/sched.h#L618-L634](../../linux/include/linux/sched.h#L618-L634) |
-| deadline | `struct dl_rq` | `struct sched_dl_entity` | 红黑树 `root`，按绝对截止时间排序 | [sched.h#L862-L877](../../linux/kernel/sched/sched.h#L862-L877)、[linux/sched.h#L639-L744](../../linux/include/linux/sched.h#L639-L744) |
-| stop / idle | 无 | 无 | `rq->stop`、`rq->idle` 两个指针 | [sched.h#L1181-L1182](../../linux/kernel/sched/sched.h#L1181-L1182) |
+| 调度类      | 队列结构        | 实体                     | 组织方式                                                                                 | 依据                                                                                                                                                                                                     |
+| ----------- | --------------- | ------------------------ | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| fair        | `struct cfs_rq` | `struct sched_entity`    | 增强红黑树 `tasks_timeline`，按**虚拟截止时间**排序；每个节点额外维护子树最小 `vruntime` | [sched.h#L676-L698](../../linux/kernel/sched/sched.h#L676-L698)、[linux/sched.h#L570-L616](../../linux/include/linux/sched.h#L570-L616)、[fair.c#L582-L590](../../linux/kernel/sched/fair.c#L582-L590)   |
+| rt          | `struct rt_rq`  | `struct sched_rt_entity` | `rt_prio_array`：100 条链表 + 位图，下标即 `prio`                                        | [sched.h#L309-L312](../../linux/kernel/sched/sched.h#L309-L312)、[sched.h#L827-L854](../../linux/kernel/sched/sched.h#L827-L854)、[linux/sched.h#L618-L634](../../linux/include/linux/sched.h#L618-L634) |
+| deadline    | `struct dl_rq`  | `struct sched_dl_entity` | 红黑树 `root`，按绝对截止时间排序                                                        | [sched.h#L862-L877](../../linux/kernel/sched/sched.h#L862-L877)、[linux/sched.h#L639-L744](../../linux/include/linux/sched.h#L639-L744)                                                                  |
+| stop / idle | 无              | 无                       | `rq->stop`、`rq->idle` 两个指针                                                          | [sched.h#L1181-L1182](../../linux/kernel/sched/sched.h#L1181-L1182)                                                                                                                                      |
 
 公平类实体中与本章有关的字段：
 
-| 字段 | 含义 |
-| --- | --- |
-| `load` | 权重，由 nice 值查表得到（3.1 节） |
-| `run_node` | 红黑树节点 |
-| `on_rq` | 实体是否在 `cfs_rq` 上（与 `task_struct::on_rq` 不是同一个字段） |
-| `sched_delayed` | 是否处于延迟出队状态 |
-| `exec_start`、`sum_exec_runtime` | 上次记账的时刻、累计实际运行时间，单位纳秒 |
-| `vruntime` | 虚拟运行时间：实际运行时间按权重缩放后累加 |
-| `deadline` | 虚拟截止时间 |
-| `vlag` | 出队时记录的虚拟滞后量 `V − vruntime`（不乘权重，3.3 节），再次入队时用于放置 |
-| `slice` | 请求的时间片长度，单位纳秒 |
-| `min_vruntime` | 以本节点为根的子树中最小的 `vruntime`，用于剪枝 |
-| `parent`、`cfs_rq`、`my_q` | 组调度：父实体、所在队列、组实体自己拥有的队列 |
+| 字段                             | 含义                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| `load`                           | 权重，由 nice 值查表得到（3.1 节）                                            |
+| `run_node`                       | 红黑树节点                                                                    |
+| `on_rq`                          | 实体是否在 `cfs_rq` 上（与 `task_struct::on_rq` 不是同一个字段）              |
+| `sched_delayed`                  | 是否处于延迟出队状态                                                          |
+| `exec_start`、`sum_exec_runtime` | 上次记账的时刻、累计实际运行时间，单位纳秒                                    |
+| `vruntime`                       | 虚拟运行时间：实际运行时间按权重缩放后累加                                    |
+| `deadline`                       | 虚拟截止时间                                                                  |
+| `vlag`                           | 出队时记录的虚拟滞后量 `V − vruntime`（不乘权重，3.3 节），再次入队时用于放置 |
+| `slice`                          | 请求的时间片长度，单位纳秒                                                    |
+| `min_vruntime`                   | 以本节点为根的子树中最小的 `vruntime`，用于剪枝                               |
+| `parent`、`cfs_rq`、`my_q`       | 组调度：父实体、所在队列、组实体自己拥有的队列                                |
 
 最后一行的三个字段只在 `CONFIG_FAIR_GROUP_SCHED` 下存在。开启组调度后，`rq->cfs` 是根组的队列，一个 cgroup 在每个 CPU 上都表现为上一层队列中的一个 `sched_entity`，它的 `my_q` 指向组自己的 `cfs_rq`；选择时从根队列逐层向下，直到选中一个任务实体，见 [pick_task_fair()（fair.c#L9104-L9135）](../../linux/kernel/sched/fair.c#L9104-L9135) 中的 `do { ... } while (cfs_rq)` 循环。根任务组 `root_task_group` 的任务直接挂在 `rq->cfs` 上（[core.c#L8761-L8764](../../linux/kernel/sched/core.c#L8761-L8764)），此时循环只执行一次。
 
@@ -375,14 +377,14 @@ fork 和任务组变更时，只有 autogroup 开启、任务的 cpu cgroup 是�
 
 负载均衡需要知道 CPU 之间的拓扑关系，例如 SMT 线程是否共享核内资源、哪些核共享末级缓存（LLC，Last Level Cache）、哪些 CPU 属于同一 NUMA 节点。调度器用这些关系约束搜索范围并表达局部性，但不能仅凭层级给所有工作负载的迁移代价作绝对排序。[`struct sched_domain`（topology.h#L73-L92）](../../linux/include/linux/sched/topology.h#L73-L92) 描述一个层级上的 CPU 集合：
 
-| 字段 | 含义 |
-| --- | --- |
-| `parent`、`child` | 上一层和下一层调度域，RCU 保护 |
-| `groups` | 本域被划分成的若干 `sched_group`，均衡在组之间进行 |
-| `min_interval`、`max_interval`、`balance_interval` | 均衡间隔，单位毫秒 |
-| `imbalance_pct` | 负载差超过多少百分比才进行均衡 |
-| `flags` | `SD_*` 标志，如是否参与唤醒时的亲和选择、是否在 fork/exec 时均衡 |
-| `last_balance` | 上次均衡的时刻，单位 jiffies |
+| 字段                                               | 含义                                                             |
+| -------------------------------------------------- | ---------------------------------------------------------------- |
+| `parent`、`child`                                  | 上一层和下一层调度域，RCU 保护                                   |
+| `groups`                                           | 本域被划分成的若干 `sched_group`，均衡在组之间进行               |
+| `min_interval`、`max_interval`、`balance_interval` | 均衡间隔，单位毫秒                                               |
+| `imbalance_pct`                                    | 负载差超过多少百分比才进行均衡                                   |
+| `flags`                                            | `SD_*` 标志，如是否参与唤醒时的亲和选择、是否在 fork/exec 时均衡 |
+| `last_balance`                                     | 上次均衡的时刻，单位 jiffies                                     |
 
 x86 的拓扑层级由 [x86_topology（smpboot.c#L481-L491）](../../linux/arch/x86/kernel/smpboot.c#L481-L491) 定义：SMT、CLS（簇）、MC（多核，共享 LLC）、PKG（封装）。这张表在启动时会被裁剪：[build_sched_topology()（smpboot.c#L493-L516）](../../linux/arch/x86/kernel/smpboot.c#L493-L516) 在每核只有一个线程时去掉 SMT 层，在一个封装内含多个 NUMA 节点时清空 PKG 层。随后 `sched_init_numa()` 在表尾追加一层 NODE（本节点），节点间存在多种距离时再追加若干 NUMA 层（[topology.c#L2049-L2060](../../linux/kernel/sched/topology.c#L2049-L2060)）。建立调度域后，[cpu_attach_domain()（topology.c#L721-L745）](../../linux/kernel/sched/topology.c#L721-L745) 还会删除不起作用（退化）的层。`rq->sd` 可为空；非空时指向本 CPU 最底层的调度域，沿 `parent` 向上到当前调度域分区的顶层，不保证覆盖整个系统（[cpu_attach_domain()（topology.c#L711-L776）](../../linux/kernel/sched/topology.c#L711-L776)）。
 
@@ -407,12 +409,12 @@ rq1->lock
 
 [core.c#L576-L590](../../linux/kernel/sched/core.c#L576-L590) 进一步说明：系统调用等“外部”修改者使用 [task_rq_lock()（core.c#L744-L781）](../../linux/kernel/sched/core.c#L744-L781) 同时持有 `p->pi_lock` 和 `rq->lock`，因此它们修改的属性在持有**任意一把**锁时都是稳定的：
 
-| 修改者 | 被保护的字段 |
-| --- | --- |
-| `sched_setaffinity()` / `set_cpus_allowed_ptr()` | `cpus_ptr`、`nr_cpus_allowed` |
-| `set_user_nice()` | `se.load`、各 `prio` |
-| `__sched_setscheduler()` | `sched_class`、`policy`、各 `prio`、`se.load`、`rt_priority`、`dl` 参数 |
-| `sched_move_task()` | `sched_task_group` |
+| 修改者                                           | 被保护的字段                                                            |
+| ------------------------------------------------ | ----------------------------------------------------------------------- |
+| `sched_setaffinity()` / `set_cpus_allowed_ptr()` | `cpus_ptr`、`nr_cpus_allowed`                                           |
+| `set_user_nice()`                                | `se.load`、各 `prio`                                                    |
+| `__sched_setscheduler()`                         | `sched_class`、`policy`、各 `prio`、`se.load`、`rt_priority`、`dl` 参数 |
+| `sched_move_task()`                              | `sched_task_group`                                                      |
 
 `task_rq_lock()` 有一个容易忽略的细节：先读 `task_rq(p)` 再加锁，加锁后必须重新检查任务是否还在这个运行队列上、是否处于 `TASK_ON_RQ_MIGRATING`，不满足就释放重试（[core.c#L771-L779](../../linux/kernel/sched/core.c#L771-L779)）。`TASK_ON_RQ_MIGRATING` 允许迁移代码在不同时持有两把 `rq->lock` 的情况下移动任务。
 
@@ -473,14 +475,14 @@ idle 类的 [pick_task_idle()（idle.c#L496-L500）](../../linux/kernel/sched/id
 
 当前版本的公平类使用 **EEVDF**（Earliest Eligible Virtual Deadline First，最早合格虚拟截止时间优先）。它的出发点是“理想公平”：如果 CPU 能无限细分，每个任务按权重比例同时运行，那么任务 i 应得的服务量与实际得到的服务量之差称为**滞后**（lag）。EEVDF 的基本规则是在滞后非负（“还欠着它”）的任务中挑选，再按截止时间决定先后；实现还包含下文的单实体、buddy 和保护期分支。[fair.c#L615-L672](../../linux/kernel/sched/fair.c#L615-L672) 的注释给出了推导，核心量如下：
 
-| 概念 | 定义 | 实现 |
-| --- | --- | --- |
-| 虚拟运行时间 `v_i` | 实际运行时间按权重缩放后的累计值 | `se->vruntime`，在 [update_curr()（fair.c#L1286-L1333）](../../linux/kernel/sched/fair.c#L1286-L1333) 中累加 |
-| 队列虚拟时间 `V` | 所有实体 `vruntime` 的加权平均 | [avg_vruntime()（fair.c#L715-L749）](../../linux/kernel/sched/fair.c#L715-L749)，用 `zero_vruntime`、`sum_w_vruntime`、`sum_weight` 增量维护 |
-| 滞后 `lag_i` | `w_i × (V − v_i)` | 定义见 [fair.c#L622-L624](../../linux/kernel/sched/fair.c#L622-L624) 的注释，源码不直接保存它 |
-| 虚拟滞后 `vlag_i` | `V − v_i`，并钳制在 ±“队列中最大 slice 加一个 tick、按本实体权重折算的虚拟时间”之内 | [entity_lag()（fair.c#L767-L776）](../../linux/kernel/sched/fair.c#L767-L776)；出队时由 [update_entity_lag()（fair.c#L778-L783）](../../linux/kernel/sched/fair.c#L778-L783) 存入 `se->vlag` |
-| 合格（eligible） | `lag_i ≥ 0`，即 `v_i ≤ V` | [vruntime_eligible()（fair.c#L802-L816）](../../linux/kernel/sched/fair.c#L802-L816)，用乘法比较避免除法误差 |
-| 虚拟截止时间 `vd_i` | `v_i + slice × NICE_0_LOAD / w_i`，这里 `w_i` 是内部权重，与 `NICE_0_LOAD` 使用同一缩放尺度 | [calc_delta_fair()（fair.c#L290-L296）](../../linux/kernel/sched/fair.c#L290-L296)、[update_deadline()（fair.c#L1117-L1140）](../../linux/kernel/sched/fair.c#L1117-L1140) |
+| 概念                | 定义                                                                                        | 实现                                                                                                                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 虚拟运行时间 `v_i`  | 实际运行时间按权重缩放后的累计值                                                            | `se->vruntime`，在 [update_curr()（fair.c#L1286-L1333）](../../linux/kernel/sched/fair.c#L1286-L1333) 中累加                                                                                 |
+| 队列虚拟时间 `V`    | 所有实体 `vruntime` 的加权平均                                                              | [avg_vruntime()（fair.c#L715-L749）](../../linux/kernel/sched/fair.c#L715-L749)，用 `zero_vruntime`、`sum_w_vruntime`、`sum_weight` 增量维护                                                 |
+| 滞后 `lag_i`        | `w_i × (V − v_i)`                                                                           | 定义见 [fair.c#L622-L624](../../linux/kernel/sched/fair.c#L622-L624) 的注释，源码不直接保存它                                                                                                |
+| 虚拟滞后 `vlag_i`   | `V − v_i`，并钳制在 ±“队列中最大 slice 加一个 tick、按本实体权重折算的虚拟时间”之内         | [entity_lag()（fair.c#L767-L776）](../../linux/kernel/sched/fair.c#L767-L776)；出队时由 [update_entity_lag()（fair.c#L778-L783）](../../linux/kernel/sched/fair.c#L778-L783) 存入 `se->vlag` |
+| 合格（eligible）    | `lag_i ≥ 0`，即 `v_i ≤ V`                                                                   | [vruntime_eligible()（fair.c#L802-L816）](../../linux/kernel/sched/fair.c#L802-L816)，用乘法比较避免除法误差                                                                                 |
+| 虚拟截止时间 `vd_i` | `v_i + slice × NICE_0_LOAD / w_i`，这里 `w_i` 是内部权重，与 `NICE_0_LOAD` 使用同一缩放尺度 | [calc_delta_fair()（fair.c#L290-L296）](../../linux/kernel/sched/fair.c#L290-L296)、[update_deadline()（fair.c#L1117-L1140）](../../linux/kernel/sched/fair.c#L1117-L1140)                   |
 
 **选择算法。** [pick_eevdf()（fair.c#L996-L1084）](../../linux/kernel/sched/fair.c#L996-L1084) 在合格实体中选虚拟截止时间最早者。红黑树按截止时间排序（[entity_before()（fair.c#L582-L590）](../../linux/kernel/sched/fair.c#L582-L590)），同时每个节点维护子树最小 `vruntime`。要注意，正在运行的实体 `cfs_rq->curr` 不在树里（2.1 节），需要单独处理。查找步骤如下：
 
@@ -552,22 +554,22 @@ defer 模式先把激活时刻推迟到 `deadline - runtime`（[start_dl_timer()
 
 **抢占点与抢占模型。** 标志设置后，任务在以下位置之一进入调度器：
 
-| 抢占点 | 动作 | 依据 |
-| --- | --- | --- |
-| 返回用户态 | `TIF_NEED_RESCHED` 或 `_LAZY` 任一置位就调用 `schedule()` | [entry/common.c#L19-L31](../../linux/kernel/entry/common.c#L19-L31) |
-| 中断返回到内核态 | `irqentry_exit_cond_resched()` → `preempt_schedule_irq()` | [entry/common.c#L160-L170](../../linux/kernel/entry/common.c#L160-L170)、[entry/common.c#L210-L211](../../linux/kernel/entry/common.c#L210-L211)、[core.c#L7276-L7294](../../linux/kernel/sched/core.c#L7276-L7294) |
-| `preempt_enable()` 使计数归零 | `__preempt_schedule()` → `preempt_schedule()` | [linux/preempt.h#L230-L235](../../linux/include/linux/preempt.h#L230-L235)、[core.c#L7161-L7170](../../linux/kernel/sched/core.c#L7161-L7170) |
+| 抢占点                            | 动作                                                                                              | 依据                                                                                                                                                                                                                                                                    |
+| --------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 返回用户态                        | `TIF_NEED_RESCHED` 或 `_LAZY` 任一置位就调用 `schedule()`                                         | [entry/common.c#L19-L31](../../linux/kernel/entry/common.c#L19-L31)                                                                                                                                                                                                     |
+| 中断返回到内核态                  | `irqentry_exit_cond_resched()` → `preempt_schedule_irq()`                                         | [entry/common.c#L160-L170](../../linux/kernel/entry/common.c#L160-L170)、[entry/common.c#L210-L211](../../linux/kernel/entry/common.c#L210-L211)、[core.c#L7276-L7294](../../linux/kernel/sched/core.c#L7276-L7294)                                                     |
+| `preempt_enable()` 使计数归零     | `__preempt_schedule()` → `preempt_schedule()`                                                     | [linux/preempt.h#L230-L235](../../linux/include/linux/preempt.h#L230-L235)、[core.c#L7161-L7170](../../linux/kernel/sched/core.c#L7161-L7170)                                                                                                                           |
 | `cond_resched()`、`might_sleep()` | `__cond_resched()` → `preempt_schedule_common()`；`might_sleep()` 经 `might_resched()` 走同一函数 | [linux/sched.h#L2122-L2125](../../linux/include/linux/sched.h#L2122-L2125)、[kernel.h#L53-L62](../../linux/include/linux/kernel.h#L53-L62)、[kernel.h#L136](../../linux/include/linux/kernel.h#L136)、[core.c#L7493-L7516](../../linux/kernel/sched/core.c#L7493-L7516) |
-| 显式调用 `schedule()` | 直接进入 | [core.c#L7048-L7060](../../linux/kernel/sched/core.c#L7048-L7060) |
+| 显式调用 `schedule()`             | 直接进入                                                                                          | [core.c#L7048-L7060](../../linux/kernel/sched/core.c#L7048-L7060)                                                                                                                                                                                                       |
 
 返回用户态这一项在任何模型下都有效；其余各项是否生效由抢占模型决定。`PREEMPT_DYNAMIC` 用 static call 切换这些入口，切换发生在启动时，也可以在运行时经 debugfs 进行（第 0 节），[core.c#L7620-L7659](../../linux/kernel/sched/core.c#L7620-L7659) 的注释和 [__sched_dynamic_update()（core.c#L7707-L7767）](../../linux/kernel/sched/core.c#L7707-L7767) 给出了对应关系：
 
-| 模型 | `cond_resched()` | `might_sleep()` 处让出 | `preempt_enable()` 抢占 | 中断返回内核态抢占 | 公平类使用 LAZY 标志 |
-| --- | --- | --- | --- | --- | --- |
-| none | 有效 | 否 | 否 | 否 | 否 |
-| **voluntary（本配置默认）** | 有效 | 有效 | 否 | 否 | 否 |
-| full | 空操作 | 否 | 是 | 是 | 否 |
-| lazy | 空操作 | 否 | 是 | 是 | 是 |
+| 模型                        | `cond_resched()` | `might_sleep()` 处让出 | `preempt_enable()` 抢占 | 中断返回内核态抢占 | 公平类使用 LAZY 标志 |
+| --------------------------- | ---------------- | ---------------------- | ----------------------- | ------------------ | -------------------- |
+| none                        | 有效             | 否                     | 否                      | 否                 | 否                   |
+| **voluntary（本配置默认）** | 有效             | 有效                   | 否                      | 否                 | 否                   |
+| full                        | 空操作           | 否                     | 是                      | 是                 | 否                   |
+| lazy                        | 空操作           | 否                     | 是                      | 是                 | 是                   |
 
 因此在默认的 voluntary 模型下，一个在内核态长时间运行的任务不会在任意位置被抢占，只会在 `cond_resched()`、`might_sleep()` 标注点、显式 `schedule()` 或返回用户态时让出 CPU。lazy 模型下公平类通常设置 LAZY 标志，内核态代码不会因此被立即抢占；若后续本地 tick 到来时该标志仍在，[sched_tick()（core.c#L5621-L5622）](../../linux/kernel/sched/core.c#L5621-L5622) 会把它升级为 `TIF_NEED_RESCHED`。这不是固定 1 ms 内必然切换的保证：tick 可能停止或延迟，实际切换还受关抢占等条件约束。
 
@@ -585,12 +587,12 @@ defer 模式先把激活时刻推迟到 `deadline - runtime`（[start_dl_timer()
 
 **负载均衡**（load balancing）在任务运行期间进行：
 
-| 方式 | 触发 | 依据 |
-| --- | --- | --- |
-| 周期均衡 | `sched_tick()` → `sched_balance_trigger()`：到达 `rq->next_balance` 时触发 `SCHED_SOFTIRQ`，软中断处理函数自底向上遍历调度域 | [fair.c#L13257-L13270](../../linux/kernel/sched/fair.c#L13257-L13270)、[fair.c#L13234-L13252](../../linux/kernel/sched/fair.c#L13234-L13252)、[fair.c#L14194](../../linux/kernel/sched/fair.c#L14194) |
-| 新空闲均衡 | CPU 即将空闲时，公平类在选择路径中调用 `sched_balance_newidle()` 拉任务 | [fair.c#L9201-L9218](../../linux/kernel/sched/fair.c#L9201-L9218) |
-| NOHZ 空闲均衡 | 停了 tick 的空闲 CPU 无法自己做周期均衡。忙 CPU 在 tick 中调用 `nohz_balancer_kick()`，判断需要时由 `kick_ilb()` 选出一个空闲 CPU 并通过 IPI 唤醒它，由这个空闲 CPU 在 `SCHED_SOFTIRQ` 中替所有停了 tick 的空闲 CPU 做均衡 | [fair.c#L12576-L12582](../../linux/kernel/sched/fair.c#L12576-L12582)、[fair.c#L12651-L12660](../../linux/kernel/sched/fair.c#L12651-L12660)、[fair.c#L12609-L12645](../../linux/kernel/sched/fair.c#L12609-L12645)、[fair.c#L13269](../../linux/kernel/sched/fair.c#L13269)、[fair.c#L13238-L13247](../../linux/kernel/sched/fair.c#L13238-L13247) |
-| 实时 / deadline push、pull | 实时类和 deadline 类按优先级或截止时间把任务推给更合适的 CPU，或从其他 CPU 拉过来 | 实时类 [balance_rt()（rt.c#L1594-L1614）](../../linux/kernel/sched/rt.c#L1594-L1614)；deadline 类的 `.balance = balance_dl`（[deadline.c#L3319](../../linux/kernel/sched/deadline.c#L3319)） |
+| 方式                       | 触发                                                                                                                                                                                                                       | 依据                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 周期均衡                   | `sched_tick()` → `sched_balance_trigger()`：到达 `rq->next_balance` 时触发 `SCHED_SOFTIRQ`，软中断处理函数自底向上遍历调度域                                                                                               | [fair.c#L13257-L13270](../../linux/kernel/sched/fair.c#L13257-L13270)、[fair.c#L13234-L13252](../../linux/kernel/sched/fair.c#L13234-L13252)、[fair.c#L14194](../../linux/kernel/sched/fair.c#L14194)                                                                                                                                               |
+| 新空闲均衡                 | CPU 即将空闲时，公平类在选择路径中调用 `sched_balance_newidle()` 拉任务                                                                                                                                                    | [fair.c#L9201-L9218](../../linux/kernel/sched/fair.c#L9201-L9218)                                                                                                                                                                                                                                                                                   |
+| NOHZ 空闲均衡              | 停了 tick 的空闲 CPU 无法自己做周期均衡。忙 CPU 在 tick 中调用 `nohz_balancer_kick()`，判断需要时由 `kick_ilb()` 选出一个空闲 CPU 并通过 IPI 唤醒它，由这个空闲 CPU 在 `SCHED_SOFTIRQ` 中替所有停了 tick 的空闲 CPU 做均衡 | [fair.c#L12576-L12582](../../linux/kernel/sched/fair.c#L12576-L12582)、[fair.c#L12651-L12660](../../linux/kernel/sched/fair.c#L12651-L12660)、[fair.c#L12609-L12645](../../linux/kernel/sched/fair.c#L12609-L12645)、[fair.c#L13269](../../linux/kernel/sched/fair.c#L13269)、[fair.c#L13238-L13247](../../linux/kernel/sched/fair.c#L13238-L13247) |
+| 实时 / deadline push、pull | 实时类和 deadline 类按优先级或截止时间把任务推给更合适的 CPU，或从其他 CPU 拉过来                                                                                                                                          | 实时类 [balance_rt()（rt.c#L1594-L1614）](../../linux/kernel/sched/rt.c#L1594-L1614)；deadline 类的 `.balance = balance_dl`（[deadline.c#L3319](../../linux/kernel/sched/deadline.c#L3319)）                                                                                                                                                        |
 
 ### 3.7 运行队列时钟
 
@@ -678,12 +680,12 @@ flowchart TD
 1. [prepare_task_switch()（core.c#L5135-L5147）](../../linux/kernel/sched/core.c#L5135-L5147)：调度统计、perf、rseq、抢占通知等钩子，以及 [prepare_task(next)（core.c#L4956-L4966）](../../linux/kernel/sched/core.c#L4956-L4966) 把 `next->on_cpu` 置 1。
 2. **切换地址空间**（[core.c#L5315-L5341](../../linux/kernel/sched/core.c#L5315-L5341)），按注释中的四种情况处理。这里“内核线程”实际按 `mm == NULL` 分支判断；当前 `CONFIG_MMU_LAZY_TLB_REFCOUNT=y`，`mmgrab_lazy_tlb()` 确实增加 `mm_count`，切回带 `mm` 的任务后归还（[sched/mm.h#L88-L112](../../linux/include/linux/sched/mm.h#L88-L112)）：
 
-   | 切换方向 | 处理 |
-   | --- | --- |
+   | 切换方向            | 处理                                                                                                                                                         |
+   | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
    | 内核线程 → 内核线程 | 不换页表，`next` 继承 `prev->active_mm`，`prev->active_mm` 清空，借用引用随之转交（lazy TLB：`next->mm` 为 `NULL`，切换到它时不调用 `switch_mm_irqs_off()`） |
-   | 用户任务 → 内核线程 | 不换页表，`next` 借用 `prev->active_mm`，并 `mmgrab_lazy_tlb()` 增加引用 |
-   | 内核线程 → 用户任务 | 调用 `switch_mm_irqs_off()`；被借用的 mm 记入 `rq->prev_mm`，在 `finish_task_switch()` 中释放引用 |
-   | 用户任务 → 用户任务 | 调用 `switch_mm_irqs_off()`；两个任务共享同一个 mm 时不一定重载页表 |
+   | 用户任务 → 内核线程 | 不换页表，`next` 借用 `prev->active_mm`，并 `mmgrab_lazy_tlb()` 增加引用                                                                                     |
+   | 内核线程 → 用户任务 | 调用 `switch_mm_irqs_off()`；被借用的 mm 记入 `rq->prev_mm`，在 `finish_task_switch()` 中释放引用                                                            |
+   | 用户任务 → 用户任务 | 调用 `switch_mm_irqs_off()`；两个任务共享同一个 mm 时不一定重载页表                                                                                          |
 
    x86 的 `switch_mm_irqs_off()` 会检查当前已加载的 mm：同一 mm、非 lazy 等条件满足时可以直接返回，不把“调用地址空间切换接口”等同于“必然写 CR3”（[tlb.c#L840-L881](../../linux/arch/x86/mm/tlb.c#L840-L881)）。
 
@@ -814,16 +816,16 @@ stateDiagram-v2
 
 ## 5. 执行上下文与并发小结
 
-| 操作 | 执行上下文 | 持有的锁 / 同步方式 |
-| --- | --- | --- |
-| `__schedule()` | 进程上下文，关抢占、关中断 | 本 CPU 的 `rq->lock`；发生任务切换时由 `prev` 获取、`next` 释放，不切换时本任务释放 |
-| `try_to_wake_up()` | 进程、软中断或硬中断等上下文；不能据此推广到任意 NMI 场景 | 通常持 `p->pi_lock`，按分支锁任务原运行队列或目标队列；自唤醒是特例，唤醒链表则由目标 CPU 稍后锁队列；`on_rq`、`on_cpu` 用 acquire/release 和控制依赖排序 |
-| 唤醒链表处理 `sched_ttwu_pending()` | 目标 CPU 的 IPI 处理或 idle 循环 | 本 CPU 的 `rq->lock` |
-| `sched_tick()` | 硬中断 | 本 CPU 的 `rq->lock` |
-| 周期负载均衡 | `SCHED_SOFTIRQ` 软中断 | 公平类先持源运行队列锁摘下任务并标记 `TASK_ON_RQ_MIGRATING`，释放后再持目标运行队列锁挂上（[fair.c#L12104-L12125](../../linux/kernel/sched/fair.c#L12104-L12125)）；调度域用 RCU 读侧遍历 |
-| 修改策略、亲和性、nice | 进程上下文（系统调用） | `task_rq_lock()`：`p->pi_lock` → `rq->lock` |
-| 迁移正在运行的任务 | 任务所在 CPU 上的 stopper 线程（stop 类，先把该任务抢占下来） | `migration_cpu_stop()` 持 `p->pi_lock` 和 `rq->lock` 后移动任务（[core.c#L2543-L2592](../../linux/kernel/sched/core.c#L2543-L2592)） |
-| `rq->curr` 的无锁读取 | 满足对应 RCU 读侧条件的上下文 | RCU 保障所读任务的生命周期，不保证它始终仍是当前任务，也不替代字段自身的同步协议（[core.c#L6922-L6925](../../linux/kernel/sched/core.c#L6922-L6925)） |
+| 操作                                | 执行上下文                                                    | 持有的锁 / 同步方式                                                                                                                                                                       |
+| ----------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `__schedule()`                      | 进程上下文，关抢占、关中断                                    | 本 CPU 的 `rq->lock`；发生任务切换时由 `prev` 获取、`next` 释放，不切换时本任务释放                                                                                                       |
+| `try_to_wake_up()`                  | 进程、软中断或硬中断等上下文；不能据此推广到任意 NMI 场景     | 通常持 `p->pi_lock`，按分支锁任务原运行队列或目标队列；自唤醒是特例，唤醒链表则由目标 CPU 稍后锁队列；`on_rq`、`on_cpu` 用 acquire/release 和控制依赖排序                                 |
+| 唤醒链表处理 `sched_ttwu_pending()` | 目标 CPU 的 IPI 处理或 idle 循环                              | 本 CPU 的 `rq->lock`                                                                                                                                                                      |
+| `sched_tick()`                      | 硬中断                                                        | 本 CPU 的 `rq->lock`                                                                                                                                                                      |
+| 周期负载均衡                        | `SCHED_SOFTIRQ` 软中断                                        | 公平类先持源运行队列锁摘下任务并标记 `TASK_ON_RQ_MIGRATING`，释放后再持目标运行队列锁挂上（[fair.c#L12104-L12125](../../linux/kernel/sched/fair.c#L12104-L12125)）；调度域用 RCU 读侧遍历 |
+| 修改策略、亲和性、nice              | 进程上下文（系统调用）                                        | `task_rq_lock()`：`p->pi_lock` → `rq->lock`                                                                                                                                               |
+| 迁移正在运行的任务                  | 任务所在 CPU 上的 stopper 线程（stop 类，先把该任务抢占下来） | `migration_cpu_stop()` 持 `p->pi_lock` 和 `rq->lock` 后移动任务（[core.c#L2543-L2592](../../linux/kernel/sched/core.c#L2543-L2592)）                                                      |
+| `rq->curr` 的无锁读取               | 满足对应 RCU 读侧条件的上下文                                 | RCU 保障所读任务的生命周期，不保证它始终仍是当前任务，也不替代字段自身的同步协议（[core.c#L6922-L6925](../../linux/kernel/sched/core.c#L6922-L6925)）                                     |
 
 几条贯穿全章的不变量：
 
