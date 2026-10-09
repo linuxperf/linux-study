@@ -303,7 +303,7 @@ pd 和 cpd 都只有几个公共字段（[blk-cgroup.h#L138-L156](../../linux/bl
 | `BIO_TG_BPS_THROTTLED` | 已在当前这一层 `throtl_grp` 计过字节；与 `BIO_QOS_THROTTLED` 共用同一位，注释说明两者处在不同层次，可以复用 |
 | `BIO_QOS_MERGED` | 经过了 rq_qos 的 `merge` 钩子 |
 
-**任务与内核线程。** `task_struct::throttle_disk` 和 `use_memdelay` 记录“返回用户态时要在哪块磁盘上检查延迟、是否计入内存压力”（[sched.h#L1027](../../linux/include/linux/sched.h#L1027)、[sched.h#L1569](../../linux/include/linux/sched.h#L1569)）。`struct kthread::blkcg_css` 记录内核线程当前代表哪个 cgroup 发起 I/O（[kthread.c#L67](../../linux/kernel/kthread.c#L67)）。
+**任务与内核线程。** `task_struct::throttle_disk` 和 `use_memdelay` 记录“返回用户态时要在哪块磁盘上检查延迟、是否计入内存压力”（[sched.h#L1569](../../linux/include/linux/sched.h#L1569)、[sched.h#L1027](../../linux/include/linux/sched.h#L1027)）。`struct kthread::blkcg_css` 记录内核线程当前代表哪个 cgroup 发起 I/O（[kthread.c#L67](../../linux/kernel/kthread.c#L67)）。
 
 ### 2.6 rq_qos：请求队列上的 QoS 钩子链
 
@@ -314,7 +314,7 @@ iolatency、iocost 和 wbt 都通过 rq_qos 接入 blk-mq。每个实例是一�
 | `throttle` | 分配请求之前，或使用 plug 中缓存的请求之前（[blk-mq.c#L3048](../../linux/block/blk-mq.c#L3048)、[blk-mq.c#L3178-L3179](../../linux/block/blk-mq.c#L3178-L3179)）；先设置 `BIO_QOS_THROTTLED` | 取在途名额 | 检查预算、等待或记欠账 |
 | `merge` | bio 合并进已有请求（如 [blk-merge.c#L944](../../linux/block/blk-merge.c#L944)）；先设置 `BIO_QOS_MERGED` | — | 为合并的部分计费 |
 | `done_bio` | `bio_endio()`（[bio.c#L1641](../../linux/block/bio.c#L1641)） | 归还名额，记录延迟 | 推进 `done_vtime` |
-| `done` | 请求完成（如 [blk-mq.c#L812](../../linux/block/blk-mq.c#L812)） | — | 统计延迟和请求等待时间 |
+| `done` | 请求完成（如完成后释放请求的 `blk_mq_free_request()`，[blk-mq.c#L812](../../linux/block/blk-mq.c#L812)） | — | 统计延迟和请求等待时间 |
 | `exit` | 删除磁盘时的 `rq_qos_exit()`（[blk-rq-qos.c#L313-L323](../../linux/block/blk-rq-qos.c#L313-L323)） | 停用策略并释放 | 同左 |
 
 这些钩子只在 blk-mq 的提交路径上调用，所以 iolatency 和 iocost 只对 blk-mq 设备起作用。`rq_qos_add()` 的注释也写明“只支持 blk-mq 队列”（[blk-rq-qos.c#L337-L341](../../linux/block/blk-rq-qos.c#L337-L341)）。
@@ -362,7 +362,7 @@ static struct cgroup_subsys_state *blkcg_css(void)
 
 来源：[block/blk-cgroup.c 第 104～112 行](../../linux/block/blk-cgroup.c#L104-L112)。内核线程如果用 `kthread_associate_blkcg()` 声明了“我在代表某个 cgroup 工作”（[kthread.c#L1655-L1673](../../linux/kernel/kthread.c#L1655-L1673)），就用那个 css；否则用当前任务的有效 io css，即沿 cgroup 树向上第一个启用了 `io` 的祖先的 css（概述章 3.2 节）。loop 设备的工作线程（[loop.c#L1912](../../linux/drivers/block/loop.c#L1912)）和 btrfs 的压缩工作（[btrfs/inode.c#L1127](../../linux/fs/btrfs/inode.c#L1127)）都这样做。注释提醒，这里返回的 css 可能已经在下线，调用者要用 tryget 确认。
 
-**取得 blkg**。[`bio_associate_blkg_from_css()`](../../linux/block/blk-cgroup.c#L2145-L2157) 先归还旧引用；根 css 直接使用 `q->root_blkg`；否则调用 `blkg_tryget_closest()`：查找或创建 blkg（3.2 节），对它 `blkg_tryget()`，失败（blkg 正在销毁）就沿 `parent` 向上换一个能取得引用的祖先（[blk-cgroup.c#L2112-L2129](../../linux/block/blk-cgroup.c#L2112-L2129)）。注释说明，这种情况只在 cgroup 正在删除时发生，剩下的 bio 会“溢出”到最近的存活祖先。
+**取得 blkg**。[`bio_associate_blkg_from_css()`](../../linux/block/blk-cgroup.c#L2145-L2157) 先归还旧引用；根 css 直接使用 `q->root_blkg`；否则调用 `blkg_tryget_closest()`：查找或创建 blkg（3.2 节），对它 `blkg_tryget()`，失败（引用计数已归零，blkg 正在释放）就沿 `parent` 向上换一个能取得引用的祖先（[blk-cgroup.c#L2112-L2129](../../linux/block/blk-cgroup.c#L2112-L2129)）。注释说明，这种情况只在 cgroup 正在删除时发生，剩下的 bio 会“溢出”到最近的存活祖先。
 
 **其他来源**：
 
@@ -412,7 +412,7 @@ return blkg
 ```mermaid
 flowchart TB
     A["submit_bio() → submit_bio_noacct()"] --> B{"blk_throtl_bio()<br/>超出 io.max？"}
-    B -->|"是：bio 被扣下，函数返回"| K["kthrotld 工作线程稍后<br/>submit_bio_noacct_nocheck()"]
+    B -->|"是：bio 被扣下，函数返回"| K["kthrotld 工作队列稍后<br/>submit_bio_noacct_nocheck()"]
     B -->|"否"| C["submit_bio_noacct_nocheck()"]
     K --> C
     C --> D["blk_cgroup_bio_start()<br/>计入 io.stat"]
@@ -475,7 +475,7 @@ static inline bool bio_issue_as_root_blkg(struct bio *bio)
 
 ### 3.6 返回用户态时的延迟：`use_delay`
 
-**问题**。3.3 节说过，元数据 I/O、换出 I/O 和已收到致命信号的任务的 I/O 不能在提交时阻塞。但如果一个组靠这类 I/O 持续占用设备，又完全不受约束，限制就形同虚设。框架的解决办法是：先放行，把应受的惩罚记成一段“延迟”，等发起任务**返回用户态**时再让它睡眠。那时它不持有任何内核锁，睡眠不会造成优先级反转。
+**问题**。3.3 节说过，元数据 I/O 和换出 I/O 不能在提交时阻塞；iolatency 和 iocost 对已收到致命信号的任务的 I/O 同样直接放行（5.2 节、6.4 节）。但如果一个组靠这类 I/O 持续占用设备，又完全不受约束，限制就形同虚设。框架的解决办法是：先放行，把应受的惩罚记成一段“延迟”，等发起任务**返回用户态**时再让它睡眠。那时它不持有任何内核锁，睡眠不会造成优先级反转。
 
 **状态**。延迟记在 blkg 上（2.3 节）。`use_delay` 有两种用法，不能混用：
 
@@ -487,11 +487,11 @@ static inline bool bio_issue_as_root_blkg(struct bio *bio)
 **流程**：
 
 1. 策略决定施加延迟后调用 [`blkcg_schedule_throttle()`](../../linux/block/blk-cgroup.c#L2066-L2084)：内核线程直接跳过；否则把磁盘记入 `current->throttle_disk`（取得磁盘引用），按需设置 `use_memdelay`，再调用 `set_notify_resume()`。一次系统调用中多次调用也只会检查一次。
-2. 任务返回用户态时，`resume_user_mode_work()` 调用 `blkcg_maybe_throttle_current()`（[resume_user_mode.h#L59-L60](../../linux/include/linux/resume_user_mode.h#L59-L60)）。后者在 RCU 下找到当前任务的 blkcg 在该磁盘上的 blkg，取得引用后调用 `blkcg_maybe_throttle_blkg()`（[blk-cgroup.c#L2016-L2047](../../linux/block/blk-cgroup.c#L2016-L2047)）。
+2. 任务返回用户态时，`resume_user_mode_work()` 调用 `blkcg_maybe_throttle_current()`（[resume_user_mode.h#L60](../../linux/include/linux/resume_user_mode.h#L60)）。后者在 RCU 下找到当前任务的 blkcg 在该磁盘上的 blkg，取得引用后调用 `blkcg_maybe_throttle_blkg()`（[blk-cgroup.c#L2016-L2047](../../linux/block/blk-cgroup.c#L2016-L2047)）。
 3. [`blkcg_maybe_throttle_blkg()`](../../linux/block/blk-cgroup.c#L1950-L2004) 从本 blkg 沿 `parent` 走到根之前，取各级中 `use_delay` 非 0 者的最大 `delay_nsec`。计数模式下上限为 250 ms，注释解释：换出和元数据 I/O 可能累积几十秒的延迟，要让用户态每次系统调用至少还能做点事。然后以 `TASK_KILLABLE` 状态用 hrtimer 睡到期，期间计为 I/O 等待；`use_memdelay` 为真时还计入内存压力（PSI memstall）。
 4. 计数模式的衰减由 [`blkcg_scale_delay()`](../../linux/block/blk-cgroup.c#L1893-L1942) 完成：至多每秒一次，扣除 `min(last_delay, 经过的时间)`；如果 `use_delay` 比上次小（正在解除限制），至少扣除上次的一半。
 
-**拥塞信号的其他用户**。[`blk_cgroup_congested()`](../../linux/block/blk-cgroup.c#L2254-L2269)检查当前任务的 blkcg 及其祖先中是否有 `congestion_count` 非 0 的。为真时，同步预读只读请求的那一页（[readahead.c#L570-L574](../../linux/mm/readahead.c#L570-L574)），异步预读直接放弃（[readahead.c#L651-L652](../../linux/mm/readahead.c#L651-L652)）；缺页分配匿名页时，`__folio_throttle_swaprate()` 对第一个可用的交换设备调用 `blkcg_schedule_throttle(..., true)`（[swapfile.c#L4097-L4127](../../linux/mm/swapfile.c#L4097-L4127)），让该任务返回用户态时也接受检查。
+**拥塞信号的其他用户**。[`blk_cgroup_congested()`](../../linux/block/blk-cgroup.c#L2254-L2269)检查当前任务的 blkcg 及其祖先中是否有 `congestion_count` 非 0 的。为真时，同步预读只读请求的那一页（[readahead.c#L570-L574](../../linux/mm/readahead.c#L570-L574)），异步预读直接放弃（[readahead.c#L651-L652](../../linux/mm/readahead.c#L651-L652)）；缺页分配匿名页等路径中，`__folio_throttle_swaprate()` 对第一个可用的交换设备调用 `blkcg_schedule_throttle(..., true)`（[swapfile.c#L4097-L4127](../../linux/mm/swapfile.c#L4097-L4127)），让该任务返回用户态时也接受检查。
 
 ### 3.7 `io.stat`：每 CPU 计数与 rstat 汇总
 
@@ -618,15 +618,15 @@ flowchart BT
 	return jiffy_wait;
 ```
 
-来源：[block/blk-throttle.c 第 796～821 行](../../linux/block/blk-throttle.c#L796-L821)。`calculate_bytes_allowed()` 计算 `bps × 时长 / HZ`，并处理溢出（[blk-throttle.c#L600-L609](../../linux/block/blk-throttle.c#L600-L609)）。次数方向的 [`tg_within_iops_limit()`](../../linux/block/blk-throttle.c#L764-L785) 结构相同，每个 bio 计 1 次，等待时间至少为 `HZ / iops + 1`。丢弃请求的字节数按 512 计（[blk-throttle.c#L133-L139](../../linux/block/blk-throttle.c#L133-L139)）。
+来源：[block/blk-throttle.c 第 796～821 行](../../linux/block/blk-throttle.c#L796-L821)。`calculate_bytes_allowed()` 计算 `bps × 时长 / HZ`，并处理溢出（[blk-throttle.c#L600-L609](../../linux/block/blk-throttle.c#L600-L609)）。次数方向的 [`tg_within_iops_limit()`](../../linux/block/blk-throttle.c#L764-L785) 结构类似但不完全相同：每个 bio 计 1 次，经过的时间按 `jiffy_elapsed + 1` 向上取整到时间片的整数倍来算允许量；超出时等到这个取整边界，且至少等 `HZ / iops + 1` 个 jiffy。丢弃请求的字节数按 512 计（[blk-throttle.c#L133-L139](../../linux/block/blk-throttle.c#L133-L139)）。
 
-**例子**。`backup` 在 sdb 上 `rbps=52428800`（50 MiB/s），`HZ=1000`，时间片 100 jiffies。新时间片刚开始时，允许量是 50 MiB/s × 100 ms = 5 MiB，于是 5 个 1 MiB 的读 bio 可以立即通过。第 6 个到来时超出 1 MiB，等待时间为 `1 MiB × 1000 / 50 MiB = 20` jiffies，再加上取整补偿 `100 - 0`，共 120 jiffies。120 ms 正是按 50 MiB/s 精确速率读完 6 MiB 所需的时间。向上取整使组最多可以比精确速率**超前一个时间片的额度**，这就是文档所说的“允许短时突发”。
+**例子**。`backup` 在 sdb 上 `rbps=52428800`（50 MiB/s），`HZ=1000`，时间片 100 jiffies。新时间片刚开始时，允许量是 50 MiB/s × 100 ms = 5 MiB，于是 5 个 1 MiB 的读 bio 可以立即通过。第 6 个到来时超出 1 MiB，等待时间为 `1 MiB × 1000 / 50 MiB = 20` jiffies，再加上取整补偿 `100 - 0`，共 120 jiffies。120 ms 正是按 50 MiB/s 精确速率读完 6 MiB 所需的时间。向上取整使组最多可以比精确速率**超前一个时间片的额度**，这就是 cgroup-v2.rst 所说的“允许短时突发”（[cgroup-v2.rst#L2127-L2128](../../linux/Documentation/admin-guide/cgroup-v2.rst#L2127-L2128)）。
 
 **计费顺序**。[`tg_dispatch_time()`](../../linux/block/blk-throttle.c#L896-L921) 先算字节方向的等待时间；为 0 则立即为字节计费（`throtl_charge_bps_bio()` 设置 `BIO_TG_BPS_THROTTLED`，防止同一层重复计费），再算次数方向。次数在 bio 真正离开这一层时才计费（`throtl_charge_iops_bio()`，[blk-throttle.c#L824-L840](../../linux/block/blk-throttle.c#L824-L840)）。所以一个 bio 在一层上先等字节、后等次数，两者都满足才离开。
 
-**修剪：不让空闲时间攒成额度**。如果时间片只延长、不前移，组空闲 10 秒后就会积累 10 秒的额度，随后可以一次性冲出去。[`throtl_trim_slice()`](../../linux/block/blk-throttle.c#L654-L706) 在每次放行 bio 后执行：
+**修剪：不让空闲时间攒成额度**。如果时间片只延长、不前移，组空闲 10 秒后就会积累 10 秒的额度，随后可以一次性冲出去。[`throtl_trim_slice()`](../../linux/block/blk-throttle.c#L654-L706) 在每次放行 bio 后执行（时间片已经结束则直接返回）：
 
-1. 把 `slice_end` 延长到“现在 + 一个时间片”；
+1. 把 `slice_end` 设为“现在 + 一个时间片”（向上取整到时间片的整数倍；注释说明，限值调高后这一步也可能把过远的 `slice_end` 拉回来）；
 2. 经过的时间向下取整后不足两个时间片则返回；
 3. 否则保留最近一个时间片，把更早那段时间对应的允许量从 `bytes_disp`、`io_disp` 中扣除（最低扣到 0），`slice_start` 前移同样的时长。
 
@@ -657,7 +657,7 @@ loop:
 // 排队
 td->nr_queued[rw]++
 throtl_add_bio_tg(bio, qn, tg)               // qn 为 NULL 时用 tg->qnode_on_self
-if tg 原先在该方向上为空：
+if tg 原先在该方向上为空，或带 BIO_BPS_THROTTLED 的 bio 成为队首：   // THROTL_TG_WAS_EMPTY / THROTL_TG_IOPS_WAS_EMPTY
     tg_update_disptime(tg)
     throtl_schedule_next_dispatch(tg 的父服务队列, force=true)
 返回 true（bio 已被扣下）
@@ -675,7 +675,7 @@ if tg 原先在该方向上为空：
 
 定时器回调 [`throtl_pending_timer_fn()`](../../linux/block/blk-throttle.c#L1124-L1193) 运行在定时器软中断中，持有 `queue_lock`：
 
-1. **[`throtl_select_dispatch()`](../../linux/block/blk-throttle.c#L1076-L1107)**：按 `disptime` 从 `pending_tree` 中取出已到期的子 tg，对每个调用 [`throtl_dispatch_tg()`](../../linux/block/blk-throttle.c#L1043-L1074)。每个 tg 一轮最多派发 8 个 bio，其中读最多 6 个、写最多 2 个；整轮最多 32 个（[blk-throttle.c#L18-L22](../../linux/block/blk-throttle.c#L18-L22)）。子 tg 仍有 bio 就更新它的 `disptime`，否则把它移出红黑树。
+1. **[`throtl_select_dispatch()`](../../linux/block/blk-throttle.c#L1076-L1107)**：按 `disptime` 从 `pending_tree` 中取出已到期的子 tg，对每个调用 [`throtl_dispatch_tg()`](../../linux/block/blk-throttle.c#L1043-L1074)。每个 tg 一轮最多派发 8 个 bio，其中读最多 6 个、写最多 2 个；整轮最多 32 个（[blk-throttle.c#L18-L22](../../linux/block/blk-throttle.c#L18-L22)、[blk-throttle.c#L1047-L1048](../../linux/block/blk-throttle.c#L1047-L1048)）。子 tg 仍有 bio 就更新它的 `disptime`，否则把它移出红黑树。
 2. **[`tg_dispatch_one_bio()`](../../linux/block/blk-throttle.c#L1001-L1041)**：从子 tg 的服务队列中按 qnode 轮转取出一个 bio，计费次数，然后：如果父层是 tg，就通过子 tg 的 `qnode_on_parent` 把 bio 加入父 tg 的服务队列，父 tg 会按自己的限值再检查一次；如果父层是 `throtl_data`，就设置 `BIO_BPS_THROTTLED`，放进顶层队列。
 3. **向上传递**：如果父 tg 因此由空变为非空，就更新它的 `disptime`；若已到期，就在同一次回调中对上一层继续派发（`goto again`），否则安排上一层的定时器。到达顶层后，把 `dispatch_work` 放入 `kthrotld` 工作队列。
 4. **[`blk_throtl_dispatch_work_fn()`](../../linux/block/blk-throttle.c#L1203-L1228)**：在进程上下文中取出顶层的全部 bio，在 plug 下逐个调用 `submit_bio_noacct_nocheck()`。这一步跳过了 `blk_throtl_bio()`，但会经过 `io.stat` 计数和 rq_qos。
@@ -686,14 +686,14 @@ if tg 原先在该方向上为空：
 sequenceDiagram
     participant P as 提交者（进程上下文）
     participant T as tg(root) 服务队列的 pending_timer（软中断）
-    participant W as kthrotld 工作线程
+    participant W as kthrotld 工作队列的工作线程
     P->>P: __blk_throtl_bio()：job1 层通过，backup 层超限
     P->>P: bio 挂到 tg(backup) 的服务队列<br/>tg(backup) 挂入 tg(root) 的 pending_tree，安排定时器
     P-->>P: 返回 true，提交者继续执行
     T->>T: 到期：从 tg(backup) 取出 bio，放入 tg(root) 的服务队列
     T->>T: tg(root) 无限值，disptime 已到，继续向上派发到 throtl_data
     T->>W: queue_work(kthrotld_workqueue, &td->dispatch_work)
-    W->>W: submit_bio_noacct_nocheck(bio)：计入 io.stat，进入 blk-mq
+    W->>W: submit_bio_noacct_nocheck(bio, false)：计入 io.stat，进入 blk-mq
 ```
 
 ### 4.5 修改限值：激活、carryover 与 `has_rules`
@@ -726,7 +726,7 @@ sequenceDiagram
 
 ### 5.1 对象
 
-**`struct blk_iolatency`**（[blk-iolatency.c#L87-L101](../../linux/block/blk-iolatency.c#L87-L101)）：每队列一个，内嵌 rq_qos；`timer` 是每秒一次的恢复定时器；`enabled` 是总开关，只有至少一个组设置了目标时才为真。
+**`struct blk_iolatency`**（[blk-iolatency.c#L87-L101](../../linux/block/blk-iolatency.c#L87-L101)）：每队列一个，内嵌 rq_qos；`timer` 是恢复定时器，由发起路径在它未挂起时设为 1 秒后到期（5.2 节），回调本身不重新设置它；`enabled` 是总开关，只有至少一个组设置了目标时才为真。
 
 **`struct iolatency_grp`**（[blk-iolatency.c#L139-L159](../../linux/block/blk-iolatency.c#L139-L159)）：每个 blkg 一个。
 
@@ -769,7 +769,7 @@ sequenceDiagram
 
 [`blkcg_iolatency_done_bio()`](../../linux/block/blk-iolatency.c#L583-L633) 只处理带有 `BIO_QOS_THROTTLED` 的 bio。它同样沿 `parent` 向上，对每一级：在途计数减 1；本级设置了目标且 bio 状态不是 `BLK_STS_AGAIN` 时，用 `now - bio->issue_time_ns` 记录一个样本；若距窗口起点已超过 `cur_win_nsec`，并且用 `cmpxchg` 抢到了窗口，就调用 `iolatency_check_latencies()` 评估；最后唤醒等待者。
 
-**样本怎样记录**。[`iolatency_record_time()`](../../linux/block/blk-iolatency.c#L488-L510) 对以根身份发出的 bio 不记样本，以免把统计拉低；若本组正受限，且这个 bio 比目标快，就把“目标减实际延迟”作为延迟累加到 blkg 上。普通样本由 [`latency_stat_record_time()`](../../linux/block/blk-iolatency.c#L219-L230) 记入每 CPU 统计：SSD 记“总数”和“达到或超过目标的数目”，HDD 记入 `blk_rq_stat` 求平均。
+**样本怎样记录**。[`iolatency_record_time()`](../../linux/block/blk-iolatency.c#L488-L510) 在本组正受限（`max_depth != UINT_MAX`）时，对以根身份发出的 bio 不记样本，注释说明是为了不把统计拉低；这时若这个 bio 比本组自己的目标快，就把“目标减实际延迟”作为延迟累加到 blkg 上。本组未受限时，这类 bio 照常记样本。普通样本由 [`latency_stat_record_time()`](../../linux/block/blk-iolatency.c#L219-L230) 记入每 CPU 统计：SSD 记“总数”和“达到或超过目标的数目”，HDD 记入 `blk_rq_stat` 求平均。
 
 **达标判定**：
 
@@ -796,7 +796,7 @@ static inline bool latency_sum_ok(struct iolatency_grp *iolat,
 2. 持有父组的 `child_lat.lock`，把本窗口样本累加进 `cur_stat`，更新父组的 `nr_samples`；
 3. 距上次调整不足 500 ms 则返回（[blk-iolatency.c#L512](../../linux/block/blk-iolatency.c#L512)）；
 4. **达标**：累计样本至少 5 个，并且本组就是当初触发收紧的 `scale_grp`，才把 cookie 调大一步；
-5. **未达标**：若父组尚未记录 `scale_lat`，或已记录的 `scale_lat` 不比本组目标小，就把本组记为 `scale_grp`（目标更严的组优先），把 cookie 调小一步；
+5. **未达标**：若父组尚未记录 `scale_lat`，或已记录的 `scale_lat` 不比本组目标小，就把 cookie 调小一步；其中若还没有 `scale_grp`，或本组目标比 `scale_lat` 更严，就把本组记为 `scale_grp` 并更新 `scale_lat`（目标更严的组优先）；
 6. 清零 `cur_stat`。
 
 ### 5.4 scale cookie：一个组未达标，怎样限制它的兄弟
@@ -823,15 +823,15 @@ scale_change(iolat, 放松?)
 
 [`scale_change()`](../../linux/block/blk-iolatency.c#L373-L396) 先把 `max_depth` 截到 qd 以内：收紧时减半（最低为 1）；放松时加 qd/16（最高为 qd），并唤醒等待者；如果深度为 1 且处于延迟状态，放松的第一步是减少一次延迟计数，而不是增加深度。
 
-**例子**。根下有 `db`（目标 2 ms）、`web` 和 `backup`（都没有目标），设备 qd 为 64。`db` 在一个窗口内超过十分之一的 I/O 超过 2 ms，于是 `root.child_lat` 记 `scale_grp = db`、`scale_lat = 2 ms`，cookie 减 16。`web` 和 `backup` 下一次发 bio 时发现 cookie 变小，各自的 `max_depth` 从不限变为 32；`db` 自己因为目标不比 `scale_lat` 宽松而不受影响。此后至少每 500 ms 评估一次，`db` 仍未达标就继续收紧：16、8、……、1，再往后对 `web`、`backup` 的任务施加返回用户态延迟。`db` 达标并积累至少 5 个样本后开始调大 cookie（离默认值超过 qd 时每次加 1，否则每次加 4），兄弟们每看到一次 cookie 变大，深度就加 4；cookie 回到默认值时，兄弟们的深度恢复为不限。
+**例子**。根下有 `db`（目标 2 ms）、`web` 和 `backup`（都没有目标），设备 qd 为 64。`db` 在一个窗口内有不少于十分之一的 I/O 达到或超过 2 ms，于是 `root.child_lat` 记 `scale_grp = db`、`scale_lat = 2 ms`，cookie 减 16。`web` 和 `backup` 下一次发 bio 时发现 cookie 变小，各自的 `max_depth` 从不限变为 32；`db` 自己因为目标不比 `scale_lat` 宽松而不受影响。此后两次调整之间至少相隔 500 ms，`db` 仍未达标就继续收紧：16、8、……、1，再往后 `web`、`backup` 改为进入 `use_delay` 计数模式。不过它们没有设置目标，完成路径不会为它们累加延迟（5.5 节），所以按源码推演，它们的任务在返回用户态时不会真正睡眠；`use_delay` 非 0 使 `congestion_count` 非 0，仍会影响这些任务的预读和换出节流（3.6 节）。`db` 达标并积累至少 5 个样本后开始调大 cookie（离默认值超过 qd 时每次加 1，否则每次加 4），兄弟们每看到一次 cookie 变大，深度就加 4；cookie 回到默认值时，兄弟们的深度恢复为不限。
 
 这个例子是按源码逻辑推演的过程，实际节奏取决于 I/O 完成的时刻，因为窗口只在有 I/O 完成时才会结束。
 
 ### 5.5 恢复、诱导延迟与开关
 
-**无人负责时的恢复**。如果触发收紧的组后来不再发 I/O，就不会再有人把 cookie 调回去。[`blkiolatency_timer_fn()`](../../linux/block/blk-iolatency.c#L651-L711) 每秒遍历一次所有 blkg：对 cookie 低于默认值的组，如果没有 `scale_grp` 就把 cookie 调大一步；如果距上次调整已有 5 秒，就清除 `scale_grp`，下一秒起逐步放松。
+**无人负责时的恢复**。如果触发收紧的组后来不再发 I/O，就不会再有人把 cookie 调回去。[`blkiolatency_timer_fn()`](../../linux/block/blk-iolatency.c#L651-L711) 每次到期时遍历所有 blkg（定时器由发起路径在未挂起时设为 1 秒后到期，所以只要设备上还有 bio 经过 iolatency 的 `throttle` 钩子，它大约每秒运行一次）：对 cookie 低于默认值的组，如果没有 `scale_grp` 就把 cookie 调大一步；如果距上次调整已有 5 秒，就清除 `scale_grp`，下一秒起逐步放松。
 
-**诱导延迟的来源**。兄弟组被压到深度 1 后会进入 `use_delay` 计数模式（5.4 节）。此后它以根身份发出的 bio 完成时，若比 `db` 的目标快，就把差值记为延迟（5.3 节）。这些延迟在任务返回用户态时兑现，单次最多 250 ms（3.6 节）。
+**诱导延迟的来源**。兄弟组被压到深度 1 后会进入 `use_delay` 计数模式（5.4 节）。此后它以根身份发出的 bio 完成时，若比**它自己的**目标快，就把差值记为延迟（5.3 节）。完成路径只在设置了目标的层级上记录样本和延迟（[blk-iolatency.c#L619-L621](../../linux/block/blk-iolatency.c#L619-L621)），所以只有本身设置了（较宽松）目标的受限兄弟组才会累积这种延迟；没有目标的兄弟组即使进入 `use_delay`，`delay_nsec` 也不会经这条路径增长。这些延迟在任务返回用户态时兑现，单次最多 250 ms（3.6 节）。
 
 **开关**。[`iolatency_set_limit()`](../../linux/block/blk-iolatency.c#L827-L895) 解析 `MAJ:MIN target=<微秒>` 或 `target=max`（表示取消目标）。第一次写入时调用 [`blk_iolatency_init()`](../../linux/block/blk-iolatency.c#L758-L785)：添加 rq_qos，激活策略，初始化定时器和开关工作。[`iolatency_set_min_lat_nsec()`](../../linux/block/blk-iolatency.c#L787-L807) 维护设置了目标的组数 `enable_cnt`，它在 0 和 1 之间变化时调度 [`blkiolatency_enable_work_fn()`](../../linux/block/blk-iolatency.c#L728-L756)。这个工作函数冻结队列后切换 `enabled` 和 `QUEUE_FLAG_BIO_ISSUE_TIME`，注释解释：在途计数要求每个 I/O 两次沿层级上溯，代价不低，所以没有组设置目标时关闭它；冻结队列保证切换时没有在途 I/O，计数不会失衡。修改目标时还会清除父组 `child_lat` 中的收紧状态（[blk-iolatency.c#L809-L825](../../linux/block/blk-iolatency.c#L809-L825)）。pd 下线时同样把目标清零并清除收紧状态（[blk-iolatency.c#L1025-L1032](../../linux/block/blk-iolatency.c#L1025-L1032)）。
 
@@ -843,7 +843,7 @@ scale_change(iolat, 放松?)
 
 ### 6.1 三个概念：成本、设备虚拟时间、层级权重
 
-**成本（abs_cost）**：成本模型估计的一次 I/O 占用设备的时间。单位是 vtime，1 秒等于 2^37 个单位（[blk-iocost.c#L237-L252](../../linux/block/blk-iocost.c#L237-L252)）。注释的解释是：估计 10 ms 的 I/O，设备每秒大约能完成 100 个。
+**成本（abs_cost）**：成本模型估计的一次 I/O 占用设备的时间。单位是 vtime，1 秒等于 2^37 个单位（[blk-iocost.c#L237-L252](../../linux/block/blk-iocost.c#L237-L252)）。文件头部注释的解释是：估计 10 ms 的 I/O，设备每秒大约能完成 100 个（[blk-iocost.c#L32-L35](../../linux/block/blk-iocost.c#L32-L35)）。
 
 **设备虚拟时间（vnow）**：一个随墙上时钟推进的时间轴，推进速度称为 **vrate**。vrate 为 100% 时，墙上时间过 1 秒，设备虚拟时间也过 1 秒，即全体组每秒一共可以发出 1 秒设备时间的 I/O。
 
@@ -986,7 +986,7 @@ if use_debt:
 
 三档余量都按“一个周期能产生的虚拟时间”的百分比定义：`min` 10%、`low` 20%、`target` 50%（[blk-iocost.c#L219-L228](../../linux/block/blk-iocost.c#L219-L228)、[blk-iocost.c#L753-L762](../../linux/block/blk-iocost.c#L753-L762)）。
 
-**等待**。[`iocg_kick_waitq()`](../../linux/block/blk-iocost.c#L1500-L1581) 计算当前预算 `vbudget = vnow - vtime`，必要时先还欠账（6.8 节），然后按先来后到唤醒等待者：唤醒函数 [`iocg_wake_fn()`](../../linux/block/blk-iocost.c#L1468-L1493) 用当前的 `hw_inuse` 重新折算每个等待者的成本，预算够就**替它提交**（`iocg_commit_bio()` 并置 `committed`），不够就停止。还有等待者时，按“缺口 / vrate”算出下次唤醒时刻，加上 1% 周期的松弛量，启动 `waitq_timer`。注释说明，hweight 和 vrate 变化可能使这个时刻过早或过晚：过早则定时器重新安排自己，过晚则由周期定时器发现并唤醒（[blk-iocost.c#L2708-L2720](../../linux/block/blk-iocost.c#L2708-L2720)）。
+**等待**。[`iocg_kick_waitq()`](../../linux/block/blk-iocost.c#L1500-L1581) 计算当前预算 `vbudget = vnow - vtime`，必要时先还欠账（6.8 节），然后按先来后到唤醒等待者：唤醒函数 [`iocg_wake_fn()`](../../linux/block/blk-iocost.c#L1468-L1493) 用当前的 `hw_inuse` 重新折算每个等待者的成本，预算够就**替它提交**（`iocg_commit_bio()` 并置 `committed`），不够就停止。还有等待者时，按“缺口 / vrate”算出下次唤醒时刻，加上 1% 周期的松弛量，启动 `waitq_timer`。注释说明，定时时长按当时的 vrate 计算，此后 vtime 和 hweight 的变化可能使这个时刻过早或过晚：过早则定时器重新安排自己，过晚则由周期定时器发现并唤醒（[blk-iocost.c#L2708-L2720](../../linux/block/blk-iocost.c#L2708-L2720)）。
 
 **合并**。bio 合并进已有请求时，[`ioc_rqos_merge()`](../../linux/block/blk-iocost.c#L2742-L2799) 只计页成本；预算够且被合并的请求已有成本就直接计费，否则记为欠账。合并路径不等待。
 
@@ -1037,7 +1037,7 @@ if use_debt:
 - **请求等待**：[`ioc_rqos_done()`](../../linux/block/blk-iocost.c#L2809-L2847) 在请求完成时累加 `start_time_ns - alloc_time_ns`，即请求从开始分配到开始计时之间的时间，其中主要是等待 tag 的时间（`__blk_mq_alloc_requests()` 的注释写明分配时间包括深度和 tag 的等待，[blk-mq.c#L503-L505](../../linux/block/blk-mq.c#L503-L505)）。软硬件队列都满了，bio 才会等待请求，这是一个保守但可靠的饱和信号。周期内的累计等待时间占周期长度的百分比记为 `rq_wait_pct`。
 - **完成延迟**：同一函数用“从分配请求到完成的时间减去按页成本估计的传输时间”与 `rlat`、`wlat` 比较，分别计入达标或未达标；周期结束时算出未达标的比例 `missed_ppm`。
 
-[`ioc_timer_fn()`](../../linux/block/blk-iocost.c#L2243-L2467) 每个周期执行一次，持有 `ioc->lock`：
+[`ioc_timer_fn()`](../../linux/block/blk-iocost.c#L2243-L2467) 每个周期执行一次，除第 1 步在加锁之前完成外，其余步骤都持有 `ioc->lock`：
 
 1. **收集信号**：[`ioc_lat_stat()`](../../linux/block/blk-iocost.c#L1599-L1636) 汇总每 CPU 计数，得到 `missed_ppm[]` 和 `rq_wait_pct`。
 2. **检查各组**：[`ioc_check_iocgs()`](../../linux/block/blk-iocost.c#L2175-L2241) 对有等待者、欠账或延迟的组调用 `iocg_kick_waitq()`，因为 vrate 变大后它们可能睡过头；对本周期没有发出 I/O、也没有在途 I/O 的组（[`iocg_is_idle()`](../../linux/block/blk-iocost.c#L1639-L1653)），把超出 `target` 的预算计入 `vtime_err` 后丢弃，传播权重 0，移出活跃链表。
@@ -1045,7 +1045,7 @@ if use_debt:
 4. **找出捐赠者**（6.7 节），有捐赠者且有短缺者时调用 `transfer_surpluses()`。
 5. **更新 `busy_level`**（[blk-iocost.c#L2401-L2439](../../linux/block/blk-iocost.c#L2401-L2439)）：
    - `rq_wait_pct` 超过 5%，或任一方向的 `missed_ppm` 超过阈值：明显饱和，`busy_level` 至少为 0 后加 1；
-   - 三个指标都低于阈值的 75%：如果有组因预算不足而受限（短缺），说明设备还有余量却在节流，`busy_level` 至多为 0，没有跨周期未完成的 I/O 时再减 1；如果没有短缺，说明负载本来就不足以压满设备，无从判断，`busy_level` 清零；
+   - 三个指标都不超过阈值的 75%：如果有组因预算不足而受限（短缺），说明设备还有余量却在节流，`busy_level` 至多为 0，没有跨周期未完成的 I/O 时再减 1；如果没有短缺，说明负载本来就不足以压满设备，无从判断，`busy_level` 清零；
    - 处于两者之间的滞后区：清零。
 6. **调整 vrate**：[`ioc_adjust_base_vrate()`](../../linux/block/blk-iocost.c#L993-L1039) 在 `busy_level` 非 0 时按表 `vrate_adj_pct[]` 调整：连续饱和的前 3 个周期不调，之后每周期降低 1%，越往后降得越多，依次为 2%、4%、8%，最多 16%；`busy_level` 为负时以同样的幅度升高（[blk-iocost.c#L651-L655](../../linux/block/blk-iocost.c#L651-L655)）。结果夹在 `vrate_min` 与 `vrate_max` 之间，默认为 1% 到 10000%；若当前值已在范围之外（例如用户刚刚收窄了范围），则不查表，而是每周期向范围内移动 4%。`busy_level` 为 0，或为负但存在跨周期未完成的 I/O 时，vrate 保持不变。
 7. **收尾**：`ioc_refresh_params()` 可能切换默认参数档位；`ioc_forgive_debts()` 减免欠账（6.8 节）；周期编号加 1，还有活跃组就开始下一个周期，否则进入空闲状态；最后 [`ioc_refresh_vrate()`](../../linux/block/blk-iocost.c#L963-L991) 在下一周期内临时加快 vrate，补偿本周期被丢弃的预算 `vtime_err`，以免总利用率因丢弃预算而下降。
@@ -1077,7 +1077,7 @@ new_hwi = usage / (1 − MARGIN_TARGET + delta)
 
 **延迟**。欠账本身挡不住继续发出元数据 I/O 或换出 I/O 的任务，所以 [`iocg_kick_delay()`](../../linux/block/blk-iocost.c#L1353-L1416) 把超支量换算成返回用户态延迟。超支量是“游标 + 欠账 − vnow”，表示为周期虚拟时间的百分比：不超过 500% 时不延迟，达到 25000% 时延迟 250 ms，中间按线性从 250 µs 增长到 250 ms（[blk-iocost.c#L292-L295](../../linux/block/blk-iocost.c#L292-L295)）。已有的延迟每秒减半，取两者中较大的。结果不低于 250 µs 时用设定模式 `blkcg_set_delay()` 写到 blkg 上（3.6 节），由发出路径调用 `blkcg_schedule_throttle()`。
 
-**债务减免**。低权重组在内存回收严重时可能积累数秒的欠账；如果此后没有别的 I/O，它会在设备空闲时仍然被阻塞着还债。[`ioc_forgive_debts()`](../../linux/block/blk-iocost.c#L2071-L2163) 在有欠账组时统计设备用量：每满 100 ms 计算一次平均用量，不超过 50% 就把各组的欠账和延迟按经过的 100 ms 个数右移（每 100 ms 减半），再重新唤醒等待者；`busy_level` 为正时视为满载，不减免。
+**债务减免**。低权重组在内存回收严重时可能积累数秒的欠账；如果此后没有别的 I/O，它会在设备空闲时仍然被阻塞着还债。[`ioc_forgive_debts()`](../../linux/block/blk-iocost.c#L2071-L2163) 在有欠账组时统计设备用量：每满 100 ms 计算一次平均用量，不超过 50% 就把各组的欠账和延迟按经过的 100 ms 个数右移（每 100 ms 减半），再重新唤醒等待者。`busy_level` 为正的周期按满载（整个周期）计入用量，注释说明这是为了不在设备被写突发压满时减免欠账（[blk-iocost.c#L2096-L2103](../../linux/block/blk-iocost.c#L2096-L2103)）。
 
 ### 6.9 启用与配置
 
@@ -1127,7 +1127,7 @@ new_hwi = usage / (1 − MARGIN_TARGET + delta)
 
 ### 7.2 blkg：销毁与释放
 
-**销毁**。[`blkg_destroy()`](../../linux/block/blk-cgroup.c#L524-L569) 必须同时持有 `queue_lock` 和 `blkcg->lock`：对每个在线 pd 调用 `pd_offline_fn`，清除 `online`，从 `blkg_tree` 和 `blkcg->blkg_list` 中摘除，必要时清空 `blkg_hint`，最后 `percpu_ref_kill()` 去掉创建时的初始引用。此后 `blkg_tryget()` 失败，新 bio 会关联到最近的存活祖先（3.1 节）；而 blkcg 已下线，`blkg_create()` 中的 `css_tryget_online()` 也会失败，不会重建它。
+**销毁**。[`blkg_destroy()`](../../linux/block/blk-cgroup.c#L524-L569) 必须同时持有 `queue_lock` 和 `blkcg->lock`：对每个在线 pd 调用 `pd_offline_fn`，清除 `online`，从 `blkg_tree` 和 `blkcg->blkg_list` 中摘除，必要时清空 `blkg_hint`，最后 `percpu_ref_kill()` 去掉创建时的初始引用。此后 `blkg_lookup()` 再也找不到它；而 blkcg 已下线，`blkg_create()` 中的 `css_tryget_online()` 也会失败，不会重建它，于是 `blkg_lookup_create()` 退回最近的已有祖先，新 bio 关联到那里（3.1、3.2 节）。`blkg_tryget()` 用的是 `percpu_ref_tryget()`，只在计数已归零时才失败（[blk-cgroup.h#L327-L330](../../linux/block/blk-cgroup.h#L327-L330)），所以已经拿到指针的使用者在最后一个引用归还之前仍能成功取得引用。
 
 **释放**分三步，在最后一个引用归还时开始：
 

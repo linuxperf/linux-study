@@ -20,7 +20,7 @@
 | `CONFIG_LRU_GEN` 未设置 | 不编入多代 LRU（MGLRU，Multi-Gen LRU），回收只走传统 active/inactive 链表 | [.config#L1287](../../linux/.config#L1287)、[mm_inline.h#L312-L317](../../linux/include/linux/mm_inline.h#L312-L317) |
 | `CONFIG_MEMCG=y`，`CONFIG_MEMCG_V1` 未设置 | 每个“memcg × 节点”一组 LRU 链表；没有 v1 的软限制回收 | [.config#L212-L213](../../linux/.config#L212-L213)、[memcontrol.h#L1927-L1934](../../linux/include/linux/memcontrol.h#L1927-L1934) |
 | `CONFIG_CGROUP_WRITEBACK=y` | cgroup v2 下的回收可以依赖正常的脏页节流 | [.config#L215](../../linux/.config#L215)、[vmscan.c#L241-L250](../../linux/mm/vmscan.c#L241-L250) |
-| `CONFIG_SWAP=y`、`CONFIG_ZSWAP=y` | 匿名页可以换出，写出前可能先压缩进 zswap | [.config#L1146-L1147](../../linux/.config#L1146-L1147) |
+| `CONFIG_SWAP=y`、`CONFIG_ZSWAP=y`，`CONFIG_ZSWAP_DEFAULT_ON` 未设置 | 匿名页可以换出；zswap 已编入，但运行时默认关闭，启用后写出前可能先压缩进 zswap | [.config#L1146-L1148](../../linux/.config#L1146-L1148)、[zswap.c#L89](../../linux/mm/zswap.c#L89) |
 | `CONFIG_NUMA=y` | 非一致内存访问（NUMA）系统中，每个有内存的节点一个 kswapd；可以启用节点回收和降级迁移 | [.config#L469](../../linux/.config#L469) |
 | `CONFIG_TRANSPARENT_HUGEPAGE=y`、`CONFIG_THP_SWAP=y` | 透明大页（THP，Transparent Huge Page）的大 folio 可以整体分配 swap，失败时拆分 | [.config#L1236](../../linux/.config#L1236)、[.config#L1240](../../linux/.config#L1240) |
 | `CONFIG_COMPACTION=y` | 高阶分配的回收会与规整配合 | [.config#L1216](../../linux/.config#L1216) |
@@ -52,7 +52,7 @@
 | --- | --- | --- | --- | --- |
 | 干净的普通文件页 | file | 文件本身 | 解除页表映射，从页缓存删除 | [vmscan.c#L785-L816](../../linux/mm/vmscan.c#L785-L816) |
 | 脏的普通文件页 | file | 暂时没有 | 交给回写线程写回文件，写完后的某次扫描再删除 | [vmscan.c#L1416-L1444](../../linux/mm/vmscan.c#L1416-L1444) |
-| 匿名页、tmpfs/shmem 页 | anon | 暂时没有 | 分配 swap 槽位并写出，写完后从 swap cache 删除 | [vmscan.c#L1302-L1359](../../linux/mm/vmscan.c#L1302-L1359) |
+| 匿名页、tmpfs/shmem 页 | anon | 暂时没有 | 分配 swap 槽位并写出，写完后从 swap cache 删除 | 匿名页：[vmscan.c#L1302-L1359](../../linux/mm/vmscan.c#L1302-L1359)；shmem 页在写出时由 `shmem_writeout()` 分配：[shmem.c#L1647](../../linux/mm/shmem.c#L1647) |
 | `MADV_FREE` 后没有再写过的匿名页 | file | 不需要，应用已声明内容可丢弃 | 解除映射后直接释放 | [vmscan.c#L1545-L1558](../../linux/mm/vmscan.c#L1545-L1558) |
 | dentry、inode 等内核对象 | 不在 LRU 上 | 由所属子系统判断 | 通过 shrinker 回调释放对象 | [shrinker.c#L380-L475](../../linux/mm/shrinker.c#L380-L475) |
 | mlock 锁定页等不可驱逐页 | unevictable | — | 不回收 | [internal.h#L481-L502](../../linux/mm/internal.h#L481-L502) |
@@ -82,7 +82,7 @@ flowchart LR
         SN["shrink_node()"]
     end
     PA -->|"水位低于 low"| K
-    PA -->|"min 水位下仍失败"| D
+    PA -->|"min 水位下仍失败（直接回收）；<br/>zone_reclaim_mode≠0 时 zone 水位检查失败（节点回收）"| D
     MC -->|"超过 high / max"| D
     UI --> D
     K --> SN
@@ -105,7 +105,7 @@ flowchart LR
 
 | 触发事件 | 执行者 | 入口 | 本次目标 `nr_to_reclaim` | 回收范围 |
 | --- | --- | --- | --- | --- |
-| 分配路径发现某节点水位不足 | 该节点的 kswapd 线程 | [`wakeup_kswapd()`](../../linux/mm/vmscan.c#L7385) → [`balance_pgdat()`](../../linux/mm/vmscan.c#L6975) | 各合格 zone 的 `max(high 水位, 32)` 之和 | 本节点、请求允许的 zone、全部 memcg |
+| 分配路径发现某节点水位不足 | 该节点的 kswapd 线程 | [`wakeup_kswapd()`](../../linux/mm/vmscan.c#L7385) 唤醒，kswapd 线程执行 [`balance_pgdat()`](../../linux/mm/vmscan.c#L6975) | 各合格 zone 的 `max(high 水位, 32)` 之和 | 本节点、请求允许的 zone、全部 memcg |
 | 慢路径仍拿不到页，且 GFP 允许直接回收 | 发起分配的任务 | [`try_to_free_pages()`](../../linux/mm/vmscan.c#L6590) | 32 页 | 分配允许的节点和 zone、全部 memcg |
 | memcg 计费超过 `memory.high/max`，或写这两个文件 | 计费或写文件的任务 | [`try_to_free_mem_cgroup_pages()`](../../linux/mm/vmscan.c#L6675) | `max(请求页数, 32)` | 该 memcg 子树、所有 zone |
 | 写 `memory.reclaim` 或节点的 `reclaim` 文件 | 写文件的任务 | [`user_proactive_reclaim()`](../../linux/mm/vmscan.c#L7743) | 剩余量的 1/4，分批进行 | memcg 子树，或单个节点 |
@@ -200,7 +200,7 @@ flowchart TD
     PN -->|"内嵌"| L["lruvec"]
     L -->|"lists[] 链表头"| F["folio：经 folio->lru 链入"]
     F -.->|"folio 的 memcg + 所在 node<br/>决定属于哪个 lruvec"| L
-    SC["scan_control：回收者栈上的局部变量"] -.->|"target_mem_cgroup"| MCG
+    SC["scan_control：回收者栈上的局部变量"] -->|"target_mem_cgroup 指针"| MCG
     SH["shrinker：挂在全局 shrinker_list"]
 ```
 
@@ -233,7 +233,7 @@ flowchart TD
 | --- | --- | --- |
 | `kswapd` | 本节点的 kswapd 线程 | `kswapd_run()`/`kswapd_stop()`，持 `kswapd_lock` |
 | `kswapd_wait` | kswapd 睡眠用的等待队列 | 唤醒者检查它是否有等待者 |
-| `kswapd_order`、`kswapd_highest_zoneidx` | 唤醒者留下的请求：最大阶数、最高 zone 下标；后者为 `MAX_NR_ZONES` 表示没有新请求 | 唤醒者只往大里改，kswapd 读出后复位；`READ_ONCE/WRITE_ONCE`，不加锁 |
+| `kswapd_order`、`kswapd_highest_zoneidx` | 唤醒者留下的请求：最大阶数、最高 zone 下标；后者为 `MAX_NR_ZONES` 表示没有新请求 | `wakeup_kswapd()` 只往大里改（例外：直接回收节流时 `allow_direct_reclaim()` 会把 zone 下标压到 `ZONE_NORMAL`，[vmscan.c#L6491-L6496](../../linux/mm/vmscan.c#L6491-L6496)），kswapd 读出后复位；`READ_ONCE/WRITE_ONCE`，不加锁 |
 | `kswapd_failures` | 连续多少次 `balance_pgdat()` 一页都没回收到 | 原子变量；kswapd 失败时加一，任何回收者在本节点有进展时清零 |
 | `pfmemalloc_wait` | 直接回收者因保留页过低而等待 kswapd 的队列 | 见第 5.7 节 |
 | `reclaim_wait[]` | 按原因分开的回收节流等待队列，原因见 [vmscan_throttle_state](../../linux/include/linux/mmzone.h#L325-L331) | `reclaim_throttle()` |
@@ -242,7 +242,7 @@ flowchart TD
 | `min_unmapped_pages`、`min_slab_pages` | 节点回收的启动门槛 | 由 sysctl 计算 |
 | `__lruvec` | memcg 被禁用时，本节点唯一的 `lruvec` | — |
 
-`kswapd_failures` 达到 `MAX_RECLAIM_RETRIES`（16，[internal.h#L528-L532](../../linux/mm/internal.h#L528-L532)）的节点被视为“无望节点”：kswapd 不再被唤醒，也不再阻止自己睡眠，直接回收者不会再因为它而节流，回收交给直接回收和 OOM 处理。
+`kswapd_failures` 达到 `MAX_RECLAIM_RETRIES`（16，[internal.h#L528-L532](../../linux/mm/internal.h#L528-L532)）的节点被视为“无望节点”：kswapd 不再被唤醒，也不再阻止自己睡眠；直接回收者不会再因为它在 `pfmemalloc_wait` 上等待（[vmscan.c#L6473-L6474](../../linux/mm/vmscan.c#L6473-L6474)），`CONGESTED` 和 `NOPROGRESS` 两类节流也被跳过（[vmscan.c#L518-L519](../../linux/mm/vmscan.c#L518-L519)），回收交给直接回收和 OOM 处理。
 
 ### 3.4 `lruvec`：一组回收候选
 
@@ -284,18 +284,18 @@ flowchart TD
 | `PG_swapbacked` | 后备存储是 RAM/swap，决定 anon/file 分类 | 匿名页、shmem 页带此标志；`MADV_FREE` 会清除它 |
 | `PG_unevictable`、`PG_mlocked` | 不可驱逐；被 mlock 锁定 | 后者由 mlock 代码设置；前者在加入 LRU 时按 `folio_evictable()` 设置 |
 | `PG_dirty`、`PG_writeback` | 内容需要写回；正在写回 | 页缓存与回写代码 |
-| `PG_locked` | folio 锁，回收处理期间一直持有 | 回收只用 `folio_trylock()` 获取 |
+| `PG_locked` | folio 锁，回收处理期间一直持有 | 回收主路径只用 `folio_trylock()` 获取；写出出错时的 [`handle_write_error()`](../../linux/mm/vmscan.c#L500-L507) 是例外，会睡眠加锁 |
 | `PG_swapcache` | 已加入 swap cache | swap 分配与删除 |
 
 **引用计数怎样解释。** 页缓存或 swap cache 为每个基础页持有一个引用；回收隔离 folio 时自己再持有一个；文件系统私有数据（`PG_private`）再算一个。所以一个“只剩缓存在用”的 folio，引用计数正好是 `1 + nr_pages + private`，这个判断写在 [`is_page_cache_freeable()`](../../linux/mm/vmscan.c#L477-L486) 里。多出来的引用说明还有别人在用，例如 GUP（Get User Pages）、并发的查找或 I/O。
 
 **几条不变量。**
 
-1. **除了持有 `lru_lock` 的短暂窗口，`PG_lru` 置位就表示 folio 在某个 `lruvec` 中。** 想把 folio 从链表上摘下来，必须先用原子的 `folio_test_clear_lru()` 清掉这一位；多个竞争者中只有一个能成功，见 [isolate_lru_folios()](../../linux/mm/vmscan.c#L1791-L1803) 中的 `folio_test_clear_lru()` 判断，以及 [folio_isolate_lru()](../../linux/mm/vmscan.c#L1861-L1878)。
-2. **被隔离的 folio 不在任何链表上，隔离者持有一个引用。** 放回时先置 `PG_lru`，再放下隔离时取得的引用：引用就此归零，说明其他使用者都已放弃它，直接释放；否则挂回链表，见 [move_folios_to_lru()](../../linux/mm/vmscan.c#L1948-L1980)。
+1. **除了持有 `lru_lock` 的短暂窗口，`PG_lru` 置位就表示 folio 在某个 `lruvec` 中。** 想把一个仍有使用者的 folio 从链表上摘下来，必须先用原子的 `folio_test_clear_lru()` 清掉这一位；多个竞争者中只有一个能成功，见 [isolate_lru_folios()](../../linux/mm/vmscan.c#L1791-L1803) 中的 `folio_test_clear_lru()` 判断，以及 [folio_isolate_lru()](../../linux/mm/vmscan.c#L1861-L1878)。例外是引用计数已经归零的释放路径：此时不会再有竞争者，[`__page_cache_release()`](../../linux/mm/swap.c#L73-L81) 直接检查 `PG_lru`，在 `lru_lock` 下摘除。
+2. **被隔离的 folio 不在任何 `lruvec` 链表上（只在隔离者的私有列表上），隔离者持有一个引用。** 放回时先置 `PG_lru`，再放下隔离时取得的引用：引用就此归零，说明其他使用者都已放弃它，直接释放；否则挂回链表，见 [move_folios_to_lru()](../../linux/mm/vmscan.c#L1948-L1980)。
 3. **所在链表由标志推导。** [`folio_lru_list()`](../../linux/include/linux/mm_inline.h#L80-L101) 根据 `PG_unevictable`、`PG_swapbacked`、`PG_active` 算出链表下标，而且 `PG_active` 与 `PG_unevictable` 不能同时置位。因此修改 `PG_active` 前必须先把 folio 从链表上摘下，[`lru_activate()`](../../linux/mm/swap.c#L303-L318) 就是“删除 → 置位 → 重新加入”。
 
-**每 CPU 批处理。** 新 folio 调用 [`folio_add_lru()`](../../linux/mm/swap.c#L491-L512) 时并不立即挂链表，而是先放进本 CPU 的 `folio_batch`（[cpu_fbatches](../../linux/mm/swap.c#L50-L66)），并为此持有一个引用。批次满了，或者有人调用 [`lru_add_drain()`](../../linux/mm/swap.c#L734-L740)，才一次性取 `lru_lock` 挂上链表。激活、降级、移到尾部也走类似的批次。所以在批次里的 folio 还没有 `PG_lru`，回收开始扫描前会先把本 CPU 的批次排空（[vmscan.c#L2038](../../linux/mm/vmscan.c#L2038)）。
+**每 CPU 批处理。** 新 folio 调用 [`folio_add_lru()`](../../linux/mm/swap.c#L491-L512) 时并不立即挂链表，而是先放进本 CPU 的 `folio_batch`（[cpu_fbatches](../../linux/mm/swap.c#L50-L66)），并为此持有一个引用。批次满了、folio 是大 folio（[`folio_may_be_lru_cached()`](../../linux/include/linux/swap.h#L350-L358) 为假），或者有人调用 [`lru_add_drain()`](../../linux/mm/swap.c#L734-L740)，才一次性取 `lru_lock` 挂上链表（[swap.c#L182-L202](../../linux/mm/swap.c#L182-L202)）。激活、降级、移到尾部也走类似的批次，但这些批次里的 folio 仍带着 `PG_lru`，排空时才由 [`folio_batch_move_lru()`](../../linux/mm/swap.c#L158-L180) 测试并清除、移动后再置回。所以只有还在 `lru_add` 批次里的新 folio 没有 `PG_lru`、扫描不到；回收开始扫描前会先把本 CPU 的批次排空（[vmscan.c#L2038](../../linux/mm/vmscan.c#L2038)）。
 
 ### 3.6 `scan_control`：一次回收的工单
 
@@ -311,8 +311,9 @@ flowchart TD
 | | `may_writepage`、`may_unmap`、`may_swap` | 能否写出脏页、能否解除用户映射、能否换出匿名页 |
 | | `proactive`、`proactive_swappiness`、`no_demotion` | 主动回收标记及其 swappiness；是否禁止降级迁移 |
 | 策略状态 | `priority` | 扫描力度：每条链表扫描“长度右移 `priority` 位”（第 4.2 节） |
-| | `anon_cost`、`file_cost`、`may_deactivate`、`force_deactivate`、`skipped_deactivate`、`cache_trim_mode`、`file_is_tiny` | 每次进入 `shrink_node()` 时由 `prepare_scan_control()` 重新计算 |
-| | `memcg_low_reclaim`、`memcg_low_skipped`、`memcg_full_walk`、`compaction_ready` | 跨轮次的重试开关 |
+| | `anon_cost`、`file_cost`、`may_deactivate`、`cache_trim_mode`、`file_is_tiny` | 每次进入 `shrink_node()` 时由 `prepare_scan_control()` 重新计算（`force_deactivate` 置位时 `may_deactivate` 直接取全部类型） |
+| | `skipped_deactivate`、`force_deactivate`、`memcg_low_skipped`、`memcg_low_reclaim`、`memcg_full_walk` | 跨轮次的重试开关：`skipped_deactivate`、`memcg_low_skipped` 记录本轮跳过了什么；`force_deactivate`、`memcg_low_reclaim`、`memcg_full_walk` 由 `do_try_to_free_pages()` 在无进展时置位，然后重来（第 4.3 节） |
+| | `compaction_ready` | 某个 zone 已能直接满足分配或适合规整，直接回收据此提前结束（第 5.2 节） |
 | 结果 | `nr_scanned`、`nr_reclaimed` | 已扫描、已回收的基础页数 |
 | | `nr.*` | 本轮在一个节点上遇到的脏页、回写、拥塞等计数 |
 | | `reclaim_state` | 记录 LRU 之外释放的页数，例如 slab 页 |
@@ -329,7 +330,7 @@ flowchart TD
 | `may_unmap` | 1 | 1 | 1 | `RECLAIM_UNMAP` 位 |
 | `may_swap` | 1 | 无 boost 时为 1 | 调用者指定 | 1 |
 
-依据：[try_to_free_pages()](../../linux/mm/vmscan.c#L6594-L6604)、[balance_pgdat()](../../linux/mm/vmscan.c#L6985-L6989) 与 [kswapd_shrink_node()](../../linux/mm/vmscan.c#L6909-L6913)、[try_to_free_mem_cgroup_pages()](../../linux/mm/vmscan.c#L6683-L6695)、[node_reclaim()](../../linux/mm/vmscan.c#L7666-L7675)。[`current_gfp_context()`](../../linux/include/linux/sched/mm.h#L250-L268) 会按任务的 `PF_MEMALLOC_NOIO/NOFS` 作用域去掉 `__GFP_IO/__GFP_FS`，所以即使调用者传入 `GFP_KERNEL`，处在 NOFS 作用域里的回收也不会进入文件系统。
+依据：[try_to_free_pages()](../../linux/mm/vmscan.c#L6594-L6604)、[balance_pgdat()](../../linux/mm/vmscan.c#L6985-L6989)（`priority`、`reclaim_idx` 在 [vmscan.c#L7011-L7019](../../linux/mm/vmscan.c#L7011-L7019) 设置，`may_writepage`、`may_swap` 在 [vmscan.c#L7073-L7074](../../linux/mm/vmscan.c#L7073-L7074) 每轮重设）与 [kswapd_shrink_node()](../../linux/mm/vmscan.c#L6909-L6913)、[try_to_free_mem_cgroup_pages()](../../linux/mm/vmscan.c#L6683-L6695)、[node_reclaim()](../../linux/mm/vmscan.c#L7666-L7675)。[`current_gfp_context()`](../../linux/include/linux/sched/mm.h#L250-L268) 会按任务的 `PF_MEMALLOC_NOIO/NOFS` 作用域去掉 `__GFP_IO/__GFP_FS`，所以即使调用者传入 `GFP_KERNEL`，处在 NOFS 作用域里的回收也不会进入文件系统。
 
 **生命周期。** `scan_control` 是回收者栈上的局部变量，从不在任务之间共享，因此它的字段不需要加锁。回收期间 `current->reclaim_state` 指向其中的 `reclaim_state`（[set_task_reclaim_state()](../../linux/mm/vmscan.c#L287-L297)），slab 等代码释放页时通过 [`mm_account_reclaimed_pages()`](../../linux/include/linux/swap.h#L162-L174) 记账；回收结束前把指针清空。`order`、`priority` 和 `reclaim_idx` 都是 `s8`，取值上限由 [BUILD_BUG_ON](../../linux/mm/vmscan.c#L6606-L6612) 保证。
 
@@ -416,9 +417,9 @@ dentry、inode 这类对象不在 LRU 上，内核无法替它们判断哪个能
 
 memcg 启用时，一个节点上的页分散在各个 memcg 的 `lruvec` 里。[`shrink_node_memcgs()`](../../linux/mm/vmscan.c#L5972-L6049) 用 `mem_cgroup_iter()` 先序遍历目标子树（全局回收从根开始），对每个 memcg：
 
-1. 计算有效保护值。用量不超过 `memory.min` 的有效值时跳过，这是硬保护；不超过 `memory.low` 的有效值时，第一遍跳过并记下 `memcg_low_skipped`（[vmscan.c#L6007-L6027](../../linux/mm/vmscan.c#L6007-L6027)）。回收目标组自身的保护不生效（[memcontrol.h#L609-L639](../../linux/include/linux/memcontrol.h#L609-L639)）。
+1. 计算有效保护值。用量不超过 `memory.min` 的有效值时跳过，这是硬保护；不超过 `memory.low` 的有效值时，第一遍跳过并记下 `memcg_low_skipped`（[vmscan.c#L6007-L6027](../../linux/mm/vmscan.c#L6007-L6027)）。回收目标组自身和根 memcg 的保护不生效（[memcontrol.h#L609-L639](../../linux/include/linux/memcontrol.h#L609-L639)）。
 2. 取该 memcg 在本节点的 `lruvec`，调用 `shrink_lruvec()` 回收页，再调用 `shrink_slab()` 回收该 memcg 的对象缓存。
-3. 直接回收使用共享游标做“部分遍历”，回收量达到目标就提前退出；kswapd 和要求完整遍历的回收每次走完整棵树（[vmscan.c#L5981-L5993](../../linux/mm/vmscan.c#L5981-L5993)、[vmscan.c#L6043-L6047](../../linux/mm/vmscan.c#L6043-L6047)）。
+3. kswapd 以外的回收者（直接回收、memcg 回收、主动回收等）默认使用共享游标做“部分遍历”，回收量达到目标就提前退出；kswapd 和置了 `memcg_full_walk` 的回收每次走完整棵树（[vmscan.c#L5981-L5993](../../linux/mm/vmscan.c#L5981-L5993)、[vmscan.c#L6043-L6047](../../linux/mm/vmscan.c#L6043-L6047)）。
 
 受保护但没被跳过的组，扫描量还会按“用量中有多少处在保护线以内”按比例缩小，最少 32 页，见 [`apply_proportional_protection()`](../../linux/mm/vmscan.c#L2492-L2553)。如果一整轮回收都没有进展，`do_try_to_free_pages()` 会依次放宽条件重来：先改为完整遍历，再强制老化 active 链表，最后突破 `memory.low`（[vmscan.c#L6422-L6460](../../linux/mm/vmscan.c#L6422-L6460)）。保护值的计算和语义见 [cgroup v2 的 memory 控制器](../cgroup2/memory.md)第 3.5、3.6 节。
 
@@ -442,17 +443,17 @@ flowchart TD
     CT -->|否| FR["SCAN_FRACT：按代价和 swappiness 分配"]
 ```
 
-依据：[vmscan.c#L2573-L2627](../../linux/mm/vmscan.c#L2573-L2627)。“匿名页有没有去处”由 [`can_reclaim_anon_pages()`](../../linux/mm/vmscan.c#L359-L382) 判断：全局回收看系统是否还有空闲 swap；memcg 回收看该组的 swap 限额余量；两者都没有时，再看能否降级迁移到其他节点。
+依据：[vmscan.c#L2573-L2627](../../linux/mm/vmscan.c#L2573-L2627)。“匿名页有没有去处”由 [`can_reclaim_anon_pages()`](../../linux/mm/vmscan.c#L359-L382) 判断：传入的 memcg 为 `NULL` 时看系统是否还有空闲 swap；否则用 [`mem_cgroup_get_nr_swap_pages()`](../../linux/mm/memcontrol.c#L5258-L5269)，取系统空闲 swap 与该 memcg 及各级非根祖先 `swap.max` 余量中的最小值；没有余量时，再看能否降级迁移到其他节点。注意 `get_scan_count()` 传入的是被扫描 `lruvec` 所属的 memcg（[vmscan.c#L2566](../../linux/mm/vmscan.c#L2566)），memcg 启用时它不为 `NULL`，所以全局回收在扫描某个子组时，同样会受该组 swap 限额的约束。
 
 其中 `cache_trim_mode` 和 `file_is_tiny` 由 [`prepare_scan_control()`](../../linux/mm/vmscan.c#L2351-L2453) 在每次进入 `shrink_node()` 时计算：
 
 - **`cache_trim_mode`**：目标范围的 inactive 文件页右移 `priority` 后仍不为零，文件页没有在抖动（不需要老化 file active 链表），而且没有被 `no_cache_trim_mode` 禁用时置位。意思是“还有足够冷的页缓存可以丢，先别动匿名页”，防止一次顺序读把进程的数据挤到 swap 上（[vmscan.c#L2406-L2416](../../linux/mm/vmscan.c#L2406-L2416)）。
-- **`file_is_tiny`**：只用于全局回收。文件页加空闲页已经不超过各 zone 的 `high` 水位之和，匿名页没有在抖动，inactive anon 链表右移 `priority` 后也不为零时置位（[vmscan.c#L2418-L2452](../../linux/mm/vmscan.c#L2418-L2452)）。源码注释称这是在防止“缓存陷阱”：页缓存越小越容易抖动，抖动又让扫描继续偏向文件页，形成正反馈。
+- **`file_is_tiny`**：只用于全局回收，统计的是整个节点而不是目标 `lruvec`。节点的文件页加空闲页已经不超过各 zone 的 `high` 水位之和，匿名页没有在抖动（不需要老化 anon active 链表），节点的 inactive anon 页数右移 `priority` 后也不为零时置位（[vmscan.c#L2418-L2452](../../linux/mm/vmscan.c#L2418-L2452)）。源码注释称这是在防止“缓存陷阱”：页缓存越小越容易抖动，抖动又让扫描继续偏向文件页，形成正反馈。
 
 **SCAN_FRACT 的比例。** [`calculate_pressure_balance()`](../../linux/mm/vmscan.c#L2455-L2490) 把匿名页和文件页的代价与 swappiness 结合起来。改写成更易读的形式如下：
 
 ```text
-// 依据 calculate_pressure_balance() 改写，a = anon_cost，f = file_cost，s = swappiness
+// 伪代码：依据 calculate_pressure_balance() 改写，a = anon_cost，f = file_cost，s = swappiness
 total  = a + f
 anon_w = total + a                 // 匿名页近期越“贵”，它的分母越大
 file_w = total + f
@@ -525,18 +526,18 @@ stateDiagram-v2
 
 新分配的匿名页和新读入的文件页都从 inactive 开始：缺页处理调用 [`folio_add_lru_vma()`](../../linux/mm/memory.c#L5245)，页缓存插入调用 [`folio_add_lru()`](../../linux/mm/filemap.c#L998-L1001)，本配置下两者都不设置 `PG_active`。例外是 refault 被判定为工作集时，会在加入 LRU 前直接设置 `PG_active`（第 4.7 节）。
 
-**inactive 链表应该多长。** [`inactive_is_low()`](../../linux/mm/vmscan.c#L2297-L2342) 用 `inactive × ratio < active` 判断 inactive 是否偏短，`ratio = int_sqrt(10 × 总 GB 数)`，不足 1 GB 时为 1。源码注释给出了对应关系：
+**inactive 链表应该多长。** [`inactive_is_low()`](../../linux/mm/vmscan.c#L2297-L2342) 用 `inactive × ratio < active` 判断 inactive 是否偏短，`ratio = int_sqrt(10 × 总 GB 数)`，不足 1 GB 时为 1。源码注释给出了对应关系（注释把最后一列称为 max inactive）：
 
-| 该类型总量 | ratio | inactive 最多约占 |
+| 该类型总量 | ratio | inactive 的目标占比 |
 | --- | --- | --- |
 | 100 MB | 1 | 50% |
 | 1 GB | 3 | 25% |
 | 10 GB | 10 | 约 9% |
 | 100 GB | 31 | 约 3% |
 
-内存越大，inactive 占比越小。inactive 不能太短，否则页在被第二次访问之前就被挤出去了；也不能太长，否则 active 保护的工作集太小。
+inactive 的占比低于目标值，即 `1/(ratio+1)` 时，`inactive_is_low()` 返回真，active 链表才会因“inactive 偏短”而被老化。它是触发老化的门槛，代码并不强制 inactive 不得超过这个比例。内存越大，目标占比越小。inactive 不能太短，否则页在被第二次访问之前就被挤出去了；也不能太长，否则 active 保护的工作集太小。
 
-**什么时候老化 active。** active 链表不是每轮都扫。`prepare_scan_control()` 只在两种情况下允许降级某类 active 页（[vmscan.c#L2376-L2404](../../linux/mm/vmscan.c#L2376-L2404)）：自上一轮回收以来出现了新的 refault 激活（说明新的工作集正在形成，旧的 active 页可能过时了），或者 inactive 偏短。不允许时，[`shrink_list()`](../../linux/mm/vmscan.c#L2283-L2295) 跳过 active 链表并记下 `skipped_deactivate`；如果整轮回收一无所获，再带着 `force_deactivate` 重试。匿名 active 链表还有额外的老化机会：`shrink_lruvec()` 结束时（[vmscan.c#L5892-L5899](../../linux/mm/vmscan.c#L5892-L5899)）和 kswapd 每轮开始时（[`kswapd_age_node()`](../../linux/mm/vmscan.c#L6726-L6750)），只要有 swap（或可以降级迁移）且 inactive anon 偏短，就降级 32 页。
+**什么时候老化 active。** active 链表不是每轮都扫。`prepare_scan_control()` 只在两种情况下允许降级某类 active 页（[vmscan.c#L2376-L2404](../../linux/mm/vmscan.c#L2376-L2404)）：自上一轮回收以来出现了新的 refault 激活（说明新的工作集正在形成，旧的 active 页可能过时了），或者 inactive 偏短。不允许时，[`shrink_list()`](../../linux/mm/vmscan.c#L2283-L2295) 跳过 active 链表并记下 `skipped_deactivate`；如果整轮回收一无所获，再带着 `force_deactivate` 重试。匿名 active 链表还有额外的老化机会：只要系统配置了 swap（[`can_age_anon_pages()`](../../linux/mm/vmscan.c#L2682-L2692) 看 `total_swap_pages`，或者可以降级迁移）且 inactive anon 偏短，`shrink_lruvec()` 结束时会对当前 `lruvec` 再扫描 32 页 active anon（[vmscan.c#L5892-L5899](../../linux/mm/vmscan.c#L5892-L5899)）；kswapd 每轮开始时，[`kswapd_age_node()`](../../linux/mm/vmscan.c#L6726-L6750) 按根 memcg 在本节点的汇总值判断偏短后，对每个 memcg 的 `lruvec` 各扫描 32 页 active anon。
 
 **降级怎样进行。** [`shrink_active_list()`](../../linux/mm/vmscan.c#L2115-L2223) 在 `lru_lock` 下隔离一批 folio 后立即放锁，逐个调用 `folio_referenced()`。被访问过的**可执行文件页**放回 active，给代码段多一次机会；其他 folio 不论是否被访问过，一律清除 `PG_active`、置 `PG_workingset`，放到 inactive。被访问过的匿名页也会降级，注释给出的理由是：匿名页不容易被一次性的流式 I/O 冲掉，JVM 之类的程序又会产生大量带 `VM_EXEC` 的匿名页。最后重新加锁，把两组 folio 分别放回链表。
 
@@ -548,7 +549,7 @@ inactive 尾部的 folio 在真正回收前，要经过 [`folio_check_references
 | --- | --- | --- |
 | 某个映射所在的虚拟内存区域（VMA，Virtual Memory Area）带 `VM_LOCKED` | `ACTIVATE` | 实际会因 mlock 标记转入 unevictable |
 | 反向映射锁竞争，或只被正在退出/被 OOM 收割的进程映射的私有匿名页 | `KEEP` | 本轮不处理 |
-| 有 PTE 访问，并且此前已有 `PG_referenced` 或有两个以上映射被访问 | `ACTIVATE` | 确认是热页 |
+| 有 PTE 访问，并且此前已有 `PG_referenced` 或至少两个映射被访问（`referenced_ptes > 1`） | `ACTIVATE` | 确认是热页 |
 | 有 PTE 访问，是可执行的文件页 | `ACTIVATE` | 代码段第一次被访问就提升 |
 | 有 PTE 访问，其他情况 | `KEEP` | 置 `PG_referenced`，再给一轮 |
 | 没有 PTE 访问，有 `PG_referenced`，属于 file LRU | `RECLAIM_CLEAN` | 只在干净时回收，脏页不在这里写出 |
@@ -582,14 +583,15 @@ LRU 只看到“在内存里时”的访问。一个页被驱逐后很快又被�
 [`do_shrink_slab()`](../../linux/mm/shrinker.c#L380-L475) 对一个 shrinker 计算本次扫描量：
 
 ```text
-// 依据 do_shrink_slab() 简化
-freeable   = count_objects()
+// 伪代码：依据 do_shrink_slab() 简化
+freeable   = count_objects()                         // 为 0 或 SHRINK_EMPTY 时直接返回
+nr         = 原子交换(nr_deferred, 0)                 // 取走全部欠账，避免并发调用重复扫描
 delta      = (freeable >> priority) × 4 / seeks      // seeks 为 0 时取 freeable / 2
-total_scan = min((nr_deferred >> priority) + delta, 2 × freeable)
+total_scan = min((nr >> priority) + delta, 2 × freeable)
 while total_scan ≥ batch 或 total_scan ≥ freeable:
     freed += scan_objects(min(batch, total_scan))    // 返回 SHRINK_STOP 就停止
     total_scan −= 本次实际扫描数
-nr_deferred = min(max(nr_deferred + delta − 已扫描, 0), 2 × freeable)
+nr_deferred 原子加上 min(max(nr + delta − 已扫描, 0), 2 × freeable)   // 与并发期间新增的欠账合并
 ```
 
 `seeks` 默认为 2，所以对象缓存的扫描比例是同一 `priority` 下页链表的两倍。没做完的工作存进 `nr_deferred`，留给以后的调用。举例：有 10 万个可释放 dentry 时，`priority = 12` 算出 `delta = 48`，小于默认批量 128，本次不扫描，48 计入 `nr_deferred`；欠账在计入下一次扫描量之前同样要右移 `priority` 位，所以高 `priority` 下积累的欠账主要在 `priority` 降下来之后才兑现。
@@ -618,7 +620,7 @@ nr_deferred = min(max(nr_deferred + delta − 已扫描, 0), 2 × freeable)
 4. 为 boost 回收时不写出、不换出，并限制 `priority` 不低于 10（[vmscan.c#L7063-L7074](../../linux/mm/vmscan.c#L7063-L7074)）。
 5. 调用 `kswapd_age_node()` 老化匿名 active 链表。
 6. 调用 [`kswapd_shrink_node()`](../../linux/mm/vmscan.c#L6894-L6933)：把 `nr_to_reclaim` 设为各合格 zone 的 `max(high 水位, 32)` 之和，执行 `shrink_node()`。如果本次 `balance_pgdat()` 累计回收的页数已不少于 `compact_gap(order)`（即 `2 << order`），把 `order` 降为 0，后续只按 0 阶判断平衡，剩下的碎片交给规整。扫描量或回收量达到目标时返回真，本轮不必提高力度。
-7. 低水位恢复后唤醒在 `pfmemalloc_wait` 上等待的直接回收者（[vmscan.c#L7105-L7112](../../linux/mm/vmscan.c#L7105-L7112)）；检查是否需要冻结或停止。
+7. `allow_direct_reclaim()` 为真（`ZONE_NORMAL` 及以下 zone 的空闲页超过 `min` 水位之和的一半）时，唤醒在 `pfmemalloc_wait` 上等待的直接回收者（[vmscan.c#L7105-L7112](../../linux/mm/vmscan.c#L7105-L7112)）。这里的源码注释写的是“低水位已满足”，实际判断用的是 `allow_direct_reclaim()`；随后检查是否需要冻结或停止。
 8. 扫描不足或没有进展时降低 `priority`；为 boost 回收却毫无进展时立即停止，避免无限循环（[vmscan.c#L7121-L7138](../../linux/mm/vmscan.c#L7121-L7138)）。
 
 循环结束后：如果一路降到底仍一页未回收，而 `cache_trim_mode` 失败过，就禁用它从头再来一次（[vmscan.c#L7140-L7148](../../linux/mm/vmscan.c#L7140-L7148)）；仍然一页未回收则 `kswapd_failures` 加一。最后清除 `ZONE_RECLAIM_ACTIVE`，扣掉本次处理过的 boost 并唤醒 kcompactd，保存 refault 快照。整个过程处在 PSI 内存停顿记录之中（[vmscan.c#L6992](../../linux/mm/vmscan.c#L6992)、[vmscan.c#L7180](../../linux/mm/vmscan.c#L7180)）。
@@ -637,9 +639,9 @@ nr_deferred = min(max(nr_deferred + delta − 已扫描, 0), 2 × freeable)
 
 `PF_MEMALLOC` 有两个作用：慢路径看到它就不会再次进入直接回收（[page_alloc.c#L4923-L4925](../../linux/mm/page_alloc.c#L4923-L4925)），避免回收中的分配递归回收；回收过程中自身需要的少量分配可以越过水位使用保留页。
 
-**`shrink_zones()` 的过滤。** 对全局回收，它跳过 cpuset 不允许的 zone；对 `order > 3` 的昂贵请求，如果某 zone 已满足 `min` 水位，或已有足够空闲页让规整有机会成功（按 `high` 水位估计），就置 `compaction_ready` 并跳过该 zone，不再为它回收（[vmscan.c#L6265-L6284](../../linux/mm/vmscan.c#L6265-L6284)、[`compaction_ready()`](../../linux/mm/vmscan.c#L6166-L6198)）。同一节点的多个 zone 只调用一次 `shrink_node()`。全部节点处理完后，[`consider_reclaim_throttle()`](../../linux/mm/vmscan.c#L6200-L6228) 在回收效率超过 1/8 时唤醒因无进展而节流的任务；`priority` 已降到 1 仍一页未回收时，让当前任务短暂节流。
+**`shrink_zones()` 的过滤。** 以下两项过滤都只对全局回收生效：跳过 cpuset 不允许的 zone；对 `order > 3` 的昂贵请求，如果某 zone 已满足 `min` 水位，或已有足够空闲页让规整有机会成功（按 `high` 水位估计），就置 `compaction_ready` 并跳过该 zone，不再为它回收（[vmscan.c#L6265-L6284](../../linux/mm/vmscan.c#L6265-L6284)、[`compaction_ready()`](../../linux/mm/vmscan.c#L6166-L6198)）。同一节点的多个 zone 只调用一次 `shrink_node()`。全部节点处理完后，[`consider_reclaim_throttle()`](../../linux/mm/vmscan.c#L6200-L6228) 在回收效率超过 1/8 时唤醒因无进展而节流的任务；`priority` 已降到 1 仍一页未回收时，让当前任务短暂节流。
 
-**`do_try_to_free_pages()` 的返回值。** 它统计 `ALLOCSTALL` 事件，循环到达目标或 `compaction_ready` 时退出。返回值的约定是：
+**`do_try_to_free_pages()` 的返回值。** 它在非 memcg 回收时统计 `ALLOCSTALL` 事件（每次 `retry` 都会再计一次），循环到达目标或 `compaction_ready` 时退出。返回值的约定是：
 
 | 返回值 | 含义 |
 | --- | --- |
@@ -656,7 +658,7 @@ nr_deferred = min(max(nr_deferred + delta − 已扫描, 0), 2 × freeable)
 1. **计算本轮策略。** 清零 `sc->nr`，调用 `prepare_scan_control()`。
 2. **回收。** 调用 `shrink_node_memcgs()`，再用 [`flush_reclaim_state()`](../../linux/mm/vmscan.c#L299-L337) 把 slab 等非 LRU 释放的页计入 `nr_reclaimed`。这一步只对全局回收和以根 memcg 为目标的回收生效：一个 memcg 感知的 shrinker 可能只释放了一个计费给目标组的对象，就让一整页被释放，把整页算到目标组头上会高估进展。
 3. **kswapd 专属的写回判断**（[vmscan.c#L6087-L6122](../../linux/mm/vmscan.c#L6087-L6122)）：本轮隔离的页全部在回写中，置 `PGDAT_WRITEBACK`；隔离的文件页全部是尚未提交 I/O 的脏页，置 `PGDAT_DIRTY`；遇到标记了立即回收却仍在回写的页（`nr.immediate`），说明页在 LRU 上转得比写回还快，kswapd 自己等待写回节流。
-4. **拥塞标记**（[vmscan.c#L6124-L6137](../../linux/mm/vmscan.c#L6124-L6137)）：遇到的脏页都已经在回写并标记了立即回收时，memcg 回收给目标 `lruvec` 置 `LRUVEC_CGROUP_CONGESTED`，kswapd 置 `LRUVEC_NODE_CONGESTED`；后者只有 kswapd 在节点平衡后才会清除。之后的直接回收者在这里等待 I/O 完成（[vmscan.c#L6139-L6149](../../linux/mm/vmscan.c#L6139-L6149)）。
+4. **拥塞标记**（[vmscan.c#L6124-L6137](../../linux/mm/vmscan.c#L6124-L6137)）：遇到的脏页都已经在回写并标记了立即回收时，memcg 回收给目标 `lruvec` 置 `LRUVEC_CGROUP_CONGESTED`，kswapd 置 `LRUVEC_NODE_CONGESTED`；后者只有 kswapd 在节点平衡后才会清除。之后的非 kswapd 回收者（允许节流且不在休眠模式时）遇到这两个标记，会在这里短暂节流，给 I/O 完成留出时间（[vmscan.c#L6139-L6149](../../linux/mm/vmscan.c#L6139-L6149)）；这个等待队列没有提前唤醒者，只靠 1 个 jiffy 的超时返回。
 5. **高阶请求是否再来一轮。** [`should_continue_reclaim()`](../../linux/mm/vmscan.c#L5913-L5970) 只在“回收 + 规整”模式下可能返回真：上一轮有进展，没有 zone 已能直接满足分配或适合规整，而且 inactive 页数还多于 `compact_gap(order)`。
 6. **更新失败计数。** 本轮有任何进展，就把 `kswapd_failures` 清零，因此一次成功的直接回收可以“救活”已被放弃的 kswapd；没有进展且处于 `cache_trim_mode`，记下 `cache_trim_mode_failed`。
 
@@ -673,7 +675,7 @@ nr_deferred = min(max(nr_deferred + delta − 已扫描, 0), 2 × freeable)
 
 举例：设某次 memcg 回收算出的目标为 inactive anon 64、active anon 64、inactive file 192、active file 64。第一轮各扫 32 页后达到 `nr_to_reclaim`，剩余为 32、32、160、32。文件页剩得多，于是停掉匿名页；匿名页已完成约 50%，文件页的剩余量被下调为目标的约 51% 减去已扫部分：inactive file 剩 65、active file 剩 0。再扫一批 32 页 inactive file 后，因为匿名页剩余为 0 而退出。
 
-最后，只要匿名页有去处且 inactive anon 偏短，就再降级 32 页 active anon（[vmscan.c#L5892-L5899](../../linux/mm/vmscan.c#L5892-L5899)）。
+最后，只要系统配置了 swap（或可以降级迁移）且 inactive anon 偏短，就再扫描 32 页 active anon，把它们降级（[vmscan.c#L5892-L5899](../../linux/mm/vmscan.c#L5892-L5899)）。
 
 ### 5.5 `shrink_inactive_list()`：隔离、处理、放回
 
@@ -688,7 +690,7 @@ sequenceDiagram
     R->>R: too_many_isolated()？是则节流一次
     R->>R: lru_add_drain()：排空本 CPU 批次
     R->>L: spin_lock_irq
-    R->>F: isolate_lru_folios()：从尾部取一批，清 PG_lru、取引用
+    R->>F: isolate_lru_folios()：从尾部取一批，先取引用、再清 PG_lru
     R->>L: spin_unlock_irq
     R->>F: shrink_folio_list()：逐个加锁、检查、释放
     R->>L: spin_lock_irq
@@ -729,7 +731,7 @@ flowchart TD
     D -->|否| E{"folio_check_references()"}
     E -->|ACTIVATE| ACT
     E -->|KEEP| KL
-    E -->|RECLAIM| F{"匿名且需 swap，且不在 swap cache？"}
+    E -->|"RECLAIM / RECLAIM_CLEAN"| F{"匿名且需 swap，且不在 swap cache？"}
     F -->|是| F2["folio_alloc_swap()<br/>失败则激活"]
     F -->|否| G
     F2 --> G{"仍有用户映射？"}
@@ -788,7 +790,7 @@ flowchart TD
 
 仍被页表映射的 folio 必须先断开所有映射（[vmscan.c#L1371-L1404](../../linux/mm/vmscan.c#L1371-L1404)）。[`try_to_unmap()`](../../linux/mm/rmap.c#L2275-L2299) 经反向映射找到每个映射它的 VMA，由 `try_to_unmap_one()` 处理每个 PTE：
 
-- 清除 PTE。带 `TTU_BATCH_FLUSH` 时不立即刷新 TLB，而是记入当前任务的批量刷新状态；PTE 是脏的就把 folio 标脏（[rmap.c#L2065-L2083](../../linux/mm/rmap.c#L2065-L2083)）。
+- 清除 PTE。带 `TTU_BATCH_FLUSH`，并且 x86 判断该 mm 还在其他 CPU 上用过（需要远程刷新）时，不立即刷新 TLB，而是记入当前任务的批量刷新状态；否则当场刷新。PTE 是脏的就把 folio 标脏（[rmap.c#L2065-L2083](../../linux/mm/rmap.c#L2065-L2083)、[`should_defer_flush()`](../../linux/mm/rmap.c#L718-L724)、[x86 `arch_tlbbatch_should_defer()`](../../linux/arch/x86/include/asm/tlbflush.h#L327-L337)）。
 - 匿名页：把 PTE 改写成指向 swap 槽位的 swap 项，进程的匿名页计数减一、swap 项计数加一，以后访问会触发换入缺页（[rmap.c#L2118-L2221](../../linux/mm/rmap.c#L2118-L2221)）。
 - `MADV_FREE` 页：如果期间又被写过，或者有额外引用（例如 GUP），就恢复 PTE 并放弃；否则直接丢弃映射（[rmap.c#L2131-L2174](../../linux/mm/rmap.c#L2131-L2174)）。
 - 文件页：只清除 PTE，以后访问会从页缓存或文件重新取得（[rmap.c#L2222-L2235](../../linux/mm/rmap.c#L2222-L2235)）。
@@ -807,7 +809,7 @@ flowchart TD
 
 1. 确认 folio 只被缓存和隔离者引用（`is_page_cache_freeable()`），否则保留。
 2. `folio_clear_dirty_for_io()` 清脏，已经干净就返回 `PAGE_CLEAN`。
-3. [`writeout()`](../../linux/mm/vmscan.c#L644-L675) 置 `PG_reclaim`，shmem 走 `shmem_writeout()`，匿名页走 [`swap_writeout()`](../../linux/mm/page_io.c#L236-L289)。后者对全零页只记一位，不做 I/O；能压缩进 zswap 的就存进 zswap；否则提交块 I/O。
+3. [`writeout()`](../../linux/mm/vmscan.c#L644-L675) 置 `PG_reclaim`，shmem 走 `shmem_writeout()`，匿名页走 [`swap_writeout()`](../../linux/mm/page_io.c#L236-L289)。后者对全零页只记一位，不做 I/O；能压缩进 zswap 的就存进 zswap；存不进 zswap、而该 memcg 又禁止 zswap 回写时重新标脏并返回 `AOP_WRITEPAGE_ACTIVATE`，`pageout()` 随之返回 `PAGE_ACTIVATE`；否则提交块 I/O。
 
 `pageout()` 返回后：
 
@@ -841,7 +843,7 @@ flowchart TD
 
 | 出口 | 处理 | 放回后的位置 |
 | --- | --- | --- |
-| `activate_locked` | 已在 swap cache、但 swap 空间紧张或 folio 已被 mlock 时，释放它占用的 swap 槽位；未被 mlock 时置 `PG_active`；解锁 | active 链表头部；被 mlock 的进 unevictable |
+| `activate_locked` | 已在 swap cache、但 swap 空间紧张或 folio 已被 mlock 时，释放它占用的 swap 槽位；未被 mlock 时置 `PG_active`；解锁 | active 链表头部；不可驱逐的（例如被 mlock）由 `move_folios_to_lru()` 经 `folio_putback_lru()` 放进 unevictable |
 | `keep_locked` | 解锁 | inactive 链表头部 |
 | `keep` | 无 | inactive 链表头部 |
 
@@ -856,7 +858,7 @@ flowchart TD
 | `throttle_direct_reclaim()` | 第一个可用节点上，`ZONE_NORMAL` 及以下 zone 的空闲页不到 `min` 水位之和的一半；内核线程和有致命信号的任务除外 | 在 `pfmemalloc_wait` 上等到 kswapd 把空闲页补回来；不能进入文件系统的调用者最多等 1 秒 | [vmscan.c#L6465-L6588](../../linux/mm/vmscan.c#L6465-L6588) |
 | `shrink_inactive_list()` | 被隔离的页过多 | `VMSCAN_THROTTLE_ISOLATED`，`HZ/50` | [vmscan.c#L2025-L2036](../../linux/mm/vmscan.c#L2025-L2036) |
 | `shrink_node()`（kswapd） | 遇到标记立即回收却仍在回写的页 | `VMSCAN_THROTTLE_WRITEBACK`，`HZ/10`，写回足够多页后被提前唤醒 | [vmscan.c#L6120-L6121](../../linux/mm/vmscan.c#L6120-L6121) |
-| `shrink_node()`（直接回收） | 目标 `lruvec` 被标记为拥塞 | `VMSCAN_THROTTLE_CONGESTED`，1 个 jiffy | [vmscan.c#L6145-L6149](../../linux/mm/vmscan.c#L6145-L6149) |
+| `shrink_node()`（非 kswapd，如直接回收、memcg 回收） | 目标 `lruvec` 被标记为拥塞 | `VMSCAN_THROTTLE_CONGESTED`，1 个 jiffy | [vmscan.c#L6145-L6149](../../linux/mm/vmscan.c#L6145-L6149) |
 | `consider_reclaim_throttle()` | `priority` 降到 1 仍一页未回收 | `VMSCAN_THROTTLE_NOPROGRESS`，1 个 jiffy | [vmscan.c#L6225-L6227](../../linux/mm/vmscan.c#L6225-L6227) |
 
 后四种由 [`reclaim_throttle()`](../../linux/mm/vmscan.c#L537-L604) 实现，有几个例外：除 kswapd 外的内核线程和用户工作线程不节流，只 `cond_resched()`，因为它们可能正是推动回收所需的那部分工作（例如文件系统日志线程）；节点已无望，或者等待写回的页不超过可回收页的一半时，`CONGESTED` 和 `NOPROGRESS` 也不节流（[`skip_throttle_noprogress()`](../../linux/mm/vmscan.c#L509-L535)）。写回节流的等待者在写回完成足够多页后由 [`__acct_reclaim_writeback()`](../../linux/mm/vmscan.c#L606-L630) 提前唤醒。超时都是固定值，注释自己也承认这些数字是“凭空定的”。
@@ -876,7 +878,7 @@ flowchart TD
 
 **memcg 回收。** [`try_to_free_mem_cgroup_pages()`](../../linux/mm/vmscan.c#L6675-L6714) 设置 `target_mem_cgroup`，从当前节点的 zonelist 出发调用 `do_try_to_free_pages()`，并用 `memalloc_noreclaim_save()` 防止递归。它的调用者有 `memory.high` 的偿还（[`reclaim_high()`](../../linux/mm/memcontrol.c#L2033-L2049)）、`memory.max` 计费失败（[memcontrol.c#L2372](../../linux/mm/memcontrol.c#L2372)）、写 `memory.high/max`（[memcontrol.c#L4416](../../linux/mm/memcontrol.c#L4416)、[memcontrol.c#L4471](../../linux/mm/memcontrol.c#L4471)）和 `memory.reclaim`。memcg 回收与全局回收的区别集中在几处：只遍历目标子树；`cgroup_reclaim()` 为真时不更新全局 `PGSCAN/PGSTEAL` 计数，`file_is_tiny` 不计算，`swappiness = 0` 时只扫文件页；目标不是根 memcg 时，slab 页也不计入进展。计费、节流和 OOM 的完整流程见 [cgroup v2 的 memory 控制器](../cgroup2/memory.md)第 3.2～3.4 节。
 
-**主动回收。** 写 memcg 的 `memory.reclaim`（[memcontrol.c#L4603-L4609](../../linux/mm/memcontrol.c#L4603-L4609)）或节点的 `reclaim` 文件（[vmscan.c#L7885-L7894](../../linux/mm/vmscan.c#L7885-L7894)）都进入 [`user_proactive_reclaim()`](../../linux/mm/vmscan.c#L7743-L7837)。参数是要回收的字节数，可以附带 `swappiness=N` 或 `swappiness=max`（只回收匿名页）。它每次请求剩余量的 1/4，有信号就返回 `-EINTR`。无进展的尝试累计用完 16 次重试额度后（中间有进展也不会恢复额度），先排空所有 CPU 的 LRU 批次再试最后一次，仍无进展就返回 `-EAGAIN`（[vmscan.c#L7784-L7834](../../linux/mm/vmscan.c#L7784-L7834)）。主动回收带 `proactive` 标记：不报告 vmpressure，统计计入 `PGSCAN_PROACTIVE` 等单独的计数，降级失败的页不再就地回收。节点回收用 `PGDAT_RECLAIM_LOCKED` 防止同一节点上的并发主动回收，冲突时返回 `-EBUSY`。
+**主动回收。** 写 memcg 的 `memory.reclaim`（[memcontrol.c#L4603-L4609](../../linux/mm/memcontrol.c#L4603-L4609)）或节点的 `reclaim` 文件（[vmscan.c#L7885-L7894](../../linux/mm/vmscan.c#L7885-L7894)）都进入 [`user_proactive_reclaim()`](../../linux/mm/vmscan.c#L7743-L7837)。参数是要回收的字节数，可以附带 `swappiness=N` 或 `swappiness=max`（只回收匿名页）。它每次请求剩余量的 1/4，有信号就返回 `-EINTR`。无进展的尝试累计用完 16 次重试额度后（中间有进展也不会恢复额度），先排空所有 CPU 的 LRU 批次再试最后一次，仍无进展就返回 `-EAGAIN`（[vmscan.c#L7784-L7834](../../linux/mm/vmscan.c#L7784-L7834)）。主动回收带 `proactive` 标记：不报告 vmpressure，统计计入 `PGSCAN_PROACTIVE` 等单独的计数，降级失败的页不再就地回收。节点主动回收与 `node_reclaim()` 共用 `PGDAT_RECLAIM_LOCKED`，防止同一节点上的并发回收，冲突时 `user_proactive_reclaim()` 返回 `-EBUSY`。这些错误码会原样从 `memory.reclaim` 返回给用户；节点 `reclaim` 文件的写函数则把任何非零返回值都转换成 `-EAGAIN`（[vmscan.c#L7892-L7893](../../linux/mm/vmscan.c#L7892-L7893)）。
 
 **节点回收。** `zone_reclaim_mode` 非 0 时，分配器在某 zone 水位检查失败后会调用 [`node_reclaim()`](../../linux/mm/vmscan.c#L7661-L7719)（[page_alloc.c#L3902-L3906](../../linux/mm/page_alloc.c#L3902-L3906)），目的是尽量在本地节点满足分配，而不是去远端节点。它只在未映射的页缓存或可回收 slab 超过门槛时才动手；不能阻塞或已在回收上下文中时不扫描；有 CPU 的远端节点不回收；同一节点同时只允许一个。它以 `priority = 4` 起步，相当于每次扫描链表的 1/16。
 
@@ -910,7 +912,7 @@ flowchart TD
 | `pgsteal_*` | inactive 链表回收的页数 | [vmscan.c#L2066-L2070](../../linux/mm/vmscan.c#L2066-L2070) |
 | `pgscan_anon/file`、`pgsteal_anon/file` | 同上，按类型分 | 同上 |
 | `pgrefill` | active 链表扫描的页数 | [vmscan.c#L2157-L2159](../../linux/mm/vmscan.c#L2157-L2159) |
-| `pgactivate`、`pgdeactivate` | 提升到 active、降级到 inactive 的页数 | [vmscan.c#L1647](../../linux/mm/vmscan.c#L1647)、[vmscan.c#L2215](../../linux/mm/vmscan.c#L2215) |
+| `pgactivate`、`pgdeactivate` | 提升到 active、降级到 inactive 的页数 | 回收中：[vmscan.c#L1647](../../linux/mm/vmscan.c#L1647)、[vmscan.c#L2215](../../linux/mm/vmscan.c#L2215)；访问提升（`lru_activate()`）也计入 `pgactivate`：[swap.c#L316](../../linux/mm/swap.c#L316) |
 | `allocstall_*` | 进入直接回收的次数，按 zone 分 | [vmscan.c#L6371-L6372](../../linux/mm/vmscan.c#L6371-L6372) |
 | `pageoutrun` | `balance_pgdat()` 的执行次数 | [vmscan.c#L6995](../../linux/mm/vmscan.c#L6995) |
 | `pgscan_direct_throttle` | 直接回收因保留页过低而等待 kswapd 的次数 | [vmscan.c#L6565](../../linux/mm/vmscan.c#L6565) |
@@ -928,6 +930,6 @@ flowchart TD
 
 **候选怎样组织，谁更冷。** 每个“memcg × 节点”有一个 `lruvec`，里面是 anon、file 各两条 active/inactive 链表，头新尾旧。新页进入 inactive；被访问两次的页提升到 active；inactive 偏短或出现工作集 refault 时，active 尾部的页被降级。`priority` 让扫描量从 1/4096 开始逐轮加倍；`get_scan_count()` 用 swappiness 和近期代价在匿名页与文件页之间分配压力；workingset 用驱逐时留下的 shadow 计算 refault 距离，把“本不该驱逐”的页直接放回 active，同时调整扫描方向。
 
-**一个 folio 怎样被释放。** 隔离（清 `PG_lru`、取引用）→ 加锁 → 引用检查 → 匿名页分配 swap → `try_to_unmap()` 解除所有映射 → 脏页交给回写线程或写到 swap → 冻结引用计数，确认干净后从缓存删除并留下 shadow → 解除计费、刷新 TLB、批量释放。任何一关不满足，folio 就经 `keep` 或 `activate` 回到 LRU。扫描数大于回收数是常态。
+**一个 folio 怎样被释放。** 隔离（取引用、清 `PG_lru`）→ 加锁 → 引用检查 → 匿名页分配 swap → `try_to_unmap()` 解除所有映射 → 脏页交给回写线程或写到 swap → 冻结引用计数，确认干净后从缓存删除并留下 shadow → 解除计费、刷新 TLB、批量释放。任何一关不满足，folio 就经 `keep` 或 `activate` 回到 LRU。扫描数大于回收数是常态。
 
 **怎样与其他子系统协作，又不把系统拖垮。** 回收依赖反向映射修改页表、依赖回写线程清理文件脏页、依赖 swap 保存匿名页、依赖 shrinker 回收对象缓存；高阶请求与规整配合，kswapd 结束后唤醒 kcompactd；memcg 保护值决定全局回收先动谁。为了不让回收本身成为负担，`lru_lock` 只在链表操作时短暂持有，folio 锁只用 `trylock`；kswapd 遇到大量回写时自我节流，直接回收者在保留页过低、隔离过多、拥塞或无进展时短暂等待；连续 16 次一无所获的节点被视为无望，交给直接回收和 OOM 处理。回收的结果只是“页回到了伙伴系统”，能否满足某次具体的分配，还要由分配器重新判断。
