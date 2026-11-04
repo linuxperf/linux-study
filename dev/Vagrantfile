@@ -6,6 +6,8 @@
 # backwards compatibility). Please don't change it unless you know what
 # you're doing.
 Vagrant.configure('2') do |config|
+  config.vagrant.plugins = ['vagrant-vbguest']
+
   # this plugin is needed for vm.synced_folder
   unless Vagrant.has_plugin?('vagrant-vbguest')
     raise 'The Vagrant VBGuest plugin must be installed (vagrant plugin install vagrant-vbguest)'
@@ -52,7 +54,7 @@ Vagrant.configure('2') do |config|
   # the path on the host to the actual folder. The second argument is
   # the path on the guest to mount the folder. And the optional third
   # argument is a set of non-required options.
-  config.vm.synced_folder "../linux/", "/root/linux"
+  config.vm.synced_folder '../', '/root/linux'
 
   # Provider-specific configuration so you can fine-tune various
   # backing providers for Vagrant. These expose provider-specific options.
@@ -61,12 +63,12 @@ Vagrant.configure('2') do |config|
   config.vm.provider 'virtualbox' do |vb|
     vb.memory = '8192'
     vb.cpus = 4
-    vb.customize ["modifyvm", :id, "--ioapic", "on"]    
+    vb.customize ['modifyvm', :id, '--ioapic', 'on']
   end
   #
   # View the documentation for the provider you are using for more
   # information on available options.
-  config.disksize.size = '100GB'
+  config.vm.disk :disk, size: '100GB', primary: true
 
   # Enable provisioning with a shell script. Additional provisioners such as
   # Ansible, Chef, Docker, Puppet and Salt are also available. Please see the
@@ -76,7 +78,7 @@ Vagrant.configure('2') do |config|
 
     apt update -y
     DEBIAN_FRONTEND=noninteractive apt install -y emacs net-tools make gcc libncurses-dev \
-    flex bison clang llvm gawk clangd lld libdw-dev libelf-dev
+    flex bison clang llvm gawk clangd lld libdw-dev libelf-dev libssl-dev
 
     # set root account
     echo "root:root11" | chpasswd
