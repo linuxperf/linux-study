@@ -1,0 +1,46 @@
+# 目录
+
+- [简介](README.md)
+- [术语表](glossary.md)
+
+## 正文
+
+- 第 0 章 前言（规划中）
+- 第 1 章 启动过程（规划中）
+- 第 2 章 进程管理（规划中）
+- [第 3 章 调度器](03-scheduler/README.md)
+  - [3.1 调度器框架：调度策略、调度类与运行队列](03-scheduler/01-overview.md)
+  - [3.2 主调度函数与上下文切换](03-scheduler/02-schedule.md)
+  - [3.3 EEVDF 公平调度算法](03-scheduler/03-eevdf.md)
+  - [3.4 任务创建与唤醒](03-scheduler/04-wakeup.md)
+  - [3.5 调度时钟与抢占模型](03-scheduler/05-tick-preempt.md)
+  - [3.6 实时调度类](03-scheduler/06-rt.md)
+  - [3.7 Deadline 调度类与 dl_server](03-scheduler/07-deadline.md)
+  - [3.8 PELT 负载跟踪](03-scheduler/08-pelt.md)
+  - [3.9 调度域与负载均衡](03-scheduler/09-load-balance.md)
+  - [3.10 组调度与 CPU 带宽控制](03-scheduler/10-group-sched.md)
+  - [3.11 sched_ext 可扩展调度器](03-scheduler/11-sched-ext.md)
+- [第 4 章 内存管理](04-memory/README.md)
+  - [4.1 物理内存模型：node、zone、page 与 folio](04-memory/01-physical-model.md)
+  - [4.2 内存初始化：从 memblock 到伙伴系统](04-memory/02-init.md)
+  - [4.3 伙伴系统与 per-CPU 页缓存](04-memory/03-buddy.md)
+  - [4.4 水位线与页分配慢速路径](04-memory/04-slowpath.md)
+  - [4.5 SLUB 分配器](04-memory/05-slub.md)
+  - [4.6 内核虚拟地址空间与 vmalloc](04-memory/06-vmalloc.md)
+  - [4.7 进程地址空间：mm_struct、VMA 与 mmap](04-memory/07-address-space.md)
+  - [4.8 页表与缺页异常](04-memory/08-page-fault.md)
+  - [4.9 写时复制与反向映射](04-memory/09-cow-rmap.md)
+  - [4.10 页面回收：LRU、MGLRU 与 kswapd](04-memory/10-reclaim.md)
+  - [4.11 交换机制](04-memory/11-swap.md)
+  - [4.12 页迁移、内存规整与 OOM Killer](04-memory/12-compaction-oom.md)
+  - [4.13 大页：hugetlbfs 与透明大页](04-memory/13-hugepage.md)
+  - [4.14 内存控制组（memcg）](04-memory/14-memcg.md)
+- 第 5 章 中断与异常（规划中）
+- 第 6 章 系统调用（规划中）
+- 第 7 章 同步与锁（规划中）
+- 第 8 章 时间与定时器（规划中）
+- 第 9 章 虚拟文件系统（规划中）
+- 第 10 章 块设备层（规划中）
+- 第 11 章 网络栈（规划中）
+- 第 12 章 设备驱动模型（规划中）
+- 附录（规划中）
