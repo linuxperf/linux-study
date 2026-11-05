@@ -4,6 +4,7 @@
 
 | 中文 | 英文 | 说明 | 首次出现 |
 |---|---|---|---|
+| balance 回调 | Balance Callback | 调度类持 rq 锁时登记、在上下文切换完成后释放 rq 锁前执行的推 / 拉迁移操作 | 3.2 |
 | BH 工作队列 | BH Workqueue | 在软中断上下文执行工作项的工作队列（`WQ_BH`，v6.9），用于替代 tasklet | 5.10 |
 | CPU 带宽控制 | CFS Bandwidth Control | 以 quota / period 为任务组设置 CPU 时间上限 | 3.10 |
 | I/O APIC | I/O Advanced Programmable Interrupt Controller | 把传统中断引脚翻译为中断消息的芯片组中断控制器 | 5.5 |
@@ -33,7 +34,7 @@
 | 调度实体 | Scheduling Entity | 调度类操作的对象，如 `sched_entity`，可代表任务或任务组 | 3.1 |
 | 调度域 | Scheduling Domain | 按硬件拓扑组织的 CPU 层级，`struct sched_domain` | 3.9 |
 | 调度组 | Scheduling Group | 调度域内参与负载比较的 CPU 子集，`struct sched_group` | 3.9 |
-| 丢失唤醒 | Lost Wakeup | 等待方检查条件与睡眠之间错过唤醒的竞态 | 3.4 |
+| 丢失唤醒 | Lost Wakeup | 等待方检查条件与睡眠之间错过唤醒的竞态 | 3.2 |
 | 抖动 | Thrashing | 工作集超过内存，频繁回收与重新读入导致系统几乎停滞 | 4.10 |
 | 读拷贝更新 | Read-Copy Update，RCU | 读者无锁、写者发布新版本并在宽限期后回收旧版本的同步机制 | 7.9 |
 | 读写锁 | Reader-Writer Lock | 允许多个读者或一个写者的自旋锁，`rwlock_t` | 7.5 |
@@ -42,6 +43,7 @@
 | 多代 LRU | Multi-Gen LRU，MGLRU | v6.1 起的多代页面回收算法（`CONFIG_LRU_GEN`） | 4.10 |
 | 惰性抢占 | Lazy Preemption | 对公平任务延迟到返回用户态或下一 tick 才执行的抢占（`CONFIG_PREEMPT_LAZY`） | 3.2 |
 | 惰性 TLB | Lazy TLB | 内核线程借用上一任务地址空间而不切换页表 | 3.2 |
+| 返回栈缓冲区 | Return Stack Buffer，RSB | CPU 预测 `ret` 目标地址的硬件栈，上下文切换时需填充以缓解推测执行攻击 | 3.2 |
 | 反向映射 | Reverse Mapping，rmap | 由物理页找到所有映射它的页表项 | 4.9 |
 | 非自愿上下文切换 | Involuntary Context Switch | 因抢占发生的切换，计入 `nivcsw` | 3.2 |
 | 分层中断域 | Hierarchical IRQ Domain | 以父子关系串联多级中断控制器的 `irq_domain` 结构 | 5.6 |
@@ -71,6 +73,7 @@
 | 节点 | Node | 一组访问延迟相同的内存，`pg_data_t` | 4.1 |
 | 阶段公平 | Phase-Fair | 读写锁唤醒策略：读阶段让所有等待的读者一起进入 | 7.7 |
 | 节流 | Throttle | 实体或任务组用尽预算后暂停运行 | 3.7 |
+| 进程上下文标识符 | Process-Context Identifier，PCID | x86 TLB 项的地址空间标签，切换 CR3 时可保留其他地址空间的 TLB 项 | 3.2 |
 | 静止状态 | Quiescent State | RCU 术语，CPU 不处于读临界区的时刻 | 3.2 |
 | 救援线程 | Rescuer | `WQ_MEM_RECLAIM` 工作队列专属的 worker，保证内存回收路径前进 | 5.12 |
 | 局部向量表 | Local Vector Table，LVT | 本地 APIC 中为定时器、性能计数器等本地中断源配置向量的寄存器组 | 5.5 |
@@ -97,6 +100,7 @@
 | 迁移项 | Migration Entry | 页迁移期间替代 PTE 的特殊不存在项 | 4.11 |
 | 抢占 | Preemption | 在任务未主动让出时强制切换到其他任务 | 3.1 |
 | 抢占模型 | Preemption Model | none / voluntary / full / lazy，决定内核态何时可被抢占 | 3.5 |
+| 抢占点 | Preemption Point | 检查重调度标志并可能进入调度器的位置，如 `preempt_enable()`、中断返回、返回用户态 | 3.2 |
 | 强制线程化 | Forced Threading | 把普通中断处理函数放到中断线程中执行（`threadirqs`） | 5.7 |
 | 亲和性范围 | Affinity Scope | unbound 工作队列按 CPU 拓扑划分 pod 的粒度（v6.5） | 5.12 |
 | 区间树 | Interval Tree | 按区间重叠查询的增强红黑树，用于 `i_mmap` 与 anon_vma | 4.9 |
@@ -191,4 +195,4 @@
 
 ## 不翻译的术语
 
-`EEVDF`、`CFS`、`PELT`、`RCU`、`per-CPU`、`softirq`、`tasklet`、`slab`、`page cache`、`vruntime`、`lag`、`nice`、`idle`、`dl_server`、`sched_ext`、`uclamp`、`PSI`、`folio`、`memblock`、`vmemmap`、`vmalloc`、`SLUB`、`kswapd`、`kcompactd`、`khugepaged`、`shrinker`、`zswap`、`zram`、`anon_vma`、`lruvec`、`hugetlbfs`、`GFP`、`qspinlock`、`qrwlock`、`seqcount`、`mutex`、`rwsem`、`rt_mutex`、`OSQ`、`futex`、`SRCU`、`lockdep`、`irq_work`、`kworker`、`ksoftirqd`、`NAPI`、`x2APIC`、`hwirq`
+`EEVDF`、`CFS`、`PELT`、`RCU`、`per-CPU`、`softirq`、`tasklet`、`slab`、`page cache`、`vruntime`、`lag`、`next buddy`、`nice`、`idle`、`dl_server`、`sched_ext`、`uclamp`、`PSI`、`folio`、`memblock`、`vmemmap`、`vmalloc`、`SLUB`、`kswapd`、`kcompactd`、`khugepaged`、`shrinker`、`zswap`、`zram`、`anon_vma`、`lruvec`、`hugetlbfs`、`GFP`、`qspinlock`、`qrwlock`、`seqcount`、`mutex`、`rwsem`、`rt_mutex`、`OSQ`、`futex`、`SRCU`、`lockdep`、`irq_work`、`kworker`、`ksoftirqd`、`NAPI`、`x2APIC`、`hwirq`
