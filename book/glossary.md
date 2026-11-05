@@ -131,6 +131,7 @@
 | 外部碎片 | External Fragmentation | 空闲页总量足够但缺少连续块 | 4.12 |
 | 完全公平调度器 | Completely Fair Scheduler，CFS | v2.6.23～v6.5 的公平调度算法 | 3.3 |
 | 未接受内存 | Unaccepted Memory | 机密虚拟机中须显式接受后才能使用的内存 | 4.2 |
+| 伪共享 | False Sharing | 不同 CPU 频繁写入同一缓存行中的不同数据，导致该缓存行在 CPU 间反复迁移 | 3.1 |
 | 伪中断 | Spurious Interrupt | 本地 APIC 在竞态下投递的无对应中断源的中断，向量 `0xff` | 5.1 |
 | 稀疏内存模型 | SPARSEMEM | 按 section 分配 `struct page` 的物理内存模型 | 4.1 |
 | 线程化中断 | Threaded IRQ | 主处理函数唤醒专属内核线程执行主体工作的中断处理方式 | 5.7 |
