@@ -75,5 +75,5 @@
 - [ ] 7.1、7.11 的部分实验（irqsoff tracer、`might_sleep` 检查、lockdep ABBA 报告）需要另行编译开启 `CONFIG_IRQSOFF_TRACER`、`CONFIG_DEBUG_ATOMIC_SLEEP`、`CONFIG_PROVE_LOCKING` 的内核。
 - [ ] 图 7-4（qspinlock 时序）、图 7-8（RCU 宽限期）、图 7-10（静止状态上报）的 Mermaid 图需在目标渲染器中确认显示效果。
 - [ ] 部分特性的引入版本（如 qrwlock、mutex HANDOFF、GP 线程化、`synchronize_rcu()` 由 GP 线程直接唤醒）依据社区资料整理，后续可补充对应的提交号以便核对。
-- [ ] 部分代码块（如 `include/linux/spinlock_api_smp.h:104-161`、`arch/x86/include/asm/cmpxchg.h:158-215`）超过 40 行建议值，可进一步拆分讲解。
+- [ ] 部分代码块（如 [`include/linux/spinlock_api_smp.h:104-161`](../../linux/include/linux/spinlock_api_smp.h#L104-L161)、[`arch/x86/include/asm/cmpxchg.h:158-215`](../../linux/arch/x86/include/asm/cmpxchg.h#L158-L215)）超过 40 行建议值，可进一步拆分讲解。
 - [ ] 完成量（completion）、等待队列与 `wait_event()` 系列尚未单独成节（睡眠—唤醒协议见 3.4 节），可考虑在本章或第 3 章补充。

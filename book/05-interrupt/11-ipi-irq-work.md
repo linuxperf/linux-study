@@ -1,6 +1,6 @@
 # 5.11 处理器间中断与 irq_work
 
-> **本节源码**：`include/linux/smp_types.h`、`include/linux/smp.h`、`kernel/smp.c`、`kernel/sched/core.c`、`arch/x86/kernel/smp.c`、`arch/x86/kernel/apic/ipi.c`、`arch/x86/mm/tlb.c`、`include/linux/irq_work_types.h`、`kernel/irq_work.c`、`arch/x86/kernel/irq_work.c`
+> **本节源码**：[`include/linux/smp_types.h`](../../linux/include/linux/smp_types.h)、[`include/linux/smp.h`](../../linux/include/linux/smp.h)、[`kernel/smp.c`](../../linux/kernel/smp.c)、[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`arch/x86/kernel/smp.c`](../../linux/arch/x86/kernel/smp.c)、[`arch/x86/kernel/apic/ipi.c`](../../linux/arch/x86/kernel/apic/ipi.c)、[`arch/x86/mm/tlb.c`](../../linux/arch/x86/mm/tlb.c)、[`include/linux/irq_work_types.h`](../../linux/include/linux/irq_work_types.h)、[`kernel/irq_work.c`](../../linux/kernel/irq_work.c)、[`arch/x86/kernel/irq_work.c`](../../linux/arch/x86/kernel/irq_work.c)
 > **关键函数**：`smp_call_function_single()`、`smp_call_function_many_cond()`、`generic_exec_single()`、`__smp_call_single_queue()`、`__flush_smp_call_function_queue()`、`call_function_single_prep_ipi()`、`native_smp_send_reschedule()`、`irq_work_queue()`、`irq_work_queue_on()`、`irq_work_run()`
 > **前置知识**：5.5 中断控制器（发送 IPI）、3.4 任务创建与唤醒、7.3 内存屏障与 Linux 内核内存模型
 
@@ -32,8 +32,9 @@
 
 处理函数都很短：
 
+[`arch/x86/kernel/smp.c:244-273`](../../linux/arch/x86/kernel/smp.c#L244-L273)（v6.18.60）
+
 ```c
-// arch/x86/kernel/smp.c:244-273（v6.18.60）
 /*
  * Reschedule call back. KVM uses this interrupt to force a cpu out of
  * guest mode.
@@ -66,12 +67,13 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_call_function_single)
 }
 ```
 
-重调度 IPI 使用 `DEFINE_IDTENTRY_SYSVEC_SIMPLE`（5.2 节表 5-3）：不切换到中断栈，只做最小的 `__irq_enter_raw()`，因为它几乎什么都不做——`scheduler_ipi()` 只是确保 `TIF_NEED_RESCHED` 被注意到，真正的调度发生在 `irqentry_exit()` 中（3.2、3.5 节）。两个函数调用向量最终调用同一个函数（`generic_smp_call_function_interrupt` 是 `generic_smp_call_function_single_interrupt` 的别名，`include/linux/smp.h:177`）；区分两个向量只是为了让多目标调用可以使用 APIC 的广播简写。
+重调度 IPI 使用 `DEFINE_IDTENTRY_SYSVEC_SIMPLE`（5.2 节表 5-3）：不切换到中断栈，只做最小的 `__irq_enter_raw()`，因为它几乎什么都不做——`scheduler_ipi()` 只是确保 `TIF_NEED_RESCHED` 被注意到，真正的调度发生在 `irqentry_exit()` 中（3.2、3.5 节）。两个函数调用向量最终调用同一个函数（`generic_smp_call_function_interrupt` 是 `generic_smp_call_function_single_interrupt` 的别名，[`include/linux/smp.h:177`](../../linux/include/linux/smp.h#L177)）；区分两个向量只是为了让多目标调用可以使用 APIC 的广播简写。
 
 发送端在 `arch/x86/kernel/apic/ipi.c` 中：
 
+[`arch/x86/kernel/apic/ipi.c:68-80`](../../linux/arch/x86/kernel/apic/ipi.c#L68-L80)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/ipi.c:68-80（v6.18.60）
 void native_smp_send_reschedule(int cpu)
 {
 	if (unlikely(cpu_is_offline(cpu))) {
@@ -87,7 +89,7 @@ void native_send_call_func_single_ipi(int cpu)
 }
 ```
 
-`__apic_send_IPI()` 经 static call 调用当前 `struct apic` 驱动的 `send_IPI`（5.5 节）。在 KVM 客户机中，`kvm_setup_pv_ipi()`（`arch/x86/kernel/kvm.c:654-657`）把多目标发送替换为 `kvm_send_ipi_mask()`：用一次超级调用（hypercall）把位图交给宿主机，而不是对每个目标写一次 ICR、每次都引起 VM exit。
+`__apic_send_IPI()` 经 static call 调用当前 `struct apic` 驱动的 `send_IPI`（5.5 节）。在 KVM 客户机中，`kvm_setup_pv_ipi()`（[`arch/x86/kernel/kvm.c:654-657`](../../linux/arch/x86/kernel/kvm.c#L654-L657)）把多目标发送替换为 `kvm_send_ipi_mask()`：用一次超级调用（hypercall）把位图交给宿主机，而不是对每个目标写一次 ICR、每次都引起 VM exit。
 
 ## 核心数据结构
 
@@ -95,8 +97,9 @@ void native_send_call_func_single_ipi(int cpu)
 
 跨 CPU 函数调用、irq_work、远程唤醒三者的队列节点共用同一个头部：
 
+[`include/linux/smp_types.h:7-67`](../../linux/include/linux/smp_types.h#L7-L67)（v6.18.60）
+
 ```c
-// include/linux/smp_types.h:7-67（v6.18.60）
 enum {
 	CSD_FLAG_LOCK		= 0x01,
 
@@ -138,8 +141,9 @@ struct __call_single_node {
 
 *表 5-22：`call_single_queue` 上的四种节点*
 
+[`include/linux/smp.h:23-27`](../../linux/include/linux/smp.h#L23-L27)（v6.18.60）
+
 ```c
-// include/linux/smp.h:23-27（v6.18.60）
 struct __call_single_data {
 	struct __call_single_node node;
 	smp_call_func_t func;
@@ -149,8 +153,9 @@ struct __call_single_data {
 
 每个 CPU 一个无锁单链表（`llist`）：
 
+[`kernel/smp.c:40-48`](../../linux/kernel/smp.c#L40-L48)（v6.18.60）
+
 ```c
-// kernel/smp.c:40-48（v6.18.60）
 struct call_function_data {
 	call_single_data_t	__percpu *csd;
 	cpumask_var_t		cpumask;
@@ -168,8 +173,9 @@ static DEFINE_PER_CPU_SHARED_ALIGNED(struct llist_head, call_single_queue);
 
 ### 单目标调用
 
+[`kernel/smp.c:636-692`](../../linux/kernel/smp.c#L636-L692)（v6.18.60）
+
 ```c
-// kernel/smp.c:636-692（v6.18.60）
 int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 			     int wait)
 {
@@ -235,8 +241,9 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 
 **csd 锁**是"函数已执行完、csd 可以复用"的标志：
 
+[`kernel/smp.c:349-376`](../../linux/kernel/smp.c#L349-L376)（v6.18.60）
+
 ```c
-// kernel/smp.c:349-376（v6.18.60）
 static __always_inline void csd_lock_wait(call_single_data_t *csd)
 {
 	smp_cond_load_acquire(&csd->node.u_flags, !(VAL & CSD_FLAG_LOCK));
@@ -267,12 +274,13 @@ static __always_inline void csd_unlock(call_single_data_t *csd)
 }
 ```
 
-`csd_unlock()` 用 release 语义清除标志，`csd_lock_wait()` 用 acquire 语义等待（7.3 节）：等待者看到锁被释放时，一定也能看到目标 CPU 在函数中写入的所有结果。`smp_cond_load_acquire()` 在 x86 上是一个带 `pause` 的自旋循环。本书配置未开启 `CONFIG_CSD_LOCK_WAIT_DEBUG`；开启后，等待超时会打印 `csd: Detected non-responsive CSD lock` 并对目标 CPU 发 NMI 回溯（`kernel/smp.c:231-318`），是诊断"IPI 丢失"问题的利器。
+`csd_unlock()` 用 release 语义清除标志，`csd_lock_wait()` 用 acquire 语义等待（7.3 节）：等待者看到锁被释放时，一定也能看到目标 CPU 在函数中写入的所有结果。`smp_cond_load_acquire()` 在 x86 上是一个带 `pause` 的自旋循环。本书配置未开启 `CONFIG_CSD_LOCK_WAIT_DEBUG`；开启后，等待超时会打印 `csd: Detected non-responsive CSD lock` 并对目标 CPU 发 NMI 回溯（[`kernel/smp.c:231-318`](../../linux/kernel/smp.c#L231-L318)），是诊断"IPI 丢失"问题的利器。
 
 入队与发送：
 
+[`kernel/smp.c:421-453`](../../linux/kernel/smp.c#L421-L453)（v6.18.60）
+
 ```c
-// kernel/smp.c:421-453（v6.18.60）
 static int generic_exec_single(int cpu, call_single_data_t *csd)
 {
 	/*
@@ -310,8 +318,9 @@ static int generic_exec_single(int cpu, call_single_data_t *csd)
 
 目标是自己时直接在关中断下调用——保持与远程执行一致的"在中断上下文中执行"的语义。否则：
 
+[`kernel/smp.c:400-414`](../../linux/kernel/smp.c#L400-L414)（v6.18.60）
+
 ```c
-// kernel/smp.c:400-414（v6.18.60）
 	/*
 	 * The list addition should be visible to the target CPU when it pops
 	 * the head of the list to pull the entry off it in the IPI handler
@@ -333,8 +342,9 @@ static int generic_exec_single(int cpu, call_single_data_t *csd)
 
 #### 空闲 CPU 免 IPI 唤醒
 
+[`kernel/smp.c:114-122`](../../linux/kernel/smp.c#L114-L122)（v6.18.60）
+
 ```c
-// kernel/smp.c:114-122（v6.18.60）
 static __always_inline void
 send_call_function_single_ipi(int cpu)
 {
@@ -346,8 +356,9 @@ send_call_function_single_ipi(int cpu)
 }
 ```
 
+[`kernel/sched/core.c:3844-3852`](../../linux/kernel/sched/core.c#L3844-L3852)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:3844-3852（v6.18.60）
 bool call_function_single_prep_ipi(int cpu)
 {
 	if (set_nr_if_polling(cpu_rq(cpu)->idle)) {
@@ -359,12 +370,13 @@ bool call_function_single_prep_ipi(int cpu)
 }
 ```
 
-如果目标 CPU 处于轮询式 idle（`TIF_POLLING_NRFLAG`，例如用 `mwait` 监视自己的 `thread_info.flags`），只需原子地设置它的 `TIF_NEED_RESCHED`，它就会从 `mwait` 中醒来，无需真正的 IPI。醒来的 idle 任务在调度前调用 `flush_smp_call_function_queue()`（`kernel/smp.c:610-626`）处理队列。IPI 是一个相对昂贵的操作（在虚拟机中尤甚），这一优化对频繁唤醒空闲 CPU 的工作负载很有价值。
+如果目标 CPU 处于轮询式 idle（`TIF_POLLING_NRFLAG`，例如用 `mwait` 监视自己的 `thread_info.flags`），只需原子地设置它的 `TIF_NEED_RESCHED`，它就会从 `mwait` 中醒来，无需真正的 IPI。醒来的 idle 任务在调度前调用 `flush_smp_call_function_queue()`（[`kernel/smp.c:610-626`](../../linux/kernel/smp.c#L610-L626)）处理队列。IPI 是一个相对昂贵的操作（在虚拟机中尤甚），这一优化对频繁唤醒空闲 CPU 的工作负载很有价值。
 
 ### 多目标调用
 
+[`kernel/smp.c:811-879`](../../linux/kernel/smp.c#L811-L879)（v6.18.60）
+
 ```c
-// kernel/smp.c:811-879（v6.18.60）
 	/* Check if we need remote execution, i.e., any CPU excluding this one. */
 	if (cpumask_any_and_but(mask, cpu_online_mask, this_cpu) < nr_cpu_ids) {
 		cfd = this_cpu_ptr(&cfd_data);
@@ -439,13 +451,14 @@ bool call_function_single_prep_ipi(int cpu)
 `smp_call_function_many_cond()` 是 `smp_call_function_many()`、`on_each_cpu_mask()`、`on_each_cpu_cond_mask()` 的共同实现。三个阶段：
 
 1. **入队**：为每个目标 CPU 填写一个 csd 并加入它的队列；`cond_func` 可以按 CPU 过滤。只有队列从空变非空的 CPU 才记入 `cpumask_ipi`。
-2. **发送**：只有一个 CPU 需要 IPI 时用单目标向量，否则用 `CALL_FUNCTION_VECTOR` 批量发送。`native_send_call_func_ipi()`（`arch/x86/kernel/apic/ipi.c:82-94`）在目标恰好是"所有在线 CPU"或"除自己外所有在线 CPU"时使用 APIC 广播简写，一次写 ICR 发给所有人。
+2. **发送**：只有一个 CPU 需要 IPI 时用单目标向量，否则用 `CALL_FUNCTION_VECTOR` 批量发送。`native_send_call_func_ipi()`（[`arch/x86/kernel/apic/ipi.c:82-94`](../../linux/arch/x86/kernel/apic/ipi.c#L82-L94)）在目标恰好是"所有在线 CPU"或"除自己外所有在线 CPU"时使用 APIC 广播简写，一次写 ICR 发给所有人。
 3. **本地执行与等待**：在发送 IPI **之后**才在本 CPU 上执行（如果需要），让远程 CPU 与本 CPU 并行执行；最后逐个等待每个远程 csd 解锁。
 
 TLB 远程刷新（TLB shootdown）是它最频繁的使用者之一：
 
+[`arch/x86/mm/tlb.c:1361-1376`](../../linux/arch/x86/mm/tlb.c#L1361-L1376)（v6.18.60）
+
 ```c
-// arch/x86/mm/tlb.c:1361-1376（v6.18.60）
 	/*
 	 * If no page tables were freed, we can skip sending IPIs to
 	 * CPUs in lazy TLB mode. They will flush the CPU themselves
@@ -468,8 +481,9 @@ TLB 远程刷新（TLB shootdown）是它最频繁的使用者之一：
 
 ### 接收端：处理队列
 
+[`kernel/smp.c:529-595`](../../linux/kernel/smp.c#L529-L595)（v6.18.60）
+
 ```c
-// kernel/smp.c:529-595（v6.18.60）
 	/*
 	 * First; run all SYNC callbacks, people are waiting for us.
 	 */
@@ -539,7 +553,7 @@ TLB 远程刷新（TLB shootdown）是它最频繁的使用者之一：
 }
 ```
 
-`__flush_smp_call_function_queue()`（`kernel/smp.c:480-595`）先 `llist_del_all()` 一次取走整条链表，`llist_reverse_order()` 恢复先进先出顺序，然后分三遍处理：
+`__flush_smp_call_function_queue()`（[`kernel/smp.c:480-595`](../../linux/kernel/smp.c#L480-L595)）先 `llist_del_all()` 一次取走整条链表，`llist_reverse_order()` 恢复先进先出顺序，然后分三遍处理：
 
 1. **同步调用优先**：有 CPU 在自旋等待它们，越早完成越好。注意顺序：**先执行函数，再解锁**——解锁就是告诉等待者"完成了"。
 2. **异步调用与 irq_work**：异步调用**先解锁再执行**——csd 中的 `func` 与 `info` 已复制到局部变量，提前解锁让发起者可以尽早复用 csd。
@@ -553,8 +567,9 @@ TLB 远程刷新（TLB shootdown）是它最频繁的使用者之一：
 
 有些代码运行在极受限的上下文中，例如 NMI（5.4 节）、持有调度器 rq 锁时、printk 内部。它们需要触发一些后续动作——唤醒一个任务、执行一次 `printk` 输出、发起 RCU 处理——但在当前上下文中直接做这些事会死锁。irq_work 提供了一个 **NMI 安全**的方法："请在下一次（尽快到来的）硬中断上下文中调用这个函数"。
 
+[`include/linux/irq_work_types.h:8-12`](../../linux/include/linux/irq_work_types.h#L8-L12)（v6.18.60）
+
 ```c
-// include/linux/irq_work_types.h:8-12（v6.18.60）
 struct irq_work {
 	struct __call_single_node	node;
 	void				(*func)(struct irq_work *);
@@ -564,8 +579,9 @@ struct irq_work {
 
 ### 提交
 
+[`kernel/irq_work.c:54-128`](../../linux/kernel/irq_work.c#L54-L128)（v6.18.60）
+
 ```c
-// kernel/irq_work.c:54-128（v6.18.60）
 /*
  * Claim the entry so that no one else will poke at it.
  */
@@ -635,8 +651,9 @@ bool irq_work_queue(struct irq_work *work)
 
 x86 的自 IPI 实现：
 
+[`arch/x86/kernel/irq_work.c:16-34`](../../linux/arch/x86/kernel/irq_work.c#L16-L34)（v6.18.60）
+
 ```c
-// arch/x86/kernel/irq_work.c:16-34（v6.18.60）
 #ifdef CONFIG_X86_LOCAL_APIC
 DEFINE_IDTENTRY_SYSVEC(sysvec_irq_work)
 {
@@ -660,12 +677,13 @@ void arch_irq_work_raise(void)
 
 给自己发 IPI 的效果是：当前上下文（NMI 或关中断区间）结束、中断重新打开的那一刻，CPU 立即进入 `sysvec_irq_work()`，在一个干净的硬中断上下文中执行工作。这比"等下一个时钟中断"快得多，又比"在当前上下文中直接执行"安全得多。
 
-跨 CPU 提交 `irq_work_queue_on()`（`kernel/irq_work.c:137-182`）则把节点放进目标 CPU 的 `call_single_queue`（类型 `CSD_TYPE_IRQ_WORK`），由函数调用 IPI 处理；由于跨 CPU 发 IPI 的后端不是 NMI 安全的，它在 NMI 中调用会触发警告。5.10 节的 BH 工作队列跨 CPU 触发软中断用的就是这个接口。
+跨 CPU 提交 `irq_work_queue_on()`（[`kernel/irq_work.c:137-182`](../../linux/kernel/irq_work.c#L137-L182)）则把节点放进目标 CPU 的 `call_single_queue`（类型 `CSD_TYPE_IRQ_WORK`），由函数调用 IPI 处理；由于跨 CPU 发 IPI 的后端不是 NMI 安全的，它在 NMI 中调用会触发警告。5.10 节的 BH 工作队列跨 CPU 触发软中断用的就是这个接口。
 
 ### 执行
 
+[`kernel/irq_work.c:201-233`](../../linux/kernel/irq_work.c#L201-L233)（v6.18.60）
+
 ```c
-// kernel/irq_work.c:201-233（v6.18.60）
 void irq_work_single(void *arg)
 {
 	struct irq_work *work = arg;
@@ -701,10 +719,11 @@ void irq_work_single(void *arg)
 }
 ```
 
-两个标志位的分工：`PENDING` 在执行前清除，之后再提交可以重新入队（即"执行期间被再次提交会再执行一次"）；`BUSY` 在执行后清除，`irq_work_sync()`（`kernel/irq_work.c:286` 起）等待它清除，以确定回调不在运行中，可以安全释放 `irq_work` 结构。`smp_mb()` 与 `irq_work_claim()` 中的完全屏障配对（`atomic_fetch_or()` 隐含完全屏障）：提交者在提交前写入的数据，对回调可见。
+两个标志位的分工：`PENDING` 在执行前清除，之后再提交可以重新入队（即"执行期间被再次提交会再执行一次"）；`BUSY` 在执行后清除，`irq_work_sync()`（[`kernel/irq_work.c:286`](../../linux/kernel/irq_work.c#L286) 起）等待它清除，以确定回调不在运行中，可以安全释放 `irq_work` 结构。`smp_mb()` 与 `irq_work_claim()` 中的完全屏障配对（`atomic_fetch_or()` 隐含完全屏障）：提交者在提交前写入的数据，对回调可见。
+
+[`kernel/irq_work.c:259-280`](../../linux/kernel/irq_work.c#L259-L280)（v6.18.60）
 
 ```c
-// kernel/irq_work.c:259-280（v6.18.60）
 void irq_work_run(void)
 {
 	irq_work_run_list(this_cpu_ptr(&raised_list));

@@ -1,6 +1,6 @@
 # 4.5 SLUB 分配器
 
-> **本节源码**：`mm/slub.c`、`mm/slab.h`、`mm/slab_common.c`、`include/linux/slab.h`
+> **本节源码**：[`mm/slub.c`](../../linux/mm/slub.c)、[`mm/slab.h`](../../linux/mm/slab.h)、[`mm/slab_common.c`](../../linux/mm/slab_common.c)、[`include/linux/slab.h`](../../linux/include/linux/slab.h)
 > **关键函数**：`slab_alloc_node()`、`__slab_alloc_node()`、`___slab_alloc()`、`allocate_slab()`、`alloc_from_pcs()`、`slab_free()`、`do_slab_free()`、`__slab_free()`、`__do_kmalloc_node()`、`kfree()`
 > **前置知识**：4.3 伙伴系统与 per-CPU 页缓存
 
@@ -33,8 +33,9 @@ SLUB 的设计要点是：每 CPU 持有一个"当前 slab"，其空闲对象链
 
 每种对象类型一个缓存描述符：
 
+[`mm/slab.h:238-296`](../../linux/mm/slab.h#L238-L296)（v6.18.60，节选）
+
 ```c
-// mm/slab.h:238-296（v6.18.60，节选）
 struct kmem_cache {
 	struct kmem_cache_cpu __percpu *cpu_slab;
 	struct lock_class_key lock_key;
@@ -87,8 +88,9 @@ struct kmem_cache {
 
 slab 描述符不单独分配，而是与 slab 首页的 `struct page` 重叠，就像 folio 一样：
 
+[`mm/slab.h:52-102`](../../linux/mm/slab.h#L52-L102)（v6.18.60，节选）
+
 ```c
-// mm/slab.h:52-102（v6.18.60，节选）
 struct slab {
 	memdesc_flags_t flags;
 
@@ -139,8 +141,9 @@ struct slab {
 
 ### `kmem_cache_cpu` 与 `kmem_cache_node`
 
+[`mm/slub.c:421-437`](../../linux/mm/slub.c#L421-L437)（v6.18.60）
+
 ```c
-// mm/slub.c:421-437（v6.18.60）
 struct kmem_cache_cpu {
 	union {
 		struct {
@@ -160,8 +163,9 @@ struct kmem_cache_cpu {
 };
 ```
 
+[`mm/slub.c:492-502`](../../linux/mm/slub.c#L492-L502)（v6.18.60）
+
 ```c
-// mm/slub.c:492-502（v6.18.60）
 struct kmem_cache_node {
 	spinlock_t list_lock;
 	unsigned long nr_partial;
@@ -183,8 +187,9 @@ struct kmem_cache_node {
 
 空闲对象的前 8 字节（`offset` 处）存放下一个空闲对象的地址。启用 `CONFIG_SLAB_FREELIST_HARDENED`（本书配置已启用）后，指针被编码存储：
 
+[`mm/slub.c:562-573`](../../linux/mm/slub.c#L562-L573)（v6.18.60）
+
 ```c
-// mm/slub.c:562-573（v6.18.60）
 static inline freeptr_t freelist_ptr_encode(const struct kmem_cache *s,
 					    void *ptr, unsigned long ptr_addr)
 {
@@ -199,9 +204,9 @@ static inline freeptr_t freelist_ptr_encode(const struct kmem_cache *s,
 }
 ```
 
-编码值 = 真实指针 ⊕ 缓存随机数 ⊕ 存放地址的字节反转。攻击者即使通过 UAF 漏洞覆写了空闲对象，也很难构造出能解码为目标地址的值。`set_freepointer()`（`mm/slub.c:629-638`）中还有一个简单的 `BUG_ON(object == fp)` 用于发现连续两次释放同一对象。
+编码值 = 真实指针 ⊕ 缓存随机数 ⊕ 存放地址的字节反转。攻击者即使通过 UAF 漏洞覆写了空闲对象，也很难构造出能解码为目标地址的值。`set_freepointer()`（[`mm/slub.c:629-638`](../../linux/mm/slub.c#L629-L638)）中还有一个简单的 `BUG_ON(object == fp)` 用于发现连续两次释放同一对象。
 
-对于有构造函数（`ctor`）或 `SLAB_TYPESAFE_BY_RCU` 的缓存，对象内容在空闲时也必须保持有效，此时空闲指针被放到对象之后（`offset ≥ object_size`），由 `calculate_sizes()`（`mm/slub.c:7864`）决定。
+对于有构造函数（`ctor`）或 `SLAB_TYPESAFE_BY_RCU` 的缓存，对象内容在空闲时也必须保持有效，此时空闲指针被放到对象之后（`offset ≥ object_size`），由 `calculate_sizes()`（[`mm/slub.c:7864`](../../linux/mm/slub.c#L7864)）决定。
 
 ## 分配路径
 
@@ -224,8 +229,9 @@ kmalloc(size, gfp) / kmem_cache_alloc(s, gfp)
 
 ### 入口：`slab_alloc_node()`
 
+[`mm/slub.c:5294-5327`](../../linux/mm/slub.c#L5294-L5327)（v6.18.60）
+
 ```c
-// mm/slub.c:5294-5327（v6.18.60）
 static __fastpath_inline void *slab_alloc_node(struct kmem_cache *s, struct list_lru *lru,
 		gfp_t gfpflags, int node, unsigned long addr, size_t orig_size)
 {
@@ -268,8 +274,9 @@ KFENCE（`CONFIG_KFENCE=y`）是一种低开销的内存错误检测器，按采
 
 sheaf 是 v6.18 引入的**可选**缓存层：每 CPU 持有一个"主 sheaf"（`main`），它是一个定长指针数组，分配就是弹出栈顶元素：
 
+[`mm/slub.c:5138-5207`](../../linux/mm/slub.c#L5138-L5207)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:5138-5207（v6.18.60，节选）
 static __fastpath_inline
 void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
 {
@@ -300,12 +307,13 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
 }
 ```
 
-主 sheaf 空了就与备用 sheaf（`spare`）交换，或从节点级的 `barn` 仓库换一个满的回来。与传统的 freelist 相比，sheaf 的优势在于：对象可以来自任意 slab，批量填充/回收时一次操作多个对象；`kfree_rcu()` 也可以把对象攒进 `rcu_free` sheaf，等一个 RCU 宽限期后整体处理。目前只有显式在 `kmem_cache_args` 中设置 `sheaf_capacity` 的缓存才启用 sheaf，如 maple tree 节点缓存（`lib/maple_tree.c:5872`）和 VMA 缓存（`mm/vma_init.c:19`），其余缓存的 `cpu_sheaves` 为 NULL。
+主 sheaf 空了就与备用 sheaf（`spare`）交换，或从节点级的 `barn` 仓库换一个满的回来。与传统的 freelist 相比，sheaf 的优势在于：对象可以来自任意 slab，批量填充/回收时一次操作多个对象；`kfree_rcu()` 也可以把对象攒进 `rcu_free` sheaf，等一个 RCU 宽限期后整体处理。目前只有显式在 `kmem_cache_args` 中设置 `sheaf_capacity` 的缓存才启用 sheaf，如 maple tree 节点缓存（[`lib/maple_tree.c:5872`](../../linux/lib/maple_tree.c#L5872)）和 VMA 缓存（[`mm/vma_init.c:19`](../../linux/mm/vma_init.c#L19)），其余缓存的 `cpu_sheaves` 为 NULL。
 
 ### ② 无锁快速路径：`__slab_alloc_node()`
 
+[`mm/slub.c:4846-4941`](../../linux/mm/slub.c#L4846-L4941)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:4846-4941（v6.18.60，节选）
 static __always_inline void *__slab_alloc_node(struct kmem_cache *s,
 		gfp_t gfpflags, int node, unsigned long addr, size_t orig_size)
 {
@@ -344,8 +352,9 @@ redo:
 
 这条路径**不关抢占、不关中断、不加锁**。它先读 `tid`，再读 `freelist`，然后用 `this_cpu_try_cmpxchg` 把 `(freelist, tid)` 原子地替换为 `(next_object, tid + 1)`：
 
+[`mm/slub.c:4429-4439`](../../linux/mm/slub.c#L4429-L4439)（v6.18.60）
+
 ```c
-// mm/slub.c:4429-4439（v6.18.60）
 static inline bool
 __update_cpu_freelist_fast(struct kmem_cache *s,
 			   void *freelist_old, void *freelist_new,
@@ -359,7 +368,7 @@ __update_cpu_freelist_fast(struct kmem_cache *s,
 }
 ```
 
-`this_cpu_*` 操作在 x86_64 上编译为带 `%gs` 前缀的 `cmpxchg16b` 指令，天然作用于"执行时所在 CPU"的变量。如果读取期间任务被迁移到另一个 CPU，那么 cmpxchg 会作用于新 CPU 的 `freelist_tid`，其 `tid` 与之前读到的不同（`tid` 编码了 CPU 号），比较失败后重试即可。这就是 SLUB 快速路径不需要关抢占的原因。`USE_LOCKLESS_FAST_PATH()` 仅在 `CONFIG_PREEMPT_RT` 下为 false（`mm/slub.c:209-225`）。
+`this_cpu_*` 操作在 x86_64 上编译为带 `%gs` 前缀的 `cmpxchg16b` 指令，天然作用于"执行时所在 CPU"的变量。如果读取期间任务被迁移到另一个 CPU，那么 cmpxchg 会作用于新 CPU 的 `freelist_tid`，其 `tid` 与之前读到的不同（`tid` 编码了 CPU 号），比较失败后重试即可。这就是 SLUB 快速路径不需要关抢占的原因。`USE_LOCKLESS_FAST_PATH()` 仅在 `CONFIG_PREEMPT_RT` 下为 false（[`mm/slub.c:209-225`](../../linux/mm/slub.c#L209-L225)）。
 
 ### ③ 慢速路径：`___slab_alloc()`
 
@@ -367,8 +376,9 @@ __update_cpu_freelist_fast(struct kmem_cache *s,
 
 **(a) 当前 slab 上的远程释放对象**：
 
+[`mm/slub.c:4579-4614`](../../linux/mm/slub.c#L4579-L4614)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:4579-4614（v6.18.60，节选）
 	/* must check again c->slab in case we got preempted and it changed */
 	local_lock_cpu_slab(s, flags);
 
@@ -403,12 +413,13 @@ load_freelist:
 	return freelist;
 ```
 
-`get_freelist()`（`mm/slub.c:4449`）用 `cmpxchg` 把 `slab->freelist` 整条取走并置空；它总是把 `inuse` 设为 `objects`（对象全部归 CPU 所有），并且只有取到非空链表时才保持 `frozen = 1`；若为空，说明当前 slab 已满，`frozen` 被清 0，slab 就此"解冻"，变成一个不在任何链表上的满 slab。
+`get_freelist()`（[`mm/slub.c:4449`](../../linux/mm/slub.c#L4449)）用 `cmpxchg` 把 `slab->freelist` 整条取走并置空；它总是把 `inuse` 设为 `objects`（对象全部归 CPU 所有），并且只有取到非空链表时才保持 `frozen = 1`；若为空，说明当前 slab 已满，`frozen` 被清 0，slab 就此"解冻"，变成一个不在任何链表上的满 slab。
 
 **(b) per-CPU partial 链表**（`CONFIG_SLUB_CPU_PARTIAL`，本书配置已启用）：
 
+[`mm/slub.c:4633-4664`](../../linux/mm/slub.c#L4633-L4664)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:4633-4664（v6.18.60，节选）
 #ifdef CONFIG_SLUB_CPU_PARTIAL
 	while (slub_percpu_partial(c)) {
 		...
@@ -431,12 +442,13 @@ load_freelist:
 
 per-CPU partial 链表上的 slab 都已处于 frozen 状态，取用时不需要节点锁。
 
-**(c) 节点 partial 链表**：`get_partial()` 先在目标节点的 `kmem_cache_node->partial` 上查找（持 `list_lock`），若失败再按距离尝试其他节点（受 `remote_node_defrag_ratio` 约束）。找到的 slab 经 `freeze_slab()` 冻结后成为当前 slab。`get_partial_node()`（`mm/slub.c:3534`）在取走第一个 slab 后，还会继续取若干 slab 放入 per-CPU partial 链表，直到达到 `cpu_partial_slabs` 的一半。
+**(c) 节点 partial 链表**：`get_partial()` 先在目标节点的 `kmem_cache_node->partial` 上查找（持 `list_lock`），若失败再按距离尝试其他节点（受 `remote_node_defrag_ratio` 约束）。找到的 slab 经 `freeze_slab()` 冻结后成为当前 slab。`get_partial_node()`（[`mm/slub.c:3534`](../../linux/mm/slub.c#L3534)）在取走第一个 slab 后，还会继续取若干 slab 放入 per-CPU partial 链表，直到达到 `cpu_partial_slabs` 的一半。
 
 **(d) 新建 slab**：以上都失败时调用 `new_slab()`，从伙伴系统分配新页：
 
+[`mm/slub.c:3260-3331`](../../linux/mm/slub.c#L3260-L3331)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:3260-3331（v6.18.60，节选）
 static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 {
 	...
@@ -495,12 +507,13 @@ static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 
 这里体现了 SLUB 的一个重要策略：**先以首选阶 `oo` 尝试，且不做回收（清除 `__GFP_RECLAIM`），失败再退回最低阶 `min` 正常分配**。较高的阶能让一个 slab 容纳更多对象、减少慢速路径次数，但不值得为此触发回收。`shuffle_freelist()`（`CONFIG_SLAB_FREELIST_RANDOM=y`）把初始空闲链表顺序随机打乱，增加堆利用的难度；未启用时按地址顺序串联所有对象。
 
-新 slab 的 `inuse` 随后被设为 `objects`、`frozen` 设为 1，空闲链表整体交给 `c->freelist`（`mm/slub.c:4751-4754`）。
+新 slab 的 `inuse` 随后被设为 `objects`、`frozen` 设为 1，空闲链表整体交给 `c->freelist`（[`mm/slub.c:4751-4754`](../../linux/mm/slub.c#L4751-L4754)）。
 
 ### slab 的阶数选择
 
+[`mm/slub.c:7597-7650`](../../linux/mm/slub.c#L7597-L7650)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:7597-7650（v6.18.60，节选）
 static inline int calculate_order(unsigned int size)
 {
 	...
@@ -521,7 +534,7 @@ static inline int calculate_order(unsigned int size)
 	}
 ```
 
-CPU 越多，每个 slab 期望容纳的对象数越多（8 CPU 时为 4 × (4 + 1) = 20 个），以降低 partial 链表的竞争。在不超过 `slub_max_order`（默认 `PAGE_ALLOC_COSTLY_ORDER` = 3，`mm/slub.c:7548-7549`）的前提下，从浪费不超过 1/16 开始，逐步放宽到 1/2，选最小的合适阶。
+CPU 越多，每个 slab 期望容纳的对象数越多（8 CPU 时为 4 × (4 + 1) = 20 个），以降低 partial 链表的竞争。在不超过 `slub_max_order`（默认 `PAGE_ALLOC_COSTLY_ORDER` = 3，[`mm/slub.c:7548-7549`](../../linux/mm/slub.c#L7548-L7549)）的前提下，从浪费不超过 1/16 开始，逐步放宽到 1/2，选最小的合适阶。
 
 ## 释放路径
 
@@ -541,8 +554,9 @@ kfree(obj) / kmem_cache_free(s, obj)
 
 `kfree()` 需要先找到对象所属的缓存：
 
+[`mm/slub.c:6885-6906`](../../linux/mm/slub.c#L6885-L6906)（v6.18.60）
+
 ```c
-// mm/slub.c:6885-6906（v6.18.60）
 void kfree(const void *object)
 {
 	struct folio *folio;
@@ -571,8 +585,9 @@ void kfree(const void *object)
 
 ### 快速路径：`do_slab_free()`
 
+[`mm/slub.c:6619-6685`](../../linux/mm/slub.c#L6619-L6685)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:6619-6685（v6.18.60，节选）
 redo:
 	...
 	c = raw_cpu_ptr(s->cpu_slab);
@@ -609,8 +624,9 @@ redo:
 
 对象属于其他 slab 时，要把它挂回该 slab 自己的 `freelist`，并根据 slab 状态的变化调整其链表归属：
 
+[`mm/slub.c:5924-5957`](../../linux/mm/slub.c#L5924-L5957)（v6.18.60）
+
 ```c
-// mm/slub.c:5924-5957（v6.18.60）
 	do {
 		if (unlikely(n)) {
 			spin_unlock_irqrestore(&n->list_lock, flags);
@@ -656,8 +672,9 @@ redo:
 | 部分空，释放后变为全空 | `n->nr_partial >= min_partial` | 从节点 partial 摘下，`discard_slab()` 归还伙伴系统 |
 | 部分空，释放后仍部分空 | — | 保持在节点 partial 上 |
 
+[`mm/slub.c:5959-6013`](../../linux/mm/slub.c#L5959-L6013)（v6.18.60，节选）
+
 ```c
-// mm/slub.c:5959-6013（v6.18.60，节选）
 	if (likely(!n)) {
 
 		if (likely(was_frozen)) {
@@ -703,8 +720,9 @@ slab_empty:
 
 `kmalloc()` 建立在一组预先创建的通用缓存之上，大小按 2 的幂次分级，另有 96 和 192 字节两个中间档：
 
+[`include/linux/slab.h:727-747`](../../linux/include/linux/slab.h#L727-L747)（v6.18.60，节选）
+
 ```c
-// include/linux/slab.h:727-747（v6.18.60，节选）
 	if (!size)
 		return 0;
 
@@ -729,8 +747,9 @@ slab_empty:
 	...
 ```
 
+[`include/linux/slab.h:592-601`](../../linux/include/linux/slab.h#L592-L601)（v6.18.60，节选）
+
 ```c
-// include/linux/slab.h:592-601（v6.18.60，节选）
 #define KMALLOC_SHIFT_HIGH	(PAGE_SHIFT + 1)
 #define KMALLOC_SHIFT_MAX	(MAX_PAGE_ORDER + PAGE_SHIFT)
 #ifndef KMALLOC_SHIFT_LOW
@@ -749,8 +768,9 @@ x86_64 上 slab 缓存覆盖 8 B～8 KB（`kmalloc-8` ～ `kmalloc-8k`）；超�
 
 同一大小又按用途分成多组缓存：
 
+[`include/linux/slab.h:637-664`](../../linux/include/linux/slab.h#L637-L664)（v6.18.60）
+
 ```c
-// include/linux/slab.h:637-664（v6.18.60）
 enum kmalloc_cache_type {
 	KMALLOC_NORMAL = 0,
 #ifndef CONFIG_ZONE_DMA
@@ -789,12 +809,13 @@ enum kmalloc_cache_type {
 | `KMALLOC_DMA` | `__GFP_DMA` | `dma-kmalloc-64` |
 | `KMALLOC_CGROUP` | `__GFP_ACCOUNT`（计入 memcg） | `kmalloc-cg-64` |
 
-`CONFIG_RANDOM_KMALLOC_CACHES=y`（v6.6 引入）时，普通请求按"调用点地址 ⊕ 启动随机种子"的哈希分散到 16 组缓存中（`kmalloc_type()`，`include/linux/slab.h:681-709`），使攻击者难以让漏洞对象与目标对象落在同一个 slab 里，从而增加堆喷射（heap spraying）利用的难度。
+`CONFIG_RANDOM_KMALLOC_CACHES=y`（v6.6 引入）时，普通请求按"调用点地址 ⊕ 启动随机种子"的哈希分散到 16 组缓存中（`kmalloc_type()`，[`include/linux/slab.h:681-709`](../../linux/include/linux/slab.h#L681-L709)），使攻击者难以让漏洞对象与目标对象落在同一个 slab 里，从而增加堆喷射（heap spraying）利用的难度。
 
 ### `__do_kmalloc_node()`
 
+[`mm/slub.c:5666-5689`](../../linux/mm/slub.c#L5666-L5689)（v6.18.60）
+
 ```c
-// mm/slub.c:5666-5689（v6.18.60）
 static __always_inline
 void *__do_kmalloc_node(size_t size, kmem_buckets *b, gfp_t flags, int node,
 			unsigned long caller)
@@ -827,7 +848,7 @@ void *__do_kmalloc_node(size_t size, kmem_buckets *b, gfp_t flags, int node,
 
 ### 缓存合并
 
-`kmem_cache_create()` 创建新缓存时，`__kmem_cache_alias()`（`mm/slab_common.c:264`）会尝试找一个对象大小、对齐、标志兼容的现有缓存与之**合并**（`CONFIG_SLAB_MERGE_DEFAULT=y`），只增加引用计数并在 sysfs 中创建别名。这减少了 slab 数量和内存碎片，但也意味着不同子系统的对象可能共享 slab。带 `SLAB_NO_MERGE`、`SLAB_TYPESAFE_BY_RCU`、有构造函数或启用调试的缓存不会被合并；启动参数 `slab_nomerge` 可全局关闭合并。
+`kmem_cache_create()` 创建新缓存时，`__kmem_cache_alias()`（[`mm/slab_common.c:264`](../../linux/mm/slab_common.c#L264)）会尝试找一个对象大小、对齐、标志兼容的现有缓存与之**合并**（`CONFIG_SLAB_MERGE_DEFAULT=y`），只增加引用计数并在 sysfs 中创建别名。这减少了 slab 数量和内存碎片，但也意味着不同子系统的对象可能共享 slab。带 `SLAB_NO_MERGE`、`SLAB_TYPESAFE_BY_RCU`、有构造函数或启用调试的缓存不会被合并；启动参数 `slab_nomerge` 可全局关闭合并。
 
 ### 调试
 

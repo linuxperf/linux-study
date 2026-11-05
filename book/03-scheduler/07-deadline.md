@@ -1,6 +1,6 @@
 # 3.7 Deadline 调度类与 dl_server
 
-> **本节源码**：`kernel/sched/deadline.c`、`kernel/sched/sched.h`、`include/linux/sched.h`、`kernel/sched/fair.c`
+> **本节源码**：[`kernel/sched/deadline.c`](../../linux/kernel/sched/deadline.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)、[`kernel/sched/fair.c`](../../linux/kernel/sched/fair.c)
 > **关键函数**：`enqueue_dl_entity()`、`update_dl_entity()`、`dl_entity_overflow()`、`replenish_dl_entity()`、`update_curr_dl_se()`、`start_dl_timer()`、`dl_task_timer()`、`__pick_task_dl()`、`sched_dl_overflow()`、`dl_server_start()`、`dl_server_update()`
 > **前置知识**：3.1 调度器框架、3.5 调度时钟、3.6 实时调度类（push / pull）
 
@@ -30,8 +30,9 @@ Deadline 类在调度类顺序中仅次于 stop 类，高于实时类。v6.12 �
 
 ## 核心数据结构
 
+[`include/linux/sched.h:639-660`](../../linux/include/linux/sched.h#L639-L660)（v6.18.60）
+
 ```c
-// include/linux/sched.h:639-660（v6.18.60）
 struct sched_dl_entity {
 	struct rb_node			rb_node;
 
@@ -56,7 +57,7 @@ struct sched_dl_entity {
 	unsigned int			flags;		/* Specifying the scheduler behaviour	*/
 ```
 
-`dl_*` 前缀的是用户设置的静态参数，`runtime` / `deadline` 是运行时状态。其余字段（`include/linux/sched.h:699-743`）包括：
+`dl_*` 前缀的是用户设置的静态参数，`runtime` / `deadline` 是运行时状态。其余字段（[`include/linux/sched.h:699-743`](../../linux/include/linux/sched.h#L699-L743)）包括：
 
 - 一组位标志：`dl_throttled`（预算耗尽、等待补充）、`dl_yielded`、`dl_non_contending`（GRUB 用）、`dl_server`、`dl_server_active`、`dl_defer`、`dl_defer_armed`、`dl_defer_running`（后几个服务于 dl_server）；
 - `dl_timer`：每个实体一个的高精度定时器，用于在补充时刻解除节流；
@@ -66,8 +67,9 @@ struct sched_dl_entity {
 
 运行队列：
 
+[`kernel/sched/sched.h:861-904`](../../linux/kernel/sched/sched.h#L861-L904)（v6.18.60，节选）
+
 ```c
-// kernel/sched/sched.h:861-904（v6.18.60，节选）
 struct dl_rq {
 	/* runqueue is an rbtree, ordered by deadline */
 	struct rb_root_cached	root;
@@ -97,8 +99,9 @@ struct dl_rq {
 
 ### 选取与抢占
 
+[`kernel/sched/deadline.c:2570-2595`](../../linux/kernel/sched/deadline.c#L2570-L2595)（v6.18.60）
+
 ```c
-// kernel/sched/deadline.c:2570-2595（v6.18.60）
 static struct task_struct *__pick_task_dl(struct rq *rq)
 {
 	struct sched_dl_entity *dl_se;
@@ -127,14 +130,15 @@ again:
 }
 ```
 
-选取就是取红黑树最左节点。如果最左的是 dl_server，就调用它的 `server_pick_task()`——对 fair_server 而言是 `fair_server_pick_task()` → `pick_task_fair()`（`fair.c:9236-9239`）——选出一个公平任务，并在 `rq->dl_server` 中记下"这个公平任务是代表 dl_server 在运行的"。这正是 3.2 节 `__put_prev_set_next_dl_server()` 中交接 `dl_server` 指针的原因。
+选取就是取红黑树最左节点。如果最左的是 dl_server，就调用它的 `server_pick_task()`——对 fair_server 而言是 `fair_server_pick_task()` → `pick_task_fair()`（[`kernel/sched/fair.c:9236-9239`](../../linux/kernel/sched/fair.c#L9236-L9239)）——选出一个公平任务，并在 `rq->dl_server` 中记下"这个公平任务是代表 dl_server 在运行的"。这正是 3.2 节 `__put_prev_set_next_dl_server()` 中交接 `dl_server` 指针的原因。
 
-唤醒抢占同样简单：被唤醒者截止时间更早就抢占（`dl_entity_preempt()`，`sched.h:299-304`；`wakeup_preempt_dl()`，`deadline.c:2504-2519`）。
+唤醒抢占同样简单：被唤醒者截止时间更早就抢占（`dl_entity_preempt()`，[`kernel/sched/sched.h:299-304`](../../linux/kernel/sched/sched.h#L299-L304)；`wakeup_preempt_dl()`，[`kernel/sched/deadline.c:2504-2519`](../../linux/kernel/sched/deadline.c#L2504-L2519)）。
 
 ### 入队与 CBS 唤醒规则
 
+[`kernel/sched/deadline.c:2191-2234`](../../linux/kernel/sched/deadline.c#L2191-L2234)（v6.18.60，节选）
+
 ```c
-// kernel/sched/deadline.c:2191-2234（v6.18.60，节选）
 	if (!dl_se->dl_defer && dl_se->dl_throttled && !(flags & ENQUEUE_REPLENISH)) {
 		if (flags & ENQUEUE_WAKEUP)
 			task_contending(dl_se, flags);
@@ -164,8 +168,9 @@ again:
 
 被节流的任务即使醒来也不入队，等 `dl_timer` 补充预算后再入队。唤醒时调用 `update_dl_entity()` 应用 CBS 规则：
 
+[`kernel/sched/deadline.c:1032-1053`](../../linux/kernel/sched/deadline.c#L1032-L1053)（v6.18.60，节选）
+
 ```c
-// kernel/sched/deadline.c:1032-1053（v6.18.60，节选）
 static void update_dl_entity(struct sched_dl_entity *dl_se)
 {
 	struct rq *rq = rq_of_dl_se(dl_se);
@@ -185,10 +190,11 @@ static void update_dl_entity(struct sched_dl_entity *dl_se)
 		replenish_dl_new_period(dl_se, rq);
 ```
 
-如果旧截止时间已过，或者"剩余预算 / 剩余时间"超过了声明的密度，就重新开始一个周期：`deadline = now + dl_deadline`，`runtime = dl_runtime`（`replenish_dl_new_period()`，`deadline.c:730-745`）。判断由 `dl_entity_overflow()` 完成：
+如果旧截止时间已过，或者"剩余预算 / 剩余时间"超过了声明的密度，就重新开始一个周期：`deadline = now + dl_deadline`，`runtime = dl_runtime`（`replenish_dl_new_period()`，[`kernel/sched/deadline.c:730-745`](../../linux/kernel/sched/deadline.c#L730-L745)）。判断由 `dl_entity_overflow()` 完成：
+
+[`kernel/sched/deadline.c:923-950`](../../linux/kernel/sched/deadline.c#L923-L950)（v6.18.60，节选）
 
 ```c
-// kernel/sched/deadline.c:923-950（v6.18.60，节选）
 static bool dl_entity_overflow(struct sched_dl_entity *dl_se, u64 t)
 {
 	u64 left, right;
@@ -201,14 +207,15 @@ static bool dl_entity_overflow(struct sched_dl_entity *dl_se, u64 t)
 }
 ```
 
-即判断 `runtime / (deadline − t) > dl_runtime / dl_deadline`，交叉相乘避免除法，并右移 `DL_SCALE`（10）位防止溢出——注释（`deadline.c:932-943`）说明这把精度降到约 1 μs，对 true/false 判断已经足够。
+即判断 `runtime / (deadline − t) > dl_runtime / dl_deadline`，交叉相乘避免除法，并右移 `DL_SCALE`（10）位防止溢出——注释（[`kernel/sched/deadline.c:932-943`](../../linux/kernel/sched/deadline.c#L932-L943)）说明这把精度降到约 1 μs，对 true/false 判断已经足够。
 
-对于截止时间小于周期的"受约束"任务（`dl_deadline < dl_period`），直接重开周期会过于悲观，内核改用**修正唤醒规则**（Revised Wakeup Rule）`update_dl_revised_wakeup()`：保留截止时间，把预算削减到恰好不超过密度（注释引用了 Abeni、Lipari、Lelli 2015 年的论文，`deadline.c:952-969`）。
+对于截止时间小于周期的"受约束"任务（`dl_deadline < dl_period`），直接重开周期会过于悲观，内核改用**修正唤醒规则**（Revised Wakeup Rule）`update_dl_revised_wakeup()`：保留截止时间，把预算削减到恰好不超过密度（注释引用了 Abeni、Lipari、Lelli 2015 年的论文，[`kernel/sched/deadline.c:952-969`](../../linux/kernel/sched/deadline.c#L952-L969)）。
 
 ### 运行时扣减与节流
 
+[`kernel/sched/deadline.c:1442-1506`](../../linux/kernel/sched/deadline.c#L1442-L1506)（v6.18.60，节选）
+
 ```c
-// kernel/sched/deadline.c:1442-1506（v6.18.60，节选）
 	scaled_delta_exec = delta_exec;
 	if (!dl_server(dl_se))
 		scaled_delta_exec = dl_scaled_delta_exec(rq, dl_se, delta_exec);
@@ -246,16 +253,17 @@ throttle:
 
 `update_curr_dl_se()` 由 `update_curr_dl()`（tick、出队、切换时）调用：
 
-1. `dl_scaled_delta_exec()`（`deadline.c:1398` 起）按 CPU 频率与算力缩放执行时间；若任务设置了 `SCHED_FLAG_RECLAIM`，还会应用 **GRUB**（Greedy Reclamation of Unused Bandwidth）规则，让任务回收其他睡眠任务未用的带宽（`grub_reclaim()`，`deadline.c:1378-1396`）。
-2. 预算耗尽（`runtime <= 0`）或任务调用了 `sched_yield()`，就置 `dl_throttled`、出队，并用 `start_dl_timer()` 把 `dl_timer` 设在**下一个周期的起点** `dl_next_period()`（即 `deadline − dl_deadline + dl_period`，`deadline.c:1102-1108`）；对截止时间等于周期的任务，这恰好就是当前截止时间。延迟服务器（`dl_defer_armed`）则设在 `deadline − runtime`，见下文 dl_server。如果任务请求了 `SCHED_FLAG_DL_OVERRUN`，`dl_overrun` 被置位，随后在 tick 的 POSIX CPU 定时器检查中向任务发送 `SIGXCPU`（`check_dl_overrun()`，`kernel/time/posix-cpu-timers.c:906-911`）。
-3. 定时器到期时，`dl_task_timer()`（`deadline.c:1221` 起）以 `ENQUEUE_REPLENISH` 重新入队，`replenish_dl_entity()` 不断把截止时间推后一个周期、预算加一个 `dl_runtime`，直到预算为正（`deadline.c:836-839`）——即便任务大幅超支，也只是把它推到更远的未来。
+1. `dl_scaled_delta_exec()`（[`kernel/sched/deadline.c:1398`](../../linux/kernel/sched/deadline.c#L1398) 起）按 CPU 频率与算力缩放执行时间；若任务设置了 `SCHED_FLAG_RECLAIM`，还会应用 **GRUB**（Greedy Reclamation of Unused Bandwidth）规则，让任务回收其他睡眠任务未用的带宽（`grub_reclaim()`，[`kernel/sched/deadline.c:1378-1396`](../../linux/kernel/sched/deadline.c#L1378-L1396)）。
+2. 预算耗尽（`runtime <= 0`）或任务调用了 `sched_yield()`，就置 `dl_throttled`、出队，并用 `start_dl_timer()` 把 `dl_timer` 设在**下一个周期的起点** `dl_next_period()`（即 `deadline − dl_deadline + dl_period`，[`kernel/sched/deadline.c:1102-1108`](../../linux/kernel/sched/deadline.c#L1102-L1108)）；对截止时间等于周期的任务，这恰好就是当前截止时间。延迟服务器（`dl_defer_armed`）则设在 `deadline − runtime`，见下文 dl_server。如果任务请求了 `SCHED_FLAG_DL_OVERRUN`，`dl_overrun` 被置位，随后在 tick 的 POSIX CPU 定时器检查中向任务发送 `SIGXCPU`（`check_dl_overrun()`，[`kernel/time/posix-cpu-timers.c:906-911`](../../linux/kernel/time/posix-cpu-timers.c#L906-L911)）。
+3. 定时器到期时，`dl_task_timer()`（[`kernel/sched/deadline.c:1221`](../../linux/kernel/sched/deadline.c#L1221) 起）以 `ENQUEUE_REPLENISH` 重新入队，`replenish_dl_entity()` 不断把截止时间推后一个周期、预算加一个 `dl_runtime`，直到预算为正（[`kernel/sched/deadline.c:836-839`](../../linux/kernel/sched/deadline.c#L836-L839)）——即便任务大幅超支，也只是把它推到更远的未来。
 
-由于 tick 精度只有 1 ms，任务可能超支至多一个 tick。开启 `HRTICK_DL` 特性后，`task_tick_dl()` 会用 hrtick 在预算恰好耗尽时触发检查（`deadline.c:2629-2642`），但该特性默认关闭（3.5 节）。
+由于 tick 精度只有 1 ms，任务可能超支至多一个 tick。开启 `HRTICK_DL` 特性后，`task_tick_dl()` 会用 hrtick 在预算恰好耗尽时触发检查（[`kernel/sched/deadline.c:2629-2642`](../../linux/kernel/sched/deadline.c#L2629-L2642)），但该特性默认关闭（3.5 节）。
 
 ### 准入控制
 
+[`kernel/sched/deadline.c:212-217`](../../linux/kernel/sched/deadline.c#L212-L217)（v6.18.60）
+
 ```c
-// kernel/sched/deadline.c:212-217（v6.18.60）
 static inline bool
 __dl_overflow(struct dl_bw *dl_b, unsigned long cap, u64 old_bw, u64 new_bw)
 {
@@ -264,9 +272,9 @@ __dl_overflow(struct dl_bw *dl_b, unsigned long cap, u64 old_bw, u64 new_bw)
 }
 ```
 
-`dl_b` 是每个 root domain 的带宽账本：`bw` 为单 CPU 允许的最大带宽，`total_bw` 为已分配的总带宽，`cap` 为 root domain 内 CPU 算力之和。`bw` 由 `sched_rt_runtime_us / sched_rt_period_us` 换算（默认 0.95，`deadline.c:515-523`）；写入 `-1` 表示不限制。
+`dl_b` 是每个 root domain 的带宽账本：`bw` 为单 CPU 允许的最大带宽，`total_bw` 为已分配的总带宽，`cap` 为 root domain 内 CPU 算力之和。`bw` 由 `sched_rt_runtime_us / sched_rt_period_us` 换算（默认 0.95，[`kernel/sched/deadline.c:515-523`](../../linux/kernel/sched/deadline.c#L515-L523)）；写入 `-1` 表示不限制。
 
-`sched_dl_overflow()`（`deadline.c:3453-3509`）在 `sched_setattr()` 中调用，按"成为 / 保持 / 离开 Deadline 任务"三种情形增减 `total_bw`，超限则返回错误，用户看到 `EBUSY`。此外 `__checkparam_dl()`（`deadline.c:3553-3596`）检查参数合法性：`runtime ≤ deadline ≤ period`，`runtime` 至少 1024 ns，周期在 `sched_deadline_period_min_us`（默认 100 μs）与 `sched_deadline_period_max_us`（默认约 4 s）之间。
+`sched_dl_overflow()`（[`kernel/sched/deadline.c:3453-3509`](../../linux/kernel/sched/deadline.c#L3453-L3509)）在 `sched_setattr()` 中调用，按"成为 / 保持 / 离开 Deadline 任务"三种情形增减 `total_bw`，超限则返回错误，用户看到 `EBUSY`。此外 `__checkparam_dl()`（[`kernel/sched/deadline.c:3553-3596`](../../linux/kernel/sched/deadline.c#L3553-L3596)）检查参数合法性：`runtime ≤ deadline ≤ period`，`runtime` 至少 1024 ns，周期在 `sched_deadline_period_min_us`（默认 100 μs）与 `sched_deadline_period_max_us`（默认约 4 s）之间。
 
 需要注意，这里的准入控制保证的是**全局 EDF 的有界拖延**（bounded tardiness），而不是多核上所有截止时间都一定满足；`Documentation/scheduler/sched-deadline.rst` 对此有详细讨论。
 
@@ -277,8 +285,8 @@ Deadline 类的多核策略与实时类同构：
 | 实时类 | Deadline 类 |
 |---|---|
 | `cpupri`：按优先级找最低优先级 CPU | `cpudl`（`kernel/sched/cpudeadline.c`）：按最晚截止时间组织的最大堆 |
-| `find_lowest_rq()` | `find_later_rq()`（`deadline.c:2682` 起） |
-| `push_rt_task()` / `pull_rt_task()` | `push_dl_task()` / `pull_dl_task()`（`deadline.c:2887`、`2967` 起） |
+| `find_lowest_rq()` | `find_later_rq()`（[`kernel/sched/deadline.c:2682`](../../linux/kernel/sched/deadline.c#L2682) 起） |
+| `push_rt_task()` / `pull_rt_task()` | `push_dl_task()` / `pull_dl_task()`（[`kernel/sched/deadline.c:2887`](../../linux/kernel/sched/deadline.c#L2887)、`2967` 起） |
 | `highest_prio` | `earliest_dl` |
 
 push 的目标是"当前运行任务截止时间最晚的 CPU"，pull 则从过载 CPU 拉截止时间早于本地的任务，以近似全局 EDF。
@@ -289,8 +297,9 @@ push 的目标是"当前运行任务截止时间最晚的 CPU"，pull 则从过�
 
 3.6 节提到，本书配置下实时任务不再被 RT throttling 限流。为了防止公平任务被饿死，每个 CPU 的 `rq->fair_server` 是一个 Deadline 实体，代表该 CPU 上的公平任务参与 EDF 竞争。由于 Deadline 类高于实时类，只要 fair_server 有预算且被选中，就能抢占实时任务，让一个公平任务运行。
 
+[`kernel/sched/deadline.c:1818-1843`](../../linux/kernel/sched/deadline.c#L1818-L1843)（v6.18.60）
+
 ```c
-// kernel/sched/deadline.c:1818-1843（v6.18.60）
 void sched_init_dl_servers(void)
 {
 	int cpu;
@@ -319,17 +328,17 @@ void sched_init_dl_servers(void)
 }
 ```
 
-默认参数为每 1000 ms 50 ms，即 5% 的带宽。可以通过 debugfs 的 `/sys/kernel/debug/sched/fair_server/cpuN/{runtime,period}` 按 CPU 调整（`kernel/sched/debug.c:479-491`），`runtime` 写 0 即关闭。
+默认参数为每 1000 ms 50 ms，即 5% 的带宽。可以通过 debugfs 的 `/sys/kernel/debug/sched/fair_server/cpuN/{runtime,period}` 按 CPU 调整（[`kernel/sched/debug.c:479-491`](../../linux/kernel/sched/debug.c#L479-L491)），`runtime` 写 0 即关闭。
 
 ### 延迟服务器
 
 如果 fair_server 像普通 Deadline 任务一样一有公平任务就运行，那么每秒前 50 ms 实时任务都会被打断，即使公平任务并没有被饿着——这会无谓地破坏实时任务的响应性。因此 fair_server 被设为**延迟**（`dl_defer = 1`）服务器：
 
-- 公平任务入队时 `dl_server_start()` 启动服务器（`fair.c:7176-7181`），但 `replenish_dl_new_period()` 会把它置为节流状态，并把定时器设在 `deadline − runtime`，即"零松弛"（zero-laxity）时刻（`deadline.c:737-744`、`1096-1100`）。
-- 在此之前，公平任务若能以普通方式运行，它们消耗的时间会通过 `update_curr()` → `dl_server_update()` 计入 fair_server 的预算（3.3 节 `update_curr()`）；如果预算在零松弛时刻前就被"后台"用完，说明公平任务没有被饿着，服务器直接推迟到下一个周期（`deadline.c:1456-1478`）。idle 时间同样计入（`dl_server_update_idle_time()`，`deadline.c:1551-1574`）。
+- 公平任务入队时 `dl_server_start()` 启动服务器（[`kernel/sched/fair.c:7176-7181`](../../linux/kernel/sched/fair.c#L7176-L7181)），但 `replenish_dl_new_period()` 会把它置为节流状态，并把定时器设在 `deadline − runtime`，即"零松弛"（zero-laxity）时刻（[`kernel/sched/deadline.c:737-744`](../../linux/kernel/sched/deadline.c#L737-L744)、`1096-1100`）。
+- 在此之前，公平任务若能以普通方式运行，它们消耗的时间会通过 `update_curr()` → `dl_server_update()` 计入 fair_server 的预算（3.3 节 `update_curr()`）；如果预算在零松弛时刻前就被"后台"用完，说明公平任务没有被饿着，服务器直接推迟到下一个周期（[`kernel/sched/deadline.c:1456-1478`](../../linux/kernel/sched/deadline.c#L1456-L1478)）。idle 时间同样计入（`dl_server_update_idle_time()`，[`kernel/sched/deadline.c:1551-1574`](../../linux/kernel/sched/deadline.c#L1551-L1574)）。
 - 只有当零松弛时刻到来时预算仍有剩余——意味着公平任务确实被实时任务挡住了——定时器才会让 fair_server 真正入队运行，此后它像普通 Deadline 实体一样消耗、节流、补充，直到公平任务不再饥饿。
 
-源码在 `dl_server_update()` 之后用一张状态图（`deadline.c:1583-1782`）详细描述了 A:init、B:zero_laxity-wait、C:idle-wait、D:running、E:replenish-wait 五个状态及转换。注释末尾总结：有公平任务正常运行时，最常见的循环是"[2]→[2]"，即服务器从未真正运行、定时器也从未触发。需要说明的是，该注释中列出的 `dl_defer_idle` 标志在 v6.18.60 的 `struct sched_dl_entity` 中并不存在（结构体中只有 `dl_defer`、`dl_defer_armed`、`dl_defer_running`），注释与代码并不完全同步，阅读时应以代码为准。
+源码在 `dl_server_update()` 之后用一张状态图（[`kernel/sched/deadline.c:1583-1782`](../../linux/kernel/sched/deadline.c#L1583-L1782)）详细描述了 A:init、B:zero_laxity-wait、C:idle-wait、D:running、E:replenish-wait 五个状态及转换。注释末尾总结：有公平任务正常运行时，最常见的循环是"[2]→[2]"，即服务器从未真正运行、定时器也从未触发。需要说明的是，该注释中列出的 `dl_defer_idle` 标志在 v6.18.60 的 `struct sched_dl_entity` 中并不存在（结构体中只有 `dl_defer`、`dl_defer_armed`、`dl_defer_running`），注释与代码并不完全同步，阅读时应以代码为准。
 
 ```mermaid
 stateDiagram-v2
@@ -342,7 +351,7 @@ stateDiagram-v2
     Running --> Init: 无公平任务可选<br/>dl_server_stop()
 ```
 
-*图 3-12：fair_server 的简化状态转换（据 `deadline.c:1583-1782` 注释归纳）*
+*图 3-12：fair_server 的简化状态转换（据 [`kernel/sched/deadline.c:1583-1782`](../../linux/kernel/sched/deadline.c#L1583-L1782) 注释归纳）*
 
 ## 关键细节 / 设计考量
 
@@ -368,7 +377,7 @@ stateDiagram-v2
 
    `sum_exec_runtime` 应约为墙钟时间的 10%（CBS 节流）。
 
-2. 验证准入控制。`__dl_overflow()` 比较的是整个 root domain 的算力之和，因此在 N 个 CPU 的虚拟机上，总 Deadline 带宽上限约为 `0.95 × N`，其中每个 CPU 的 fair_server 已占用 0.05（`dl_server_apply_params()` 同样通过 `__dl_add()` 计入账本，`deadline.c:1877-1885`），留给任务的约为 `0.9 × N`。每次启动一个带宽为 0.5 的睡眠任务，直到 `chrt` 因 `EBUSY` 失败：
+2. 验证准入控制。`__dl_overflow()` 比较的是整个 root domain 的算力之和，因此在 N 个 CPU 的虚拟机上，总 Deadline 带宽上限约为 `0.95 × N`，其中每个 CPU 的 fair_server 已占用 0.05（`dl_server_apply_params()` 同样通过 `__dl_add()` 计入账本，[`kernel/sched/deadline.c:1877-1885`](../../linux/kernel/sched/deadline.c#L1877-L1885)），留给任务的约为 `0.9 × N`。每次启动一个带宽为 0.5 的睡眠任务，直到 `chrt` 因 `EBUSY` 失败：
 
    ```bash
    # 虚拟机，root
@@ -403,6 +412,6 @@ stateDiagram-v2
 ## 参考
 
 - `linux/Documentation/scheduler/sched-deadline.rst`：Deadline 调度的完整说明，包括 CBS、GRUB 与准入控制。
-- `linux/kernel/sched/deadline.c:1583-1782`：dl_server 延迟模式的状态图注释。
+- [`kernel/sched/deadline.c:1583-1782`](../../linux/kernel/sched/deadline.c#L1583-L1782)：dl_server 延迟模式的状态图注释。
 - L. Abeni, G. Lipari, J. Lelli. *Constant bandwidth server revisited*. SIGBED Review 11(4), 2015（修正唤醒规则，源码注释引用）。
 - `man 7 sched`：`SCHED_DEADLINE` 的用户态接口。

@@ -1,6 +1,6 @@
 # 4.4 水位线与页分配慢速路径
 
-> **本节源码**：`mm/page_alloc.c`、`mm/internal.h`、`mm/vmscan.c`、`include/linux/mmzone.h`、`include/linux/gfp_types.h`
+> **本节源码**：[`mm/page_alloc.c`](../../linux/mm/page_alloc.c)、[`mm/internal.h`](../../linux/mm/internal.h)、[`mm/vmscan.c`](../../linux/mm/vmscan.c)、[`include/linux/mmzone.h`](../../linux/include/linux/mmzone.h)、[`include/linux/gfp_types.h`](../../linux/include/linux/gfp_types.h)
 > **关键函数**：`__setup_per_zone_wmarks()`、`setup_per_zone_lowmem_reserve()`、`__zone_watermark_ok()`、`gfp_to_alloc_flags()`、`__alloc_pages_slowpath()`、`wakeup_kswapd()`、`__alloc_pages_direct_reclaim()`、`should_reclaim_retry()`、`__alloc_pages_may_oom()`
 > **前置知识**：4.3 伙伴系统与 per-CPU 页缓存
 
@@ -16,8 +16,9 @@
 
 ### 三条水位线的含义
 
+[`include/linux/mmzone.h:708-714`](../../linux/include/linux/mmzone.h#L708-L714)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:708-714（v6.18.60）
 enum zone_watermarks {
 	WMARK_MIN,
 	WMARK_LOW,
@@ -46,8 +47,9 @@ enum zone_watermarks {
 
 读取水位线时要加上 `watermark_boost`：
 
+[`include/linux/mmzone.h:1081-1085`](../../linux/include/linux/mmzone.h#L1081-L1085)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:1081-1085（v6.18.60）
 static inline unsigned long wmark_pages(const struct zone *z,
 					enum zone_watermarks w)
 {
@@ -59,8 +61,9 @@ static inline unsigned long wmark_pages(const struct zone *z,
 
 所有水位线都源于一个全局参数 `min_free_kbytes`（`/proc/sys/vm/min_free_kbytes`）。启动时它按低端内存总量的平方根估算：
 
+[`mm/page_alloc.c:6568-6582`](../../linux/mm/page_alloc.c#L6568-L6582)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:6568-6582（v6.18.60）
 void calculate_min_free_kbytes(void)
 {
 	unsigned long lowmem_kbytes;
@@ -82,8 +85,9 @@ void calculate_min_free_kbytes(void)
 
 `__setup_per_zone_wmarks()` 把 `min_free_kbytes` 按各 zone 的 `managed_pages` 比例分摊为 `WMARK_MIN`，再在其上叠加间隔得到 low 与 high：
 
+[`mm/page_alloc.c:6456-6514`](../../linux/mm/page_alloc.c#L6456-L6514)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:6456-6514（v6.18.60，节选）
 static void __setup_per_zone_wmarks(void)
 {
 	unsigned long pages_min = min_free_kbytes >> (PAGE_SHIFT - 10);
@@ -147,14 +151,15 @@ high  = low + gap
 promo = high + gap
 ```
 
-`watermark_scale_factor` 默认为 10（`mm/page_alloc.c:305`），即 zone 大小的 0.1%。在大内存机器上，`min/4` 往往远小于 0.1%，于是 gap 由后者决定。调大这个参数会让 kswapd 更早醒来、回收得更多，从而减少直接回收。`ZONE_MOVABLE` 的 min 只取一个很小的值（不超过 128 页），因为 `GFP_ATOMIC` 等需要储备的分配通常不会使用可移动 zone。
+`watermark_scale_factor` 默认为 10（[`mm/page_alloc.c:305`](../../linux/mm/page_alloc.c#L305)），即 zone 大小的 0.1%。在大内存机器上，`min/4` 往往远小于 0.1%，于是 gap 由后者决定。调大这个参数会让 kswapd 更早醒来、回收得更多，从而减少直接回收。`ZONE_MOVABLE` 的 min 只取一个很小的值（不超过 128 页），因为 `GFP_ATOMIC` 等需要储备的分配通常不会使用可移动 zone。
 
 ### 水位提升
 
 4.3 节提到，发生跨迁移类型的部分认领时会调用 `boost_watermark()`：
 
+[`mm/page_alloc.c:2213-2234`](../../linux/mm/page_alloc.c#L2213-L2234)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:2213-2234（v6.18.60，节选）
 	if ((pageblock_nr_pages * 4) > zone_managed_pages(zone))
 		return false;
 
@@ -170,7 +175,7 @@ promo = high + gap
 		max_boost);
 ```
 
-每次提升一个页块（2 MB）的量，上限为 high 水位的 `watermark_boost_factor / 10000` 倍，默认 15000 即 1.5 倍（`mm/page_alloc.c:304`）。被提升后，kswapd 会回收到"high + boost"为止，并在完成后将 boost 清零。这样在碎片化开始出现时，以多回收一些内存为代价，换取后续分配不必再跨类型借用。
+每次提升一个页块（2 MB）的量，上限为 high 水位的 `watermark_boost_factor / 10000` 倍，默认 15000 即 1.5 倍（[`mm/page_alloc.c:304`](../../linux/mm/page_alloc.c#L304)）。被提升后，kswapd 会回收到"high + boost"为止，并在完成后将 boost 清零。这样在碎片化开始出现时，以多回收一些内存为代价，换取后续分配不必再跨类型借用。
 
 ### `lowmem_reserve`：保护低端 zone
 
@@ -178,8 +183,9 @@ zonelist 允许 `GFP_KERNEL` 分配从 `ZONE_NORMAL` 回退到 `ZONE_DMA32` 甚�
 
 `lowmem_reserve[j]` 表示"当请求的最高 zone 为 j 时，本 zone 额外保留的页数"：
 
+[`mm/page_alloc.c:6430-6449`](../../linux/mm/page_alloc.c#L6430-L6449)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:6430-6449（v6.18.60，节选）
 	for_each_online_pgdat(pgdat) {
 		for (i = 0; i < MAX_NR_ZONES - 1; i++) {
 			struct zone *zone = &pgdat->node_zones[i];
@@ -202,12 +208,13 @@ zonelist 允许 `GFP_KERNEL` 分配从 `ZONE_NORMAL` 回退到 `ZONE_DMA32` 甚�
 	}
 ```
 
-默认比例为 DMA、DMA32 各 256，NORMAL 为 32（`mm/page_alloc.c:258-270`）。例如某节点 `ZONE_NORMAL` 有 12 GB，那么一个最高 zone 为 NORMAL 的请求要使用 `ZONE_DMA32` 时，DMA32 必须在水位之外再多保留 12 GB / 256 = 48 MB。`ZONE_DMA32` 自身的请求（`GFP_DMA32`）不受此限制。
+默认比例为 DMA、DMA32 各 256，NORMAL 为 32（[`mm/page_alloc.c:258-270`](../../linux/mm/page_alloc.c#L258-L270)）。例如某节点 `ZONE_NORMAL` 有 12 GB，那么一个最高 zone 为 NORMAL 的请求要使用 `ZONE_DMA32` 时，DMA32 必须在水位之外再多保留 12 GB / 256 = 48 MB。`ZONE_DMA32` 自身的请求（`GFP_DMA32`）不受此限制。
 
 ### 水位检查：`__zone_watermark_ok()`
 
+[`mm/page_alloc.c:3568-3644`](../../linux/mm/page_alloc.c#L3568-L3644)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:3568-3644（v6.18.60，节选）
 bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 			 int highest_zoneidx, unsigned int alloc_flags,
 			 long free_pages)
@@ -269,14 +276,15 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 1. **总量检查**：可用空闲页（减去高阶原子储备、不可用的 CMA 页、以及 `2^order − 1`）必须超过 `min + lowmem_reserve`。动用储备的请求可以把 `min` 打折：`__GFP_HIGH` 打五折，不能阻塞的 `GFP_ATOMIC` 再减去四分之一（合计为原值的 37.5%）；带 `ALLOC_OOM` 的 OOM 牺牲者同样减半。
 2. **阶检查**：高阶请求还要求在 `order` 及以上至少有一个合适迁移类型的空闲块。
 
-`zone_watermark_fast()`（`mm/page_alloc.c:3653-3696`）为 order 0 提供了一条更快的路径，避免在最常见的情况下进入完整检查。
+`zone_watermark_fast()`（[`mm/page_alloc.c:3653-3696`](../../linux/mm/page_alloc.c#L3653-L3696)）为 order 0 提供了一条更快的路径，避免在最常见的情况下进入完整检查。
 
 ## 分配标志：从 GFP 到 `ALLOC_*`
 
 伙伴系统内部不直接使用 GFP，而是把它翻译成 `ALLOC_*` 标志：
 
+[`mm/internal.h:1276-1314`](../../linux/mm/internal.h#L1276-L1314)（v6.18.60，节选）
+
 ```c
-// mm/internal.h:1276-1314（v6.18.60，节选）
 #define ALLOC_WMARK_MIN		WMARK_MIN
 #define ALLOC_WMARK_LOW		WMARK_LOW
 #define ALLOC_WMARK_HIGH	WMARK_HIGH
@@ -302,8 +310,9 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 
 低 2 位是水位选择（0/1/2 对应 min/low/high）。快速路径固定使用 `ALLOC_WMARK_LOW`；慢速路径则由 `gfp_to_alloc_flags()` 精确计算：
 
+[`mm/page_alloc.c:4514-4564`](../../linux/mm/page_alloc.c#L4514-L4564)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4514-4564（v6.18.60，节选）
 static inline unsigned int
 gfp_to_alloc_flags(gfp_t gfp_mask, unsigned int order)
 {
@@ -342,8 +351,9 @@ gfp_to_alloc_flags(gfp_t gfp_mask, unsigned int order)
 
 最高一级的储备访问由 `__gfp_pfmemalloc_flags()` 决定：
 
+[`mm/page_alloc.c:4585-4601`](../../linux/mm/page_alloc.c#L4585-L4601)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:4585-4601（v6.18.60）
 static inline int __gfp_pfmemalloc_flags(gfp_t gfp_mask)
 {
 	if (unlikely(gfp_mask & __GFP_NOMEMALLOC))
@@ -398,8 +408,9 @@ __alloc_pages_slowpath()                            mm/page_alloc.c:4728
 
 ### 第一阶段：唤醒 kswapd 并降低门槛
 
+[`mm/page_alloc.c:4779-4814`](../../linux/mm/page_alloc.c#L4779-L4814)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4779-4814（v6.18.60，节选）
 	alloc_flags = gfp_to_alloc_flags(gfp_mask, order);
 
 	/*
@@ -425,10 +436,11 @@ __alloc_pages_slowpath()                            mm/page_alloc.c:4728
 		goto got_pg;
 ```
 
-`wake_all_kswapds()`（`mm/page_alloc.c:4489-4512`）对 zonelist 中每个节点调用一次 `wakeup_kswapd()`：
+`wake_all_kswapds()`（[`mm/page_alloc.c:4489-4512`](../../linux/mm/page_alloc.c#L4489-L4512)）对 zonelist 中每个节点调用一次 `wakeup_kswapd()`：
+
+[`mm/vmscan.c:7385-7428`](../../linux/mm/vmscan.c#L7385-L7428)（v6.18.60，节选）
 
 ```c
-// mm/vmscan.c:7385-7428（v6.18.60，节选）
 void wakeup_kswapd(struct zone *zone, gfp_t gfp_flags, int order,
 		   enum zone_type highest_zoneidx)
 {
@@ -465,8 +477,9 @@ void wakeup_kswapd(struct zone *zone, gfp_t gfp_flags, int order,
 
 ### 第二阶段：高阶分配先规整
 
+[`mm/page_alloc.c:4825-4835`](../../linux/mm/page_alloc.c#L4825-L4835)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:4825-4835（v6.18.60）
 	if (can_direct_reclaim && can_compact &&
 			(costly_order ||
 			   (order > 0 && ac->migratetype != MIGRATE_MOVABLE))
@@ -479,12 +492,13 @@ void wakeup_kswapd(struct zone *zone, gfp_t gfp_flags, int order,
 			goto got_pg;
 ```
 
-对 order > 3 的"昂贵"分配（`costly_order`）和不可移动的高阶分配，在回收之前先尝试一次异步规整：此时往往并不缺页，只是缺**连续**的页，规整比回收更对症。对 THP 缺页等带 `__GFP_NORETRY` 的昂贵分配，如果规整被跳过或推迟，直接失败返回（`mm/page_alloc.c:4840-4881`），由调用者回退到小页。
+对 order > 3 的"昂贵"分配（`costly_order`）和不可移动的高阶分配，在回收之前先尝试一次异步规整：此时往往并不缺页，只是缺**连续**的页，规整比回收更对症。对 THP 缺页等带 `__GFP_NORETRY` 的昂贵分配，如果规整被跳过或推迟，直接失败返回（[`mm/page_alloc.c:4840-4881`](../../linux/mm/page_alloc.c#L4840-L4881)），由调用者回退到小页。
 
 ### 第三阶段：重试循环
 
+[`mm/page_alloc.c:4885-4938`](../../linux/mm/page_alloc.c#L4885-L4938)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4885-4938（v6.18.60，节选）
 retry:
 	...
 	/* Ensure kswapd doesn't accidentally go to sleep as long as we loop */
@@ -526,8 +540,9 @@ retry:
 
 ### 直接回收
 
+[`mm/page_alloc.c:4425-4487`](../../linux/mm/page_alloc.c#L4425-L4487)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4425-4487（v6.18.60，节选）
 __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 					const struct alloc_context *ac)
 {
@@ -586,8 +601,9 @@ out:
 
 ### 何时放弃：`should_reclaim_retry()`
 
+[`mm/page_alloc.c:4632-4693`](../../linux/mm/page_alloc.c#L4632-L4693)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4632-4693（v6.18.60，节选）
 	if (did_some_progress && order <= PAGE_ALLOC_COSTLY_ORDER)
 		*no_progress_loops = 0;
 	else
@@ -627,12 +643,13 @@ out:
 	return ret;
 ```
 
-判定规则是：连续 `MAX_RECLAIM_RETRIES`（16，`mm/internal.h:532`）次回收没有进展就放弃；否则，只要存在某个 zone"假如把所有可回收页都回收了，就能满足 min 水位"，就继续重试。注意昂贵分配即使回收有进展也会累加计数器，因为回收得到的零散页未必能拼成高阶块。放弃前还会释放高阶原子储备，作为进入 OOM 前的最后一搏。
+判定规则是：连续 `MAX_RECLAIM_RETRIES`（16，[`mm/internal.h:532`](../../linux/mm/internal.h#L532)）次回收没有进展就放弃；否则，只要存在某个 zone"假如把所有可回收页都回收了，就能满足 min 水位"，就继续重试。注意昂贵分配即使回收有进展也会累加计数器，因为回收得到的零散页未必能拼成高阶块。放弃前还会释放高阶原子储备，作为进入 OOM 前的最后一搏。
 
 ### 重试与 OOM 的决策顺序
 
+[`mm/page_alloc.c:4940-4996`](../../linux/mm/page_alloc.c#L4940-L4996)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4940-4996（v6.18.60，节选）
 	/* Do not loop if specifically requested */
 	if (gfp_mask & __GFP_NORETRY)
 		goto nopage;
@@ -686,8 +703,9 @@ GFP 中三个"重试语义"修饰符在这里体现：
 
 ### `__alloc_pages_may_oom()`
 
+[`mm/page_alloc.c:4053-4106`](../../linux/mm/page_alloc.c#L4053-L4106)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:4053-4106（v6.18.60，节选）
 	if (!mutex_trylock(&oom_lock)) {
 		*did_some_progress = 1;
 		schedule_timeout_uninterruptible(1);

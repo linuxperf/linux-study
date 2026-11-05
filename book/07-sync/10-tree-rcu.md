@@ -1,6 +1,6 @@
 # 7.10 Tree RCU：宽限期检测与回调处理
 
-> **本节源码**：`kernel/rcu/tree.h`、`kernel/rcu/tree.c`、`kernel/rcu/tree_plugin.h`、`kernel/rcu/rcu.h`、`include/linux/rcu_node_tree.h`、`include/linux/rcu_segcblist.h`、`include/linux/rcupdate.h`
+> **本节源码**：[`kernel/rcu/tree.h`](../../linux/kernel/rcu/tree.h)、[`kernel/rcu/tree.c`](../../linux/kernel/rcu/tree.c)、[`kernel/rcu/tree_plugin.h`](../../linux/kernel/rcu/tree_plugin.h)、[`kernel/rcu/rcu.h`](../../linux/kernel/rcu/rcu.h)、[`include/linux/rcu_node_tree.h`](../../linux/include/linux/rcu_node_tree.h)、[`include/linux/rcu_segcblist.h`](../../linux/include/linux/rcu_segcblist.h)、[`include/linux/rcupdate.h`](../../linux/include/linux/rcupdate.h)
 > **关键函数**：`rcu_gp_kthread()`、`rcu_gp_init()`、`rcu_gp_fqs_loop()`、`rcu_gp_fqs()`、`rcu_gp_cleanup()`、`rcu_sched_clock_irq()`、`rcu_flavor_sched_clock_irq()`、`rcu_qs()`、`rcu_core()`、`rcu_report_qs_rdp()`、`rcu_report_qs_rnp()`、`__call_rcu_common()`、`rcu_accelerate_cbs()`、`rcu_do_batch()`、`synchronize_rcu()`
 > **前置知识**：7.9 RCU 原理与使用
 
@@ -45,8 +45,9 @@
 
 树的形状由编译期常量决定：
 
+[`include/linux/rcu_node_tree.h:33-52`](../../linux/include/linux/rcu_node_tree.h#L33-L52)（v6.18.60）
+
 ```c
-// include/linux/rcu_node_tree.h:33-52（v6.18.60）
 #ifdef CONFIG_RCU_FANOUT
 #define RCU_FANOUT CONFIG_RCU_FANOUT
 #else /* #ifdef CONFIG_RCU_FANOUT */
@@ -69,8 +70,9 @@
 #define RCU_FANOUT_4	      (RCU_FANOUT_3 * RCU_FANOUT)
 ```
 
+[`include/linux/rcu_node_tree.h:69-77`](../../linux/include/linux/rcu_node_tree.h#L69-L77)（v6.18.60）
+
 ```c
-// include/linux/rcu_node_tree.h:69-77（v6.18.60）
 #elif NR_CPUS <= RCU_FANOUT_3
 #  define RCU_NUM_LVLS	      3
 #  define NUM_RCU_LVL_0	      1
@@ -82,12 +84,13 @@
 #  define RCU_FQS_NAME_INIT   { "rcu_node_fqs_0", "rcu_node_fqs_1", "rcu_node_fqs_2" }
 ```
 
-本书配置 `CONFIG_NR_CPUS=8192`，叶子扇出 16、内部扇出 64：`RCU_FANOUT_2 = 1024 < 8192 ≤ RCU_FANOUT_3 = 65536`，因此是三层树，节点数为 1 + ⌈8192/1024⌉ + ⌈8192/16⌉ = 1 + 8 + 512 = 521 个。启动时 `rcu_init_geometry()`（`kernel/rcu/tree.c:4754`）会根据实际可能的 CPU 数 `nr_cpu_ids` 重新计算层数和每层节点数，所以 8 核虚拟机上实际只使用一个 `rcu_node`。
+本书配置 `CONFIG_NR_CPUS=8192`，叶子扇出 16、内部扇出 64：`RCU_FANOUT_2 = 1024 < 8192 ≤ RCU_FANOUT_3 = 65536`，因此是三层树，节点数为 1 + ⌈8192/1024⌉ + ⌈8192/16⌉ = 1 + 8 + 512 = 521 个。启动时 `rcu_init_geometry()`（[`kernel/rcu/tree.c:4754`](../../linux/kernel/rcu/tree.c#L4754)）会根据实际可能的 CPU 数 `nr_cpu_ids` 重新计算层数和每层节点数，所以 8 核虚拟机上实际只使用一个 `rcu_node`。
 
 ### rcu_node
 
+[`kernel/rcu/tree.h:41-58`](../../linux/kernel/rcu/tree.h#L41-L58)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.h:41-58（v6.18.60）
 struct rcu_node {
 	raw_spinlock_t __private lock;	/* Root rcu_node's lock protects */
 					/*  some rcu_state fields as well as */
@@ -108,8 +111,9 @@ struct rcu_node {
 				/*  beginning of each grace period. */
 ```
 
+[`kernel/rcu/tree.h:76-95`](../../linux/kernel/rcu/tree.h#L76-L95)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.h:76-95（v6.18.60）
 	unsigned long ffmask;	/* Fully functional CPUs. */
 	unsigned long grpmask;	/* Mask to apply to parent qsmask. */
 				/*  Only one bit will be set in this mask. */
@@ -138,8 +142,9 @@ struct rcu_node {
 
 ### rcu_data
 
+[`kernel/rcu/tree.h:189-217`](../../linux/kernel/rcu/tree.h#L189-L217)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.h:189-217（v6.18.60）
 struct rcu_data {
 	/* 1) quiescent-state and grace-period handling : */
 	unsigned long	gp_seq;		/* Track rsp->gp_seq counter. */
@@ -177,14 +182,16 @@ struct rcu_data {
 
 `gp_seq` 的最低 2 位是状态，其余位是计数：
 
+[`include/linux/rcupdate.h:37-38`](../../linux/include/linux/rcupdate.h#L37-L38)（v6.18.60）
+
 ```c
-// include/linux/rcupdate.h:37-38（v6.18.60）
 #define RCU_SEQ_CTR_SHIFT    2
 #define RCU_SEQ_STATE_MASK   ((1 << RCU_SEQ_CTR_SHIFT) - 1)
 ```
 
+[`kernel/rcu/rcu.h:93-113`](../../linux/kernel/rcu/rcu.h#L93-L113)（v6.18.60）
+
 ```c
-// kernel/rcu/rcu.h:93-113（v6.18.60）
 /* Adjust sequence number for start of update-side operation. */
 static inline void rcu_seq_start(unsigned long *sp)
 {
@@ -210,8 +217,9 @@ static inline void rcu_seq_end(unsigned long *sp)
 
 宽限期开始时 `gp_seq` 加一（状态位变为 1，表示"进行中"）；结束时进位到下一个计数值（状态位归零）。`rcu_seq_snap()` 计算"从现在起，要等到 `gp_seq` 至少为多少才能保证一个完整的宽限期已经过去"：
 
+[`kernel/rcu/rcu.h:126-133`](../../linux/kernel/rcu/rcu.h#L126-L133)（v6.18.60）
+
 ```c
-// kernel/rcu/rcu.h:126-133（v6.18.60）
 static inline unsigned long rcu_seq_snap(unsigned long *sp)
 {
 	unsigned long s;
@@ -228,8 +236,9 @@ static inline unsigned long rcu_seq_snap(unsigned long *sp)
 
 ### 宽限期线程
 
+[`kernel/rcu/tree.c:2259-2292`](../../linux/kernel/rcu/tree.c#L2259-L2292)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2259-2292（v6.18.60）
 static int __noreturn rcu_gp_kthread(void *unused)
 {
 	rcu_bind_gp_kthread();
@@ -270,15 +279,17 @@ GP 线程是一个三阶段循环：等待有人请求宽限期（`RCU_GP_FLAG_I
 
 ### 阶段一：rcu_gp_init()
 
+[`kernel/rcu/tree.c:1852-1852`](../../linux/kernel/rcu/tree.c#L1852)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:1852-1852（v6.18.60）
 	rcu_seq_start(&rcu_state.gp_seq);
 ```
 
 `rcu_seq_start()` 把 `rcu_state.gp_seq` 加一，标志着新宽限期在全局层面开始。随后处理 CPU 热插拔带来的 `qsmaskinit` 变化（略），再按广度优先顺序初始化每个 `rcu_node`：
 
+[`kernel/rcu/tree.c:1952-1987`](../../linux/kernel/rcu/tree.c#L1952-L1987)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:1952-1987（v6.18.60）
 	WRITE_ONCE(rcu_state.gp_state, RCU_GP_INIT);
 	rcu_for_each_node_breadth_first(rnp) {
 		rcu_gp_slow(gp_init_delay);
@@ -323,8 +334,9 @@ GP 线程是一个三阶段循环：等待有人请求宽限期（`RCU_GP_FLAG_I
 
 **来源一：时钟中断。** 每个 tick 调用 `rcu_sched_clock_irq()`（由 `update_process_times()` 调用）：
 
+[`kernel/rcu/tree.c:2684-2713`](../../linux/kernel/rcu/tree.c#L2684-L2713)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2684-2713（v6.18.60）
 void rcu_sched_clock_irq(int user)
 {
 	unsigned long j;
@@ -357,8 +369,9 @@ void rcu_sched_clock_irq(int user)
 }
 ```
 
+[`kernel/rcu/tree_plugin.h:811-837`](../../linux/kernel/rcu/tree_plugin.h#L811-L837)（v6.18.60）
+
 ```c
-// kernel/rcu/tree_plugin.h:811-837（v6.18.60）
 static void rcu_flavor_sched_clock_irq(int user)
 {
 	struct task_struct *t = current;
@@ -392,8 +405,9 @@ static void rcu_flavor_sched_clock_irq(int user)
 
 **来源二：上下文切换。** `rcu_note_context_switch()` 在每次 `__schedule()` 中调用 `rcu_qs()`（7.9 节）：
 
+[`kernel/rcu/tree_plugin.h:298-309`](../../linux/kernel/rcu/tree_plugin.h#L298-L309)（v6.18.60）
+
 ```c
-// kernel/rcu/tree_plugin.h:298-309（v6.18.60）
 static void rcu_qs(void)
 {
 	RCU_LOCKDEP_WARN(preemptible(), "rcu_qs() invoked with preemption enabled!!!\n");
@@ -410,8 +424,9 @@ static void rcu_qs(void)
 
 `rcu_qs()` 只清除 per-CPU 的 `cpu_no_qs.b.norm` 标志，这是一次纯本地写。真正向树报告由 `rcu_core()` 在软中断中完成：`rcu_sched_clock_irq()` 末尾的 `rcu_pending()` 检查到有工作要做，就调用 `invoke_rcu_core()`：
 
+[`kernel/rcu/tree.c:2907-2915`](../../linux/kernel/rcu/tree.c#L2907-L2915)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2907-2915（v6.18.60）
 static void invoke_rcu_core(void)
 {
 	if (!cpu_online(smp_processor_id()))
@@ -423,8 +438,9 @@ static void invoke_rcu_core(void)
 }
 ```
 
+[`kernel/rcu/tree.c:2825-2865`](../../linux/kernel/rcu/tree.c#L2825-L2865)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2825-2865（v6.18.60）
 static __latent_entropy void rcu_core(void)
 {
 	unsigned long flags;
@@ -470,8 +486,9 @@ static __latent_entropy void rcu_core(void)
 
 `rcu_check_quiescent_state()` 先通过 `note_gp_changes()` 让本 CPU 注意到新宽限期，若此后已经记录了静止状态，就调用 `rcu_report_qs_rdp()`：
 
+[`kernel/rcu/tree.c:2431-2476`](../../linux/kernel/rcu/tree.c#L2431-L2476)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2431-2476（v6.18.60）
 rcu_report_qs_rdp(struct rcu_data *rdp)
 {
 	unsigned long flags;
@@ -522,8 +539,9 @@ rcu_report_qs_rdp(struct rcu_data *rdp)
 
 它在叶子节点锁下检查：本 CPU 的静止状态是否属于当前宽限期（`rdp->gp_seq == rnp->gp_seq`），若属于，就清除叶子 `qsmask` 中自己的位并向上传播：
 
+[`kernel/rcu/tree.c:2327-2374`](../../linux/kernel/rcu/tree.c#L2327-L2374)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2327-2374（v6.18.60）
 static void rcu_report_qs_rnp(unsigned long mask, struct rcu_node *rnp,
 			      unsigned long gps, unsigned long flags)
 	__releases(rnp->lock)
@@ -594,8 +612,9 @@ flowchart TB
 
 idle CPU 和运行在 NO_HZ_FULL 用户态的 CPU 没有时钟中断，也不发生上下文切换，永远不会主动报告。但它们处于"扩展静止状态"（Extended Quiescent State，EQS）——RCU 根本不关注它们。GP 线程负责代为检测：
 
+[`kernel/rcu/tree.c:2052-2105`](../../linux/kernel/rcu/tree.c#L2052-L2105)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2052-2105（v6.18.60）
 static noinline_for_stack void rcu_gp_fqs_loop(void)
 {
 	bool first_gp_fqs = true;
@@ -654,8 +673,9 @@ static noinline_for_stack void rcu_gp_fqs_loop(void)
 
 GP 线程在 `rcu_state.gp_wq` 上睡眠最多 `j` 个 jiffy（首次为 `jiffies_till_first_fqs`，在 `HZ=1000` 下默认为 3，见 `kernel/rcu/tree.h` 中的 `RCU_JIFFIES_TILL_FORCE_QS`），醒来后若根节点 `qsmask` 已清空就退出循环，否则调用 `rcu_gp_fqs()`：
 
+[`kernel/rcu/tree.c:2016-2047`](../../linux/kernel/rcu/tree.c#L2016-L2047)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2016-2047（v6.18.60）
 static void rcu_gp_fqs(bool first_time)
 {
 	int nr_fqs = READ_ONCE(rcu_state.nr_fqs_jiffies_stall);
@@ -692,8 +712,9 @@ static void rcu_gp_fqs(bool first_time)
 
 `force_qs_rnp()` 遍历所有叶子节点，对其中尚未报告的 CPU 调用给定函数。第一次扫描用 `rcu_watching_snap_save()` 读取每个 CPU 的上下文跟踪（context tracking）计数：
 
+[`kernel/rcu/tree.c:818-838`](../../linux/kernel/rcu/tree.c#L818-L838)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:818-838（v6.18.60）
 static int rcu_watching_snap_save(struct rcu_data *rdp)
 {
 	/*
@@ -717,12 +738,13 @@ static int rcu_watching_snap_save(struct rcu_data *rdp)
 }
 ```
 
-`ct_rcu_watching_cpu_acquire()` 读取目标 CPU 的"RCU 监视计数"，CPU 每次进入或退出 idle / 用户态（EQS）时它都会加一，奇偶性表示当前是否处于 EQS。若此刻对方就在 EQS 中，直接代它报告静止状态。后续扫描用 `rcu_watching_snap_recheck()` 比较计数是否变化——变了说明对方至少进出过一次 EQS，同样算作静止状态。对于一直在内核态运行、迟迟不报告的 CPU，`rcu_watching_snap_recheck()`（`kernel/rcu/tree.c:854`）会随宽限期年龄逐步升级手段：先设置 `rcu_urgent_qs`，让它在下次 tick 中强制重调度；再同时设置 `rcu_need_heavy_qs`；对 NO_HZ_FULL CPU 强制开启 tick；最后直接调用 `resched_cpu()` 向其发送重调度 IPI。
+`ct_rcu_watching_cpu_acquire()` 读取目标 CPU 的"RCU 监视计数"，CPU 每次进入或退出 idle / 用户态（EQS）时它都会加一，奇偶性表示当前是否处于 EQS。若此刻对方就在 EQS 中，直接代它报告静止状态。后续扫描用 `rcu_watching_snap_recheck()` 比较计数是否变化——变了说明对方至少进出过一次 EQS，同样算作静止状态。对于一直在内核态运行、迟迟不报告的 CPU，`rcu_watching_snap_recheck()`（[`kernel/rcu/tree.c:854`](../../linux/kernel/rcu/tree.c#L854)）会随宽限期年龄逐步升级手段：先设置 `rcu_urgent_qs`，让它在下次 tick 中强制重调度；再同时设置 `rcu_need_heavy_qs`；对 NO_HZ_FULL CPU 强制开启 tick；最后直接调用 `resched_cpu()` 向其发送重调度 IPI。
 
 ### 阶段三：rcu_gp_cleanup()
 
+[`kernel/rcu/tree.c:2176-2211`](../../linux/kernel/rcu/tree.c#L2176-L2211)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:2176-2211（v6.18.60）
 	new_gp_seq = rcu_state.gp_seq;
 	rcu_seq_end(&new_gp_seq);
 	rcu_for_each_node_breadth_first(rnp) {
@@ -767,8 +789,9 @@ static int rcu_watching_snap_save(struct rcu_data *rdp)
 
 每个 CPU 的回调挂在 `rdp->cblist` 中，这是一个分为 4 段的单链表：
 
+[`include/linux/rcu_segcblist.h:31-64`](../../linux/include/linux/rcu_segcblist.h#L31-L64)（v6.18.60）
+
 ```c
-// include/linux/rcu_segcblist.h:31-64（v6.18.60）
 /*
  * Index values for segments in rcu_segcblist structure.
  *
@@ -805,8 +828,9 @@ static int rcu_watching_snap_save(struct rcu_data *rdp)
 #define RCU_CBLIST_NSEGS	4
 ```
 
+[`include/linux/rcu_segcblist.h:190-201`](../../linux/include/linux/rcu_segcblist.h#L190-L201)（v6.18.60）
+
 ```c
-// include/linux/rcu_segcblist.h:190-201（v6.18.60）
 struct rcu_segcblist {
 	struct rcu_head *head;
 	struct rcu_head **tails[RCU_CBLIST_NSEGS];
@@ -834,8 +858,9 @@ struct rcu_segcblist {
 
 `call_rcu()` 把新回调追加到 `RCU_NEXT_TAIL` 段：
 
+[`kernel/rcu/tree.c:3094-3149`](../../linux/kernel/rcu/tree.c#L3094-L3149)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:3094-3149（v6.18.60）
 __call_rcu_common(struct rcu_head *head, rcu_callback_t func, bool lazy_in)
 {
 	static atomic_t doublefrees;
@@ -898,8 +923,9 @@ __call_rcu_common(struct rcu_head *head, rcu_callback_t func, bool lazy_in)
 
 - **加速**（`rcu_accelerate_cbs()`）：用 `rcu_seq_snap(&rcu_state.gp_seq)` 计算 NEXT 段回调需要等待的宽限期号，把它们并入已有的、等待同一宽限期号的段（或分配一个新段），必要时调用 `rcu_start_this_gp()` 请求宽限期。
 
+[`kernel/rcu/tree.c:1142-1179`](../../linux/kernel/rcu/tree.c#L1142-L1179)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:1142-1179（v6.18.60）
 static bool rcu_accelerate_cbs(struct rcu_node *rnp, struct rcu_data *rdp)
 {
 	unsigned long gp_seq_req;
@@ -940,16 +966,17 @@ static bool rcu_accelerate_cbs(struct rcu_node *rnp, struct rcu_data *rdp)
 }
 ```
 
-- **推进**（`rcu_advance_cbs()`，`kernel/rcu/tree.c:1218`）：根据叶子节点的 `gp_seq`，把等待的宽限期已经结束的段合并到 DONE 段。
+- **推进**（`rcu_advance_cbs()`，[`kernel/rcu/tree.c:1218`](../../linux/kernel/rcu/tree.c#L1218)）：根据叶子节点的 `gp_seq`，把等待的宽限期已经结束的段合并到 DONE 段。
 
 ### 执行回调
 
-`rcu_core()` 发现 DONE 段非空时调用 `rcu_do_batch()`（`kernel/rcu/tree.c:2528`）。它先在关中断的情况下把 DONE 段整体摘下，再逐个调用回调函数。为了不让软中断占用 CPU 过久，每批最多执行 `blimit` 个回调（默认 10，`kernel/rcu/tree.c:415-418`）；但当本 CPU 积压的回调超过 `qhimark`（默认 10000）时取消这一限制，同时受时间上限约束。剩余回调会再次触发 `invoke_rcu_core()`，或在 `ksoftirqd` 中继续。
+`rcu_core()` 发现 DONE 段非空时调用 `rcu_do_batch()`（[`kernel/rcu/tree.c:2528`](../../linux/kernel/rcu/tree.c#L2528)）。它先在关中断的情况下把 DONE 段整体摘下，再逐个调用回调函数。为了不让软中断占用 CPU 过久，每批最多执行 `blimit` 个回调（默认 10，[`kernel/rcu/tree.c:415-418`](../../linux/kernel/rcu/tree.c#L415-L418)）；但当本 CPU 积压的回调超过 `qhimark`（默认 10000）时取消这一限制，同时受时间上限约束。剩余回调会再次触发 `invoke_rcu_core()`，或在 `ksoftirqd` 中继续。
 
 ### synchronize_rcu()
 
+[`kernel/rcu/tree.c:3341-3356`](../../linux/kernel/rcu/tree.c#L3341-L3356)（v6.18.60）
+
 ```c
-// kernel/rcu/tree.c:3341-3356（v6.18.60）
 void synchronize_rcu(void)
 {
 	unsigned long flags;
@@ -968,10 +995,10 @@ void synchronize_rcu(void)
 	}
 ```
 
-`rcu_blocking_is_gp()`（`kernel/rcu/tree.c:3257`）只在系统启动早期（`rcu_scheduler_active` 仍为 `RCU_SCHEDULER_INACTIVE`）返回真，此时宽限期是"空的"，直接递增计数即可。正常情况下：
+`rcu_blocking_is_gp()`（[`kernel/rcu/tree.c:3257`](../../linux/kernel/rcu/tree.c#L3257)）只在系统启动早期（`rcu_scheduler_active` 仍为 `RCU_SCHEDULER_INACTIVE`）返回真，此时宽限期是"空的"，直接递增计数即可。正常情况下：
 
 - 若通过 `rcupdate.rcu_expedited` 等方式要求加速，调用 `synchronize_rcu_expedited()`：向所有尚未报告的 CPU 发送 IPI 强制检查，代价是对系统中所有 CPU 的打扰，延迟可降至数十微秒。
-- 否则调用 `synchronize_rcu_normal()`（`kernel/rcu/tree.c:3269`）。默认做法是 `wait_rcu_gp(call_rcu_hurry)`：挂一个唤醒自己的回调，再等待它被执行。较新的内核增加了另一种方式：把等待者加入 `rcu_state.srs_next` 无锁链表，由 GP 线程在宽限期结束时直接唤醒，避免在回调大量积压时被拖慢。是否启用由 `rcutree.rcu_normal_wake_from_gp` 控制，默认值 -1 表示在 CPU 数不超过 16 的系统上自动启用（`kernel/rcu/tree.c:1634-1638`）。
+- 否则调用 `synchronize_rcu_normal()`（[`kernel/rcu/tree.c:3269`](../../linux/kernel/rcu/tree.c#L3269)）。默认做法是 `wait_rcu_gp(call_rcu_hurry)`：挂一个唤醒自己的回调，再等待它被执行。较新的内核增加了另一种方式：把等待者加入 `rcu_state.srs_next` 无锁链表，由 GP 线程在宽限期结束时直接唤醒，避免在回调大量积压时被拖慢。是否启用由 `rcutree.rcu_normal_wake_from_gp` 控制，默认值 -1 表示在 CPU 数不超过 16 的系统上自动启用（[`kernel/rcu/tree.c:1634-1638`](../../linux/kernel/rcu/tree.c#L1634-L1638)）。
 
 ## 关键细节 / 设计考量
 
@@ -981,7 +1008,7 @@ void synchronize_rcu(void)
 
 ### 惰性 RCU
 
-`CONFIG_RCU_LAZY=y`（v6.2 引入）让 `call_rcu()` 挂上的"不着急"回调（如 `kfree_rcu()` 产生的）在卸载 CPU 上最多延迟 `LAZY_FLUSH_JIFFIES`（10 秒，`kernel/rcu/tree_nocb.h:245`）再批量请求宽限期，减少空闲系统上的唤醒次数，降低功耗。急迫的回调可用 `call_rcu_hurry()`。本书配置同时开启了 `CONFIG_RCU_LAZY_DEFAULT_OFF`，即默认不启用，需用启动参数 `rcutree.enable_rcu_lazy=1` 打开。
+`CONFIG_RCU_LAZY=y`（v6.2 引入）让 `call_rcu()` 挂上的"不着急"回调（如 `kfree_rcu()` 产生的）在卸载 CPU 上最多延迟 `LAZY_FLUSH_JIFFIES`（10 秒，[`kernel/rcu/tree_nocb.h:245`](../../linux/kernel/rcu/tree_nocb.h#L245)）再批量请求宽限期，减少空闲系统上的唤醒次数，降低功耗。急迫的回调可用 `call_rcu_hurry()`。本书配置同时开启了 `CONFIG_RCU_LAZY_DEFAULT_OFF`，即默认不启用，需用启动参数 `rcutree.enable_rcu_lazy=1` 打开。
 
 ### RCU CPU 停顿告警
 
@@ -1005,7 +1032,7 @@ cat /proc/$(pgrep -x rcu_preempt)/sched | grep -E 'nr_switches|sum_exec_runtime'
 
 ### 统计宽限期初始化与回调批处理
 
-本书配置未开启 `CONFIG_RCU_TRACE`，大多数 `rcu:` 跟踪点（`include/trace/events/rcu.h:10-14`）被编译为空，只有 `rcu:rcu_utilization` 与 `rcu:rcu_stall_warning` 可用。可以改用 kprobe：
+本书配置未开启 `CONFIG_RCU_TRACE`，大多数 `rcu:` 跟踪点（[`include/trace/events/rcu.h:10-14`](../../linux/include/trace/events/rcu.h#L10-L14)）被编译为空，只有 `rcu:rcu_utilization` 与 `rcu:rcu_stall_warning` 可用。可以改用 kprobe：
 
 ```bash
 sudo bpftrace -e '

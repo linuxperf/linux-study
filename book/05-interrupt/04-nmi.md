@@ -1,6 +1,6 @@
 # 5.4 NMI 与机器检查
 
-> **本节源码**：`arch/x86/entry/entry_64.S`、`arch/x86/kernel/nmi.c`、`arch/x86/include/asm/nmi.h`、`kernel/entry/common.c`、`include/linux/hardirq.h`、`arch/x86/kernel/apic/hw_nmi.c`、`kernel/watchdog_perf.c`、`arch/x86/kernel/cpu/mce/core.c`
+> **本节源码**：[`arch/x86/entry/entry_64.S`](../../linux/arch/x86/entry/entry_64.S)、[`arch/x86/kernel/nmi.c`](../../linux/arch/x86/kernel/nmi.c)、[`arch/x86/include/asm/nmi.h`](../../linux/arch/x86/include/asm/nmi.h)、[`kernel/entry/common.c`](../../linux/kernel/entry/common.c)、[`include/linux/hardirq.h`](../../linux/include/linux/hardirq.h)、[`arch/x86/kernel/apic/hw_nmi.c`](../../linux/arch/x86/kernel/apic/hw_nmi.c)、[`kernel/watchdog_perf.c`](../../linux/kernel/watchdog_perf.c)、[`arch/x86/kernel/cpu/mce/core.c`](../../linux/arch/x86/kernel/cpu/mce/core.c)
 > **关键函数**：`asm_exc_nmi()`、`exc_nmi()`、`default_do_nmi()`、`nmi_handle()`、`register_nmi_handler()`、`irqentry_nmi_enter()`、`paranoid_entry()`、`nmi_cpu_backtrace()`、`exc_machine_check()`、`do_machine_check()`
 > **前置知识**：5.1 x86_64 中断与异常体系、5.2 中断入口与出口、7.1 并发来源与执行上下文
 
@@ -30,10 +30,11 @@
 
 ### 入口汇编：三种情况
 
-`asm_exc_nmi` 不使用 `idtentry` 宏，而是单独手写（`arch/x86/entry/entry_64.S:1111-1474`）。它首先按来源分流：
+`asm_exc_nmi` 不使用 `idtentry` 宏，而是单独手写（[`arch/x86/entry/entry_64.S:1111-1474`](../../linux/arch/x86/entry/entry_64.S#L1111-L1474)）。它首先按来源分流：
+
+[`arch/x86/entry/entry_64.S:1153-1205`](../../linux/arch/x86/entry/entry_64.S#L1153-L1205)（v6.18.60）
 
 ```asm
-// arch/x86/entry/entry_64.S:1153-1205（v6.18.60）
 	ASM_CLAC
 	cld
 
@@ -97,8 +98,9 @@
 
 内核态 NMI 在 NMI 栈上构造了一个特殊的布局：
 
+[`arch/x86/entry/entry_64.S:1207-1247`](../../linux/arch/x86/entry/entry_64.S#L1207-L1247)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:1207-1247（v6.18.60）
 .Lnmi_from_kernel:
 	/*
 	 * Here's what our stack frame will look like:
@@ -152,8 +154,9 @@
 
 判断自己是否嵌套的逻辑如下：
 
+[`arch/x86/entry/entry_64.S:1260-1326`](../../linux/arch/x86/entry/entry_64.S#L1260-L1326)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:1260-1326（v6.18.60）
 	movq	$repeat_nmi, %rdx
 	cmpq	8(%rsp), %rdx
 	ja	1f
@@ -219,8 +222,9 @@ nested_nmi_out:
 
 第一次进入（`first_nmi`）时，复制 original 到 outermost，然后落入 `repeat_nmi`：
 
+[`arch/x86/entry/entry_64.S:1362-1412`](../../linux/arch/x86/entry/entry_64.S#L1362-L1412)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:1362-1412（v6.18.60）
 repeat_nmi:
 	ANNOTATE_NOENDBR // this code
 	/*
@@ -274,7 +278,7 @@ end_repeat_nmi:
 	call	exc_nmi
 ```
 
-出口处（`arch/x86/entry/entry_64.S:1440-1473`）先 `POP_REGS`，跳过 orig_ax 和 outermost 帧，然后 `std` 置 DF、清除"NMI executing"，最后对 iret 帧执行 `iretq`。如果期间来过嵌套 NMI，iret 帧已被改为指向 `repeat_nmi`，`iretq` 就会"返回"到那里再处理一轮；否则真正返回被打断的代码。
+出口处（[`arch/x86/entry/entry_64.S:1440-1473`](../../linux/arch/x86/entry/entry_64.S#L1440-L1473)）先 `POP_REGS`，跳过 orig_ax 和 outermost 帧，然后 `std` 置 DF、清除"NMI executing"，最后对 iret 帧执行 `iretq`。如果期间来过嵌套 NMI，iret 帧已被改为指向 `repeat_nmi`，`iretq` 就会"返回"到那里再处理一轮；否则真正返回被打断的代码。
 
 ```mermaid
 stateDiagram-v2
@@ -293,8 +297,9 @@ stateDiagram-v2
 
 普通入口用 `CS` 判断是否需要 `swapgs`，但对内核态 NMI 这不可靠：NMI 可能打断 `swapgs` 之前或之后的那一条指令，也可能打断已经切到用户 CR3、尚未 `sysret` 的返回路径。`paranoid_entry` 因此直接检查硬件状态：
 
+[`arch/x86/entry/entry_64.S:868-943`](../../linux/arch/x86/entry/entry_64.S#L868-L943)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:868-943（v6.18.60）
 SYM_CODE_START(paranoid_entry)
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
@@ -367,14 +372,15 @@ SYM_CODE_END(paranoid_entry)
 - **CR3**：无条件保存当前 CR3 到 `%r14` 并切换到内核 CR3，退出时原样恢复。
 - **GS**：在不支持 FSGSBASE 的 CPU 上，用 `rdmsr` 读 `MSR_GS_BASE`，利用"内核 GS 基址一定是负数（高半区地址）"的约定判断当前是否为内核值，结果存入 `%ebx` 供退出时决定是否 `swapgs`。在支持 FSGSBASE 的 CPU 上，用户可以把 GS 基址设成任意值（包括负数），约定失效，只能用 `rdgsbase` 保存当前值、从 GDT 中读出 CPU 编号（5.1 节 `setup_getcpu()`）查表得到内核 GS 基址并 `wrgsbase` 写入，退出时再写回保存的值。
 
-NMI 出口不使用 `paranoid_exit`，而是内联了相同的恢复逻辑（`arch/x86/entry/entry_64.S:1414-1441`），并且**不检查重调度**——NMI 不应设置 `NEED_RESCHED`，即便设置了也留给下一次普通中断处理。
+NMI 出口不使用 `paranoid_exit`，而是内联了相同的恢复逻辑（[`arch/x86/entry/entry_64.S:1414-1441`](../../linux/arch/x86/entry/entry_64.S#L1414-L1441)），并且**不检查重调度**——NMI 不应设置 `NEED_RESCHED`，即便设置了也留给下一次普通中断处理。
 
 ### exc_nmi：C 层的第二道防线
 
 汇编层只能防住"外层来自内核态"的嵌套。外层 NMI 来自用户态时已经切到任务栈，不受栈覆盖之害，但嵌套 NMI 仍会再次进入 C 处理函数。`exc_nmi()` 用一个 per-CPU 状态机处理这种情况：
 
+[`arch/x86/kernel/nmi.c:526-609`](../../linux/arch/x86/kernel/nmi.c#L526-L609)（v6.18.60）
+
 ```c
-// arch/x86/kernel/nmi.c:526-609（v6.18.60）
 enum nmi_states {
 	NMI_NOT_RUNNING = 0,
 	NMI_EXECUTING,
@@ -439,8 +445,9 @@ nmi_restart:
 
 `irqentry_nmi_enter()` 与普通中断入口的区别在于它从不检查"来自用户态"或"是否在 idle"，而是无条件调用 `ct_nmi_enter()`：
 
+[`kernel/entry/common.c:226-244`](../../linux/kernel/entry/common.c#L226-L244)（v6.18.60）
+
 ```c
-// kernel/entry/common.c:226-244（v6.18.60）
 irqentry_state_t noinstr irqentry_nmi_enter(struct pt_regs *regs)
 {
 	irqentry_state_t irq_state;
@@ -462,14 +469,15 @@ irqentry_state_t noinstr irqentry_nmi_enter(struct pt_regs *regs)
 }
 ```
 
-`__nmi_enter()`（`include/linux/hardirq.h:107-113`）给 `preempt_count` 同时加上 `NMI_OFFSET` 与 `HARDIRQ_OFFSET`，所以 NMI 中 `in_nmi()` 与 `in_hardirq()` 都为真（7.1 节）。`lockdep_off()` 关闭 lockdep 的锁跟踪，因为 NMI 中不应持有任何普通锁。`ct_nmi_enter()` 是上下文跟踪中专为 NMI 设计的版本：它只修改 per-CPU 的嵌套计数，不获取任何锁，可以在 RCU 自身的代码中途被调用。
+`__nmi_enter()`（[`include/linux/hardirq.h:107-113`](../../linux/include/linux/hardirq.h#L107-L113)）给 `preempt_count` 同时加上 `NMI_OFFSET` 与 `HARDIRQ_OFFSET`，所以 NMI 中 `in_nmi()` 与 `in_hardirq()` 都为真（7.1 节）。`lockdep_off()` 关闭 lockdep 的锁跟踪，因为 NMI 中不应持有任何普通锁。`ct_nmi_enter()` 是上下文跟踪中专为 NMI 设计的版本：它只修改 per-CPU 的嵌套计数，不获取任何锁，可以在 RCU 自身的代码中途被调用。
 
 ### default_do_nmi：确定 NMI 来源
 
 NMI 本身不携带"是谁发的"信息。内核只能逐个询问可能的来源：
 
+[`arch/x86/kernel/nmi.c:355-406`](../../linux/arch/x86/kernel/nmi.c#L355-L406)（v6.18.60）
+
 ```c
-// arch/x86/kernel/nmi.c:355-406（v6.18.60）
 static noinstr void default_do_nmi(struct pt_regs *regs)
 {
 	unsigned char reason = 0;
@@ -522,15 +530,16 @@ static noinstr void default_do_nmi(struct pt_regs *regs)
 处理顺序：
 
 1. **`NMI_LOCAL`**：本 CPU 本地 APIC 产生的 NMI——perf 计数器溢出、NMI IPI（调用栈打印、停机）、kgdb。这些只有本 CPU 能判断，必须最先处理。
-2. **外部原因**：读 I/O 端口 `0x61`（`x86_platform.get_nmi_reason()`）判断是否为 PCI SERR 或 IOCHK，由 `pci_serr_error()` / `io_check_error()` 处理。端口是全局共享的，用 `nmi_reason_lock` 串行化；获取锁时用 `trylock` 循环并调用 `run_crash_ipi_callback()`，避免与正在 panic 的 CPU 死锁（`arch/x86/kernel/nmi.c:416-419`）。
+2. **外部原因**：读 I/O 端口 `0x61`（`x86_platform.get_nmi_reason()`）判断是否为 PCI SERR 或 IOCHK，由 `pci_serr_error()` / `io_check_error()` 处理。端口是全局共享的，用 `nmi_reason_lock` 串行化；获取锁时用 `trylock` 循环并调用 `run_crash_ipi_callback()`，避免与正在 panic 的 CPU 死锁（[`arch/x86/kernel/nmi.c:416-419`](../../linux/arch/x86/kernel/nmi.c#L416-L419)）。
 3. **未知 NMI**：交给 `NMI_UNKNOWN` 链上的处理函数（如 Hyper-V、kgdb）做最后尝试；仍无人认领则打印 `Uhhuh. NMI received for unknown reason`，若设置了 `unknown_nmi_panic` 则 panic。
 
-**背靠背 NMI 与"吞掉"机制**：由于 NMI 最多锁存一个，两个几乎同时发生的 NMI 中第二个可能被丢弃，因此 `nmi_handle()` 总是遍历**整个**处理函数链（`arch/x86/kernel/nmi.c:151-168` 的注释）。但这又带来反向的问题：一次遍历处理了两个事件，而第二个事件对应的 NMI 仍处于锁存状态，随后到来时就没有人认领，被误报为"未知 NMI"。内核的折中是：若本次处理了多于一个事件，记下 `swallow_nmi`；若紧接着的下一个 NMI 与本次 RIP 相同（说明 CPU 中间没执行过别的代码，是背靠背的）且无人认领，就静默吞掉它。
+**背靠背 NMI 与"吞掉"机制**：由于 NMI 最多锁存一个，两个几乎同时发生的 NMI 中第二个可能被丢弃，因此 `nmi_handle()` 总是遍历**整个**处理函数链（[`arch/x86/kernel/nmi.c:151-168`](../../linux/arch/x86/kernel/nmi.c#L151-L168) 的注释）。但这又带来反向的问题：一次遍历处理了两个事件，而第二个事件对应的 NMI 仍处于锁存状态，随后到来时就没有人认领，被误报为"未知 NMI"。内核的折中是：若本次处理了多于一个事件，记下 `swallow_nmi`；若紧接着的下一个 NMI 与本次 RIP 相同（说明 CPU 中间没执行过别的代码，是背靠背的）且无人认领，就静默吞掉它。
 
 ### 注册 NMI 处理函数
 
+[`arch/x86/include/asm/nmi.h:37-57`](../../linux/arch/x86/include/asm/nmi.h#L37-L57)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/nmi.h:37-57（v6.18.60）
 enum {
 	NMI_LOCAL=0,
 	NMI_UNKNOWN,
@@ -554,19 +563,19 @@ struct nmiaction {
 };
 ```
 
-`register_nmi_handler()` 宏（`arch/x86/include/asm/nmi.h:78-87`）定义一个静态的 `nmiaction` 并挂到对应类型的链表上。处理函数返回认领的事件数（通常 0 或 1）。
+`register_nmi_handler()` 宏（[`arch/x86/include/asm/nmi.h:78-87`](../../linux/arch/x86/include/asm/nmi.h#L78-L87)）定义一个静态的 `nmiaction` 并挂到对应类型的链表上。处理函数返回认领的事件数（通常 0 或 1）。
 
-链表由 RCU 保护：`nmi_handle()` 中用 `list_for_each_entry_rcu()` 遍历，`unregister_nmi_handler()` 摘除后调用 `synchronize_rcu()` 等待所有正在执行的 NMI 结束（`arch/x86/kernel/nmi.c:208-235`）。这是 RCU 读者可以出现在 NMI 中的直接体现——读侧不需要任何锁，写侧在普通上下文中等待宽限期（7.9 节）。`nmi_check_duration()`（`arch/x86/kernel/nmi.c:113-128`）在单个处理函数运行超过 1 ms 时打印告警，阈值可通过 debugfs 的 `x86/nmi_longest_ns` 调整。
+链表由 RCU 保护：`nmi_handle()` 中用 `list_for_each_entry_rcu()` 遍历，`unregister_nmi_handler()` 摘除后调用 `synchronize_rcu()` 等待所有正在执行的 NMI 结束（[`arch/x86/kernel/nmi.c:208-235`](../../linux/arch/x86/kernel/nmi.c#L208-L235)）。这是 RCU 读者可以出现在 NMI 中的直接体现——读侧不需要任何锁，写侧在普通上下文中等待宽限期（7.9 节）。`nmi_check_duration()`（[`arch/x86/kernel/nmi.c:113-128`](../../linux/arch/x86/kernel/nmi.c#L113-L128)）在单个处理函数运行超过 1 ms 时打印告警，阈值可通过 debugfs 的 `x86/nmi_longest_ns` 调整。
 
 ## NMI 的主要用户
 
 | 用户 | 类型 | 注册位置 | 说明 |
 |---|---|---|---|
-| perf 采样 | `NMI_LOCAL` | `arch/x86/events/core.c:2141`，`"PMI"` | 性能计数器溢出时通过 LVT PC 投递 NMI |
+| perf 采样 | `NMI_LOCAL` | [`arch/x86/events/core.c:2141`](../../linux/arch/x86/events/core.c#L2141)，`"PMI"` | 性能计数器溢出时通过 LVT PC 投递 NMI |
 | 硬锁死检测 | 经由 perf | `kernel/watchdog_perf.c` | 基于周期性 perf 事件，见下文 |
-| 调用栈回溯 | `NMI_LOCAL` | `arch/x86/kernel/apic/hw_nmi.c:56`，`"arch_bt"` | sysrq-l、RCU stall、hung task 打印所有 CPU 栈 |
-| 停机 / kdump | `NMI_LOCAL` | `arch/x86/kernel/smp.c:145`，`crash_nmi_callback` 等 | 在 panic 或关机时让其他 CPU 停下 |
-| kgdb | `NMI_LOCAL` / `NMI_UNKNOWN` | `arch/x86/kernel/kgdb.c:605-610` | 进入调试器时停住其他 CPU |
+| 调用栈回溯 | `NMI_LOCAL` | [`arch/x86/kernel/apic/hw_nmi.c:56`](../../linux/arch/x86/kernel/apic/hw_nmi.c#L56)，`"arch_bt"` | sysrq-l、RCU stall、hung task 打印所有 CPU 栈 |
+| 停机 / kdump | `NMI_LOCAL` | [`arch/x86/kernel/smp.c:145`](../../linux/arch/x86/kernel/smp.c#L145)，`crash_nmi_callback` 等 | 在 panic 或关机时让其他 CPU 停下 |
+| kgdb | `NMI_LOCAL` / `NMI_UNKNOWN` | [`arch/x86/kernel/kgdb.c:605-610`](../../linux/arch/x86/kernel/kgdb.c#L605-L610) | 进入调试器时停住其他 CPU |
 
 *表 5-7：x86_64 上 NMI 的主要用户*
 
@@ -574,8 +583,9 @@ struct nmiaction {
 
 7.11 节介绍过软锁死与硬锁死检测。硬锁死指 CPU 长时间关中断不响应，此时普通的定时器中断无法运行，检测必须依赖 NMI。本书配置使用 `CONFIG_HARDLOCKUP_DETECTOR_PERF=y`：为每个 CPU 创建一个周期约为 `watchdog_thresh` 秒（默认 10 秒）的 CPU 周期计数事件，溢出时在 NMI 中调用回调：
 
+[`kernel/watchdog_perf.c:105-119`](../../linux/kernel/watchdog_perf.c#L105-L119)（v6.18.60）
+
 ```c
-// kernel/watchdog_perf.c:105-119（v6.18.60）
 static void watchdog_overflow_callback(struct perf_event *event,
 				       struct perf_sample_data *data,
 				       struct pt_regs *regs)
@@ -595,14 +605,15 @@ static void watchdog_overflow_callback(struct perf_event *event,
 
 `watchdog_hardlockup_check()`（`kernel/watchdog.c`）比较本 CPU 的 `hrtimer_interrupts` 计数是否自上次检查以来增加过。高精度定时器每 `watchdog_thresh * 2 / 5` 秒触发一次并递增该计数；如果在一个 NMI 周期内一次都没增加，说明定时器中断被长时间屏蔽，打印 `NMI watchdog: Watchdog detected hard LOCKUP on cpu N` 与寄存器、调用栈。
 
-`hw_nmi_get_sample_period()`（`arch/x86/kernel/apic/hw_nmi.c:27-30`）用 `cpu_khz * 1000 * watchdog_thresh` 作为周期数。CPU 降频时实际时间会更长，`CONFIG_HARDLOCKUP_CHECK_TIMESTAMP=y` 的 `watchdog_check_timestamp()` 用于过滤因 Turbo Boost 导致的过早触发。启用成功时启动日志会打印 `NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.`（`kernel/watchdog_perf.c:169`）；在 PMU 不可用或未向客户机暴露的虚拟机中，则打印 `NMI watchdog: Perf NMI watchdog permanently disabled`（`kernel/watchdog_perf.c:274`），硬锁死检测不工作。
+`hw_nmi_get_sample_period()`（[`arch/x86/kernel/apic/hw_nmi.c:27-30`](../../linux/arch/x86/kernel/apic/hw_nmi.c#L27-L30)）用 `cpu_khz * 1000 * watchdog_thresh` 作为周期数。CPU 降频时实际时间会更长，`CONFIG_HARDLOCKUP_CHECK_TIMESTAMP=y` 的 `watchdog_check_timestamp()` 用于过滤因 Turbo Boost 导致的过早触发。启用成功时启动日志会打印 `NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.`（[`kernel/watchdog_perf.c:169`](../../linux/kernel/watchdog_perf.c#L169)）；在 PMU 不可用或未向客户机暴露的虚拟机中，则打印 `NMI watchdog: Perf NMI watchdog permanently disabled`（[`kernel/watchdog_perf.c:274`](../../linux/kernel/watchdog_perf.c#L274)），硬锁死检测不工作。
 
 ### 调用栈回溯
 
 `arch_trigger_cpumask_backtrace()` 向目标 CPU 发送 NMI IPI：
 
+[`arch/x86/kernel/apic/hw_nmi.c:33-52`](../../linux/arch/x86/kernel/apic/hw_nmi.c#L33-L52)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/hw_nmi.c:33-52（v6.18.60）
 #ifdef arch_trigger_cpumask_backtrace
 static void nmi_raise_cpu_backtrace(cpumask_t *mask)
 {
@@ -633,8 +644,9 @@ NOKPROBE_SYMBOL(nmi_cpu_backtrace_handler);
 
 入口宏 `idtentry_mce_db` 与 #DB 相同（5.3 节），按来源分为两个 C 函数：
 
+[`arch/x86/kernel/cpu/mce/core.c:2078-2127`](../../linux/arch/x86/kernel/cpu/mce/core.c#L2078-L2127)（v6.18.60）
+
 ```c
-// arch/x86/kernel/cpu/mce/core.c:2078-2127（v6.18.60）
 static __always_inline void exc_machine_check_kernel(struct pt_regs *regs)
 {
 	irqentry_state_t irq_state;
@@ -687,11 +699,11 @@ DEFINE_IDTENTRY_MCE_USER(exc_machine_check)
 }
 ```
 
-`do_machine_check()`（`arch/x86/kernel/cpu/mce/core.c:1501`）读取各 MCA bank 的状态寄存器，用 `mce_severity()` 评估严重程度，然后：
+`do_machine_check()`（[`arch/x86/kernel/cpu/mce/core.c:1501`](../../linux/arch/x86/kernel/cpu/mce/core.c#L1501)）读取各 MCA bank 的状态寄存器，用 `mce_severity()` 评估严重程度，然后：
 
 - **不可恢复**：`mce_panic()`。
 - **用户态访问到坏页**（`ACTION_REQUIRED`）：不能在 #MC 上下文中处理内存（需要睡眠），用 `queue_task_work(..., kill_me_maybe)` 登记一个 task_work，返回用户态前执行 `memory_failure()`，隔离坏页并向进程发送 `SIGBUS`。
-- **内核态在可恢复位置访问到坏页**：例如 `copy_mc_to_kernel()` 或 `copy_from_user()`，这些指令在异常表中用 `EX_TYPE_*_MCE_SAFE` / `EX_TYPE_FAULT_MCE_SAFE` 登记过，`fixup_exception(regs, X86_TRAP_MC, 0, 0)` 修复后返回错误码（`arch/x86/kernel/cpu/mce/core.c:1670-1676`）。这使得读取文件时遇到内存坏块只会让该次 `read()` 失败，而不会让整个系统崩溃。
+- **内核态在可恢复位置访问到坏页**：例如 `copy_mc_to_kernel()` 或 `copy_from_user()`，这些指令在异常表中用 `EX_TYPE_*_MCE_SAFE` / `EX_TYPE_FAULT_MCE_SAFE` 登记过，`fixup_exception(regs, X86_TRAP_MC, 0, 0)` 修复后返回错误码（[`arch/x86/kernel/cpu/mce/core.c:1670-1676`](../../linux/arch/x86/kernel/cpu/mce/core.c#L1670-L1676)）。这使得读取文件时遇到内存坏块只会让该次 `read()` 失败，而不会让整个系统崩溃。
 
 可纠正错误（Corrected Error）不触发 #MC，而是由 CMCI（Corrected Machine Check Interrupt，`THRESHOLD_APIC_VECTOR` 等系统向量）或周期性轮询发现，经 `mcelog` / `rasdaemon` 等用户态工具上报。
 
@@ -743,7 +755,7 @@ sudo dmesg | grep -A20 'NMI backtrace'
 sudo bpftrace -e 'tracepoint:nmi:nmi_handler { @[ksym(args->handler)] = hist(args->delta_ns); } interval:s:10 { exit(); }'
 ```
 
-`nmi_handler` 跟踪点由 `nmi_handle()` 在每个处理函数返回后触发（`arch/x86/kernel/nmi.c:165`），可以看到 `perf_event_nmi_handler` 的处理时间分布。
+`nmi_handler` 跟踪点由 `nmi_handle()` 在每个处理函数返回后触发（[`arch/x86/kernel/nmi.c:165`](../../linux/arch/x86/kernel/nmi.c#L165)），可以看到 `perf_event_nmi_handler` 的处理时间分布。
 
 ## 小结
 

@@ -1,6 +1,6 @@
 # 7.5 读写锁与顺序锁
 
-> **本节源码**：`include/linux/rwlock_types.h`、`include/linux/rwlock_api_smp.h`、`include/asm-generic/qrwlock_types.h`、`include/asm-generic/qrwlock.h`、`kernel/locking/qrwlock.c`、`include/linux/seqlock_types.h`、`include/linux/seqlock.h`、`kernel/time/timekeeping.c`
+> **本节源码**：[`include/linux/rwlock_types.h`](../../linux/include/linux/rwlock_types.h)、[`include/linux/rwlock_api_smp.h`](../../linux/include/linux/rwlock_api_smp.h)、[`include/asm-generic/qrwlock_types.h`](../../linux/include/asm-generic/qrwlock_types.h)、[`include/asm-generic/qrwlock.h`](../../linux/include/asm-generic/qrwlock.h)、[`kernel/locking/qrwlock.c`](../../linux/kernel/locking/qrwlock.c)、[`include/linux/seqlock_types.h`](../../linux/include/linux/seqlock_types.h)、[`include/linux/seqlock.h`](../../linux/include/linux/seqlock.h)、[`kernel/time/timekeeping.c`](../../linux/kernel/time/timekeeping.c)
 > **关键函数**：`read_lock()`、`write_lock()`、`queued_read_lock()`、`queued_read_lock_slowpath()`、`queued_write_lock_slowpath()`、`read_seqcount_begin()`、`read_seqcount_retry()`、`write_seqlock()`、`write_seqcount_latch()`
 > **前置知识**：7.3 内存屏障与 Linux 内核内存模型、7.4 自旋锁与 qspinlock
 
@@ -17,8 +17,9 @@ x86_64 上的 `rwlock_t` 由 qrwlock 实现，它借用一把 qspinlock 作为�
 
 ### 核心数据结构
 
+[`include/linux/rwlock_types.h:25-34`](../../linux/include/linux/rwlock_types.h#L25-L34)（v6.18.60）
+
 ```c
-// include/linux/rwlock_types.h:25-34（v6.18.60）
 typedef struct {
 	arch_rwlock_t raw_lock;
 #ifdef CONFIG_DEBUG_SPINLOCK
@@ -31,8 +32,9 @@ typedef struct {
 } rwlock_t;
 ```
 
+[`include/asm-generic/qrwlock_types.h:13-27`](../../linux/include/asm-generic/qrwlock_types.h#L13-L27)（v6.18.60）
+
 ```c
-// include/asm-generic/qrwlock_types.h:13-27（v6.18.60）
 typedef struct qrwlock {
 	union {
 		atomic_t cnts;
@@ -50,8 +52,9 @@ typedef struct qrwlock {
 } arch_rwlock_t;
 ```
 
+[`include/asm-generic/qrwlock.h:24-31`](../../linux/include/asm-generic/qrwlock.h#L24-L31)（v6.18.60）
+
 ```c
-// include/asm-generic/qrwlock.h:24-31（v6.18.60）
 /*
  * Writer states & reader shift and bias.
  */
@@ -79,10 +82,11 @@ typedef struct qrwlock {
 
 ### 快速路径
 
-`read_lock()` / `write_lock()` 的通用层与自旋锁相同：先关抢占，再调用架构实现（`include/linux/rwlock_api_smp.h:147-152`、`206-211`）。架构层的快速路径：
+`read_lock()` / `write_lock()` 的通用层与自旋锁相同：先关抢占，再调用架构实现（[`include/linux/rwlock_api_smp.h:147-152`](../../linux/include/linux/rwlock_api_smp.h#L147-L152)、`206-211`）。架构层的快速路径：
+
+[`include/asm-generic/qrwlock.h:78-123`](../../linux/include/asm-generic/qrwlock.h#L78-L123)（v6.18.60）
 
 ```c
-// include/asm-generic/qrwlock.h:78-123（v6.18.60）
 static inline void queued_read_lock(struct qrwlock *lock)
 {
 	int cnts;
@@ -138,8 +142,9 @@ static inline void queued_write_unlock(struct qrwlock *lock)
 
 ### 慢速路径
 
+[`kernel/locking/qrwlock.c:21-46`](../../linux/kernel/locking/qrwlock.c#L21-L46)（v6.18.60）
+
 ```c
-// kernel/locking/qrwlock.c:21-46（v6.18.60）
 void __lockfunc queued_read_lock_slowpath(struct qrwlock *lock)
 {
 	/*
@@ -172,8 +177,9 @@ void __lockfunc queued_read_lock_slowpath(struct qrwlock *lock)
 
 普通读者先撤销刚才加上的偏置，到 `wait_lock` 上排队；轮到自己时重新加上偏置，并等待写者释放（`_QW_LOCKED` 清除）。注意它只等待"持锁"位，而不理会"等待"位——队首读者释放 `wait_lock` 后，后面排队的读者也会依次进来，使得一批连续的读者可以同时持锁。
 
+[`kernel/locking/qrwlock.c:52-77`](../../linux/kernel/locking/qrwlock.c#L52-L77)（v6.18.60）
+
 ```c
-// kernel/locking/qrwlock.c:52-77（v6.18.60）
 
 	/*
 	 * Signal the next one in queue to become queue head
@@ -206,7 +212,7 @@ void __lockfunc queued_write_lock_slowpath(struct qrwlock *lock)
 
 ### 使用场景与局限
 
-`rwlock_t` 最著名的使用者是 `tasklist_lock`（`kernel/fork.c:156`），保护全局任务链表。但读写锁有两个固有问题：
+`rwlock_t` 最著名的使用者是 `tasklist_lock`（[`kernel/fork.c:156`](../../linux/kernel/fork.c#L156)），保护全局任务链表。但读写锁有两个固有问题：
 
 1. **读者也要写锁字**。每个读者都对 `cnts` 做原子加减，CPU 越多，缓存行争抢越严重，读者"并行"的收益会被一致性流量抵消。
 2. **写者饥饿与延迟**。尽管 qrwlock 让写者在排队后阻挡新读者，但中断上下文读者仍可插队。
@@ -226,8 +232,9 @@ void __lockfunc queued_write_lock_slowpath(struct qrwlock *lock)
 
 ### 核心数据结构
 
+[`include/linux/seqlock_types.h:33-38`](../../linux/include/linux/seqlock_types.h#L33-L38)（v6.18.60）
+
 ```c
-// include/linux/seqlock_types.h:33-38（v6.18.60）
 typedef struct seqcount {
 	unsigned sequence;
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -236,8 +243,9 @@ typedef struct seqcount {
 } seqcount_t;
 ```
 
+[`include/linux/seqlock_types.h:62-72`](../../linux/include/linux/seqlock_types.h#L62-L72)（v6.18.60）
+
 ```c
-// include/linux/seqlock_types.h:62-72（v6.18.60）
 #define SEQCOUNT_LOCKNAME(lockname, locktype, preemptible, lockbase)	\
 typedef struct seqcount_##lockname {					\
 	seqcount_t		seqcount;				\
@@ -251,8 +259,9 @@ SEQCOUNT_LOCKNAME(mutex,        struct mutex,    true,     mutex)
 #undef SEQCOUNT_LOCKNAME
 ```
 
+[`include/linux/seqlock_types.h:84-91`](../../linux/include/linux/seqlock_types.h#L84-L91)（v6.18.60）
+
 ```c
-// include/linux/seqlock_types.h:84-91（v6.18.60）
 typedef struct {
 	/*
 	 * Make sure that readers don't starve writers on PREEMPT_RT: use
@@ -275,8 +284,9 @@ typedef struct {
 
 ### 读端
 
+[`include/linux/seqlock.h:271-300`](../../linux/include/linux/seqlock.h#L271-L300)（v6.18.60）
+
 ```c
-// include/linux/seqlock.h:271-300（v6.18.60）
 #define __read_seqcount_begin(s)					\
 ({									\
 	unsigned __seq;							\
@@ -309,10 +319,11 @@ typedef struct {
 })
 ```
 
-`seqprop_sequence()` 对普通 `seqcount_t` 是 `smp_load_acquire(&s->sequence)`（`include/linux/seqlock.h:209-212`），保证后续对数据的读取不会提前到读取序号之前。序号为奇数时用 `cpu_relax()` 自旋等待。
+`seqprop_sequence()` 对普通 `seqcount_t` 是 `smp_load_acquire(&s->sequence)`（[`include/linux/seqlock.h:209-212`](../../linux/include/linux/seqlock.h#L209-L212)），保证后续对数据的读取不会提前到读取序号之前。序号为奇数时用 `cpu_relax()` 自旋等待。
+
+[`include/linux/seqlock.h:385-412`](../../linux/include/linux/seqlock.h#L385-L412)（v6.18.60）
 
 ```c
-// include/linux/seqlock.h:385-412（v6.18.60）
 #define __read_seqcount_retry(s, start)					\
 	do___read_seqcount_retry(seqprop_const_ptr(s), start)
 
@@ -347,8 +358,9 @@ static inline int do_read_seqcount_retry(const seqcount_t *s, unsigned start)
 
 典型的读者写法是一个 do-while 循环，例如获取单调时钟：
 
+[`kernel/time/timekeeping.c:814-832`](../../linux/kernel/time/timekeeping.c#L814-L832)（v6.18.60）
+
 ```c
-// kernel/time/timekeeping.c:814-832（v6.18.60）
 ktime_t ktime_get(void)
 {
 	struct timekeeper *tk = &tk_core.timekeeper;
@@ -372,8 +384,9 @@ EXPORT_SYMBOL_GPL(ktime_get);
 
 ### 写端
 
+[`include/linux/seqlock.h:420-454`](../../linux/include/linux/seqlock.h#L420-L454)（v6.18.60）
+
 ```c
-// include/linux/seqlock.h:420-454（v6.18.60）
 #define raw_write_seqcount_begin(s)					\
 do {									\
 	if (seqprop_preemptible(s))					\
@@ -417,8 +430,9 @@ static inline void do_raw_write_seqcount_end(seqcount_t *s)
 
 `seqlock_t` 把写端的加锁与序号操作打包在一起：
 
+[`include/linux/seqlock.h:874-891`](../../linux/include/linux/seqlock.h#L874-L891)（v6.18.60）
+
 ```c
-// include/linux/seqlock.h:874-891（v6.18.60）
 static inline void write_seqlock(seqlock_t *sl)
 {
 	spin_lock(&sl->lock);
@@ -441,7 +455,7 @@ static inline void write_sequnlock(seqlock_t *sl)
 
 ### 写者优先与读者重试
 
-顺序锁天然偏向写者：写者从不等待读者。若写操作频繁，读者可能不断重试而"饿死"。为此 `seqlock_t` 提供了 `read_seqbegin_or_lock()` / `need_seqretry()`（`include/linux/seqlock.h:1127-1145`）：调用者第一次传入偶数（通常为 0），以无锁方式读；若 `need_seqretry()` 返回真，调用者把 `seq` 置为奇数（通常为 1）再循环一次，此时 `read_seqbegin_or_lock()` 直接获取内嵌自旋锁做"加锁读"，保证进展。
+顺序锁天然偏向写者：写者从不等待读者。若写操作频繁，读者可能不断重试而"饿死"。为此 `seqlock_t` 提供了 `read_seqbegin_or_lock()` / `need_seqretry()`（[`include/linux/seqlock.h:1127-1145`](../../linux/include/linux/seqlock.h#L1127-L1145)）：调用者第一次传入偶数（通常为 0），以无锁方式读；若 `need_seqretry()` 返回真，调用者把 `seq` 置为奇数（通常为 1）再循环一次，此时 `read_seqbegin_or_lock()` 直接获取内嵌自旋锁做"加锁读"，保证进展。
 
 ### 限制
 
@@ -452,8 +466,9 @@ static inline void write_sequnlock(seqlock_t *sl)
 
 `seqcount_latch_t` 维护数据的**两份副本**，用序号的最低位选择读者应该读哪一份：
 
+[`include/linux/seqlock.h:696-701`](../../linux/include/linux/seqlock.h#L696-L701)（v6.18.60）
+
 ```c
-// include/linux/seqlock.h:696-701（v6.18.60）
 static __always_inline void raw_write_seqcount_latch(seqcount_latch_t *s)
 {
 	smp_wmb();	/* prior stores before incrementing "sequence" */
@@ -464,8 +479,9 @@ static __always_inline void raw_write_seqcount_latch(seqcount_latch_t *s)
 
 时间子系统的 NMI 安全时钟 `ktime_get_mono_fast_ns()` 就是这样实现的：
 
+[`kernel/time/timekeeping.c:422-456`](../../linux/kernel/time/timekeeping.c#L422-L456)（v6.18.60）
+
 ```c
-// kernel/time/timekeeping.c:422-456（v6.18.60）
 static void update_fast_timekeeper(const struct tk_read_base *tkr,
 				   struct tk_fast *tkf)
 {
@@ -516,7 +532,7 @@ static __always_inline u64 __ktime_get_fast_ns(struct tk_fast *tkf)
 | 写者是否被读者阻塞 | 是 | 否 | 否（但释放需等宽限期） |
 | 读者能否读指针并解引用 | 能 | 不能 | 能 |
 | 读者可否在 NMI 中 | 否 | 仅 latch 变体 | 能 |
-| 典型用途 | `tasklist_lock` | 时间戳、`mm->mm_lock_seq`（`include/linux/mm_types.h:1080`） | 链表、哈希表、配置指针 |
+| 典型用途 | `tasklist_lock` | 时间戳、`mm->mm_lock_seq`（[`include/linux/mm_types.h:1080`](../../linux/include/linux/mm_types.h#L1080)） | 链表、哈希表、配置指针 |
 
 *表 7-5：三种读者友好原语的对比*
 

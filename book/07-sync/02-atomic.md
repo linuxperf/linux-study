@@ -1,6 +1,6 @@
 # 7.2 原子操作、位操作与引用计数
 
-> **本节源码**：`include/linux/types.h`、`arch/x86/include/asm/atomic.h`、`arch/x86/include/asm/cmpxchg.h`、`arch/x86/include/asm/alternative.h`、`include/linux/atomic/atomic-instrumented.h`、`include/linux/atomic/atomic-arch-fallback.h`、`arch/x86/include/asm/bitops.h`、`include/linux/refcount.h`、`lib/refcount.c`
+> **本节源码**：[`include/linux/types.h`](../../linux/include/linux/types.h)、[`arch/x86/include/asm/atomic.h`](../../linux/arch/x86/include/asm/atomic.h)、[`arch/x86/include/asm/cmpxchg.h`](../../linux/arch/x86/include/asm/cmpxchg.h)、[`arch/x86/include/asm/alternative.h`](../../linux/arch/x86/include/asm/alternative.h)、[`include/linux/atomic/atomic-instrumented.h`](../../linux/include/linux/atomic/atomic-instrumented.h)、[`include/linux/atomic/atomic-arch-fallback.h`](../../linux/include/linux/atomic/atomic-arch-fallback.h)、[`arch/x86/include/asm/bitops.h`](../../linux/arch/x86/include/asm/bitops.h)、[`include/linux/refcount.h`](../../linux/include/linux/refcount.h)、[`lib/refcount.c`](../../linux/lib/refcount.c)
 > **关键函数**：`atomic_inc()`、`atomic_try_cmpxchg()`、`raw_atomic_fetch_add_unless()`、`set_bit()`、`test_and_set_bit()`、`refcount_inc()`、`refcount_dec_and_test()`、`refcount_warn_saturate()`
 > **前置知识**：7.1 并发来源与执行上下文
 
@@ -16,8 +16,9 @@ C 语言的 `x++` 在机器层面是"读—改—写"三步。两个 CPU 同时�
 
 原子类型只是对整数的一层包装，目的是让编译器拒绝对它们做普通算术：
 
+[`include/linux/types.h:181-190`](../../linux/include/linux/types.h#L181-L190)（v6.18.60）
+
 ```c
-// include/linux/types.h:181-190（v6.18.60）
 typedef struct {
 	int counter;
 } atomic_t;
@@ -30,7 +31,7 @@ typedef struct {
 } atomic64_t;
 ```
 
-`atomic_long_t` 在 64 位架构上就是 `atomic64_t`（`include/linux/atomic/atomic-long.h:13`）。`refcount_t` 则再包一层 `atomic_t`：`typedef struct refcount_struct { atomic_t refs; } refcount_t;`（`include/linux/refcount_types.h`）。
+`atomic_long_t` 在 64 位架构上就是 `atomic64_t`（[`include/linux/atomic/atomic-long.h:13`](../../linux/include/linux/atomic/atomic-long.h#L13)）。`refcount_t` 则再包一层 `atomic_t`：`typedef struct refcount_struct { atomic_t refs; } refcount_t;`（`include/linux/refcount_types.h`）。
 
 | 类型 | 宽度 | 典型用途 |
 |---|---|---|
@@ -45,8 +46,9 @@ typedef struct {
 
 x86 对齐的普通读写本身就是原子的（不会被撕裂），因此 `atomic_read()` / `atomic_set()` 只需要阻止编译器优化：
 
+[`arch/x86/include/asm/atomic.h:17-36`](../../linux/arch/x86/include/asm/atomic.h#L17-L36)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/atomic.h:17-36（v6.18.60）
 static __always_inline int arch_atomic_read(const atomic_t *v)
 {
 	/*
@@ -73,8 +75,9 @@ static __always_inline void arch_atomic_add(int i, atomic_t *v)
 
 `LOCK_PREFIX` 并不是简单的字符串 `"lock "`：
 
+[`arch/x86/include/asm/alternative.h:44-57`](../../linux/arch/x86/include/asm/alternative.h#L44-L57)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/alternative.h:44-57（v6.18.60）
 #ifdef CONFIG_SMP
 #define LOCK_PREFIX_HERE \
 		".pushsection .smp_locks,\"a\"\n"	\
@@ -91,14 +94,15 @@ static __always_inline void arch_atomic_add(int i, atomic_t *v)
 #endif
 ```
 
-每个 `lock` 前缀的地址都被记录到 `.smp_locks` 段。如果系统只有一个 CPU 在线，`alternatives_smp_unlock()`（`arch/x86/kernel/alternative.c:2122`）会把这些 `lock` 前缀改写为 `ds` 前缀（一个无副作用的字节），省去锁定开销；CPU 热插拔上线第二个 CPU 时再改回来。
+每个 `lock` 前缀的地址都被记录到 `.smp_locks` 段。如果系统只有一个 CPU 在线，`alternatives_smp_unlock()`（[`arch/x86/kernel/alternative.c:2122`](../../linux/arch/x86/kernel/alternative.c#L2122)）会把这些 `lock` 前缀改写为 `ds` 前缀（一个无副作用的字节），省去锁定开销；CPU 热插拔上线第二个 CPU 时再改回来。
 
 ### 带返回值的操作与条件码
 
 许多原子操作需要返回"结果是否为零 / 为负"。x86 的算术指令会设置标志位，内核用 `GEN_UNARY_RMWcc()` / `GEN_BINARY_RMWcc()` 宏配合 GCC/Clang 的 `asm goto` 或 `=@cc` 输出约束，直接把标志位转成布尔值，避免再读一次内存：
 
+[`arch/x86/include/asm/atomic.h:65-97`](../../linux/arch/x86/include/asm/atomic.h#L65-L97)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/atomic.h:65-97（v6.18.60）
 static __always_inline bool arch_atomic_dec_and_test(atomic_t *v)
 {
 	return GEN_UNARY_RMWcc(LOCK_PREFIX "decl", v->counter, e);
@@ -140,8 +144,9 @@ static __always_inline int arch_atomic_fetch_add(int i, atomic_t *v)
 
 比较并交换（Compare-And-Swap，CAS）是构建任意原子操作的通用原语：若内存中的值等于预期，则写入新值。x86 的 `cmpxchg` 指令隐式使用 `%rax` 存放预期值，失败时把内存中的当前值写回 `%rax`。内核的 `try_cmpxchg()` 把这一特性暴露出来：
 
+[`arch/x86/include/asm/cmpxchg.h:158-215`](../../linux/arch/x86/include/asm/cmpxchg.h#L158-L215)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/cmpxchg.h:158-215（v6.18.60）
 #define __raw_try_cmpxchg(_ptr, _pold, _new, size, lock)		\
 ({									\
 	bool success;							\
@@ -204,8 +209,9 @@ static __always_inline int arch_atomic_fetch_add(int i, atomic_t *v)
 
 与传统的 `cmpxchg()`（返回旧值，由调用者比较）相比，`try_cmpxchg()` 有两个优点：返回值直接取自 `ZF` 标志（`=@ccz`）；失败时自动把当前值写回 `*_pold`，调用者的循环无需重新读取。典型写法如下：
 
+[`include/linux/atomic/atomic-arch-fallback.h:2420-2435`](../../linux/include/linux/atomic/atomic-arch-fallback.h#L2420-L2435)（v6.18.60）
+
 ```c
-// include/linux/atomic/atomic-arch-fallback.h:2420-2435（v6.18.60）
 static __always_inline int
 raw_atomic_fetch_add_unless(atomic_t *v, int a, int u)
 {
@@ -232,8 +238,9 @@ raw_atomic_fetch_add_unless(atomic_t *v, int a, int u)
 
 使用者调用的 `atomic_inc()` 位于自动生成的 `atomic-instrumented.h`：
 
+[`include/linux/atomic/atomic-instrumented.h:432-437`](../../linux/include/linux/atomic/atomic-instrumented.h#L432-L437)（v6.18.60）
+
 ```c
-// include/linux/atomic/atomic-instrumented.h:432-437（v6.18.60）
 static __always_inline void
 atomic_inc(atomic_t *v)
 {
@@ -260,14 +267,15 @@ atomic_inc(atomic_t *v)
 | `_release` 后缀 | 写部分具有 release 语义 |
 | `atomic_try_cmpxchg()` 失败时 | 无序 |
 
-在 x86 上，所有 `lock` 指令都是完全屏障，四种变体生成相同的代码；但在 arm64 等弱内存序架构上它们有实质差别。编写可移植代码时必须使用语义正确的最弱变体，并且不能假设"不返回值的原子操作有序"。需要时可以用 `smp_mb__before_atomic()` / `smp_mb__after_atomic()` 补齐，它们在 x86 上为空（`arch/x86/include/asm/barrier.h:75-76`）。内存序的完整讨论见 7.3 节。
+在 x86 上，所有 `lock` 指令都是完全屏障，四种变体生成相同的代码；但在 arm64 等弱内存序架构上它们有实质差别。编写可移植代码时必须使用语义正确的最弱变体，并且不能假设"不返回值的原子操作有序"。需要时可以用 `smp_mb__before_atomic()` / `smp_mb__after_atomic()` 补齐，它们在 x86 上为空（[`arch/x86/include/asm/barrier.h:75-76`](../../linux/arch/x86/include/asm/barrier.h#L75-L76)）。内存序的完整讨论见 7.3 节。
 
 ### 原子位操作
 
 `set_bit()`、`clear_bit()`、`test_and_set_bit()` 等对 `unsigned long` 位图中的单个位做原子操作：
 
+[`arch/x86/include/asm/bitops.h:51-69`](../../linux/arch/x86/include/asm/bitops.h#L51-L69)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/bitops.h:51-69（v6.18.60）
 static __always_inline void
 arch_set_bit(long nr, volatile unsigned long *addr)
 {
@@ -289,7 +297,7 @@ arch___set_bit(unsigned long nr, volatile unsigned long *addr)
 }
 ```
 
-位号为常量时编译为 `lock orb`，只操作所在字节；否则使用 `lock bts`。带双下划线的 `__set_bit()` 是非原子版本，用于调用者已持锁或对象尚未发布的场合。`test_and_set_bit()` 用 `lock bts` 并通过进位标志返回旧值（`arch/x86/include/asm/bitops.h:133-137`），是实现"位锁"（如 `PG_locked`、`bit_spin_lock()`）的基础。
+位号为常量时编译为 `lock orb`，只操作所在字节；否则使用 `lock bts`。带双下划线的 `__set_bit()` 是非原子版本，用于调用者已持锁或对象尚未发布的场合。`test_and_set_bit()` 用 `lock bts` 并通过进位标志返回旧值（[`arch/x86/include/asm/bitops.h:133-137`](../../linux/arch/x86/include/asm/bitops.h#L133-L137)），是实现"位锁"（如 `PG_locked`、`bit_spin_lock()`）的基础。
 
 按 `atomic_t.txt` 的约定，`set_bit()` 等不返回值的位操作是无序的；`test_and_set_bit()` 完全有序；`test_and_set_bit_lock()` / `clear_bit_unlock()` 分别提供 acquire / release 语义，专供位锁使用。
 
@@ -303,8 +311,9 @@ arch___set_bit(unsigned long nr, volatile unsigned long *addr)
 
 `include/linux/refcount.h` 开头的注释给出了设计：
 
+[`include/linux/refcount.h:8-27`](../../linux/include/linux/refcount.h#L8-L27)（v6.18.60）
+
 ```c
-// include/linux/refcount.h:8-27（v6.18.60）
  * Saturation semantics
  * ====================
  *
@@ -333,8 +342,9 @@ arch___set_bit(unsigned long nr, volatile unsigned long *addr)
 
 `refcount_inc()` 最终调用 `__refcount_add()`：
 
+[`include/linux/refcount.h:280-292`](../../linux/include/linux/refcount.h#L280-L292)（v6.18.60）
+
 ```c
-// include/linux/refcount.h:280-292（v6.18.60）
 static inline __signed_wrap
 void __refcount_add(int i, refcount_t *r, int *oldp)
 {
@@ -354,8 +364,9 @@ void __refcount_add(int i, refcount_t *r, int *oldp)
 
 `refcount_inc_not_zero()` 则必须用 cmpxchg 循环，因为它要保证"计数为 0 时绝不增加"——这是 RCU 查找中"拿到指针后尝试获取引用"的标准操作：
 
+[`include/linux/refcount.h:172-189`](../../linux/include/linux/refcount.h#L172-L189)（v6.18.60）
+
 ```c
-// include/linux/refcount.h:172-189（v6.18.60）
 
 static inline __must_check __signed_wrap
 bool __refcount_add_not_zero(int i, refcount_t *r, int *oldp)
@@ -378,8 +389,9 @@ bool __refcount_add_not_zero(int i, refcount_t *r, int *oldp)
 
 ### 减少：release + acquire
 
+[`include/linux/refcount.h:386-403`](../../linux/include/linux/refcount.h#L386-L403)（v6.18.60）
+
 ```c
-// include/linux/refcount.h:386-403（v6.18.60）
 static inline __must_check __signed_wrap
 bool __refcount_sub_and_test(int i, refcount_t *r, int *oldp)
 {
@@ -404,8 +416,9 @@ bool __refcount_sub_and_test(int i, refcount_t *r, int *oldp)
 
 一旦检测到异常，`refcount_warn_saturate()` 写入饱和值并打印告警：
 
+[`lib/refcount.c:13-36`](../../linux/lib/refcount.c#L13-L36)（v6.18.60）
+
 ```c
-// lib/refcount.c:13-36（v6.18.60）
 void refcount_warn_saturate(refcount_t *r, enum refcount_saturation_type t)
 {
 	refcount_set(r, REFCOUNT_SATURATED);
@@ -449,7 +462,7 @@ void refcount_warn_saturate(refcount_t *r, enum refcount_saturation_type t)
 
 ### 原子操作的代价
 
-一条 `lock` 指令在缓存行已位于本 CPU 时约需十几到二十几个周期；若缓存行在其他 CPU 上，需要经过一致性协议获取所有权，代价可达数百周期。多个 CPU 频繁修改同一个原子变量会造成缓存行"乒乓"。因此内核对高频计数器优先使用 per-CPU 计数（`percpu_counter`、`this_cpu_inc()`），对高频引用计数使用 `percpu_ref` 或 `rcuref_t`（v6.4 引入，`include/linux/types.h:193-195`），只在需要精确值时才汇总。
+一条 `lock` 指令在缓存行已位于本 CPU 时约需十几到二十几个周期；若缓存行在其他 CPU 上，需要经过一致性协议获取所有权，代价可达数百周期。多个 CPU 频繁修改同一个原子变量会造成缓存行"乒乓"。因此内核对高频计数器优先使用 per-CPU 计数（`percpu_counter`、`this_cpu_inc()`），对高频引用计数使用 `percpu_ref` 或 `rcuref_t`（v6.4 引入，[`include/linux/types.h:193-195`](../../linux/include/linux/types.h#L193-L195)），只在需要精确值时才汇总。
 
 ### 位操作的非原子版本
 

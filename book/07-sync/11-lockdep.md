@@ -1,6 +1,6 @@
 # 7.11 lockdep 与锁调试
 
-> **本节源码**：`include/linux/lockdep_types.h`、`include/linux/lockdep.h`、`include/linux/mutex.h`、`kernel/locking/lockdep.c`、`kernel/locking/lockdep_internals.h`、`kernel/locking/lockdep_states.h`、`kernel/hung_task.c`、`kernel/watchdog.c`
+> **本节源码**：[`include/linux/lockdep_types.h`](../../linux/include/linux/lockdep_types.h)、[`include/linux/lockdep.h`](../../linux/include/linux/lockdep.h)、[`include/linux/mutex.h`](../../linux/include/linux/mutex.h)、[`kernel/locking/lockdep.c`](../../linux/kernel/locking/lockdep.c)、[`kernel/locking/lockdep_internals.h`](../../linux/kernel/locking/lockdep_internals.h)、[`kernel/locking/lockdep_states.h`](../../linux/kernel/locking/lockdep_states.h)、[`kernel/hung_task.c`](../../linux/kernel/hung_task.c)、[`kernel/watchdog.c`](../../linux/kernel/watchdog.c)
 > **关键函数**：`lock_acquire()`、`__lock_acquire()`、`validate_chain()`、`check_deadlock()`、`check_prevs_add()`、`check_prev_add()`、`check_noncircular()`、`check_irq_usage()`、`check_wait_context()`
 > **前置知识**：7.4～7.8 各类锁的实现
 
@@ -18,8 +18,9 @@ lockdep 的关键抽象是**锁类**（Lock Class）：它不跟踪每个锁实�
 
 每把锁内嵌一个 `struct lockdep_map`（开启 `CONFIG_DEBUG_LOCK_ALLOC` 时），其中的 `key` 指向一个**静态分配**的 `lock_class_key`，锁类就以这个 key 的地址区分：
 
+[`include/linux/lockdep_types.h:186-198`](../../linux/include/linux/lockdep_types.h#L186-L198)（v6.18.60）
+
 ```c
-// include/linux/lockdep_types.h:186-198（v6.18.60）
 struct lockdep_map {
 	struct lock_class_key		*key;
 	struct lock_class		*class_cache[NR_LOCKDEP_CACHING_CLASSES];
@@ -37,8 +38,9 @@ struct lockdep_map {
 
 动态初始化的锁通过初始化宏中的 `static` 变量获得 key：
 
+[`include/linux/mutex.h:60-65`](../../linux/include/linux/mutex.h#L60-L65)（v6.18.60）
+
 ```c
-// include/linux/mutex.h:60-65（v6.18.60）
 #define mutex_init(mutex)						\
 do {									\
 	static struct lock_class_key __key;				\
@@ -51,8 +53,9 @@ do {									\
 
 ### 锁类与依赖图
 
+[`include/linux/lockdep_types.h:98-140`](../../linux/include/linux/lockdep_types.h#L98-L140)（v6.18.60）
+
 ```c
-// include/linux/lockdep_types.h:98-140（v6.18.60）
 struct lock_class {
 	/*
 	 * class-hash:
@@ -106,8 +109,9 @@ struct lock_class {
 
 每个任务在 `task_struct` 中维护一个持有锁的栈 `held_locks[]`（深度 `lockdep_depth`），每项为：
 
+[`include/linux/lockdep_types.h:206-258`](../../linux/include/linux/lockdep_types.h#L206-L258)（v6.18.60）
+
 ```c
-// include/linux/lockdep_types.h:206-258（v6.18.60）
 struct held_lock {
 	/*
 	 * One-way hash of the dependency chain up to this point. We
@@ -189,8 +193,9 @@ spin_lock() / mutex_lock() / ...
 
 ### validate_chain()：只验证新链
 
+[`kernel/locking/lockdep.c:3889-3948`](../../linux/kernel/locking/lockdep.c#L3889-L3948)（v6.18.60）
+
 ```c
-// kernel/locking/lockdep.c:3889-3948（v6.18.60）
 static int validate_chain(struct task_struct *curr,
 			  struct held_lock *hlock,
 			  int chain_head, u64 chain_key)
@@ -257,8 +262,9 @@ trylock 不会造成等待，因此不添加依赖（但仍压栈）。只有 `l
 
 ### 检查一：递归加锁
 
+[`kernel/locking/lockdep.c:3085-3125`](../../linux/kernel/locking/lockdep.c#L3085-L3125)（v6.18.60）
+
 ```c
-// kernel/locking/lockdep.c:3085-3125（v6.18.60）
 check_deadlock(struct task_struct *curr, struct held_lock *next)
 {
 	struct lock_class *class;
@@ -302,12 +308,13 @@ check_deadlock(struct task_struct *curr, struct held_lock *next)
 }
 ```
 
-如果栈中已经持有**同一类**的锁，通常意味着递归加锁或同类锁嵌套，会被报告为 "possible recursive locking detected"。两种合法情况被排除：递归读锁（`read == 2`）；通过 `nest_lock` 声明了外层锁串行化的嵌套（如 `mm_take_all_locks()` 在持有 `mmap_lock` 时用 `down_write_nest_lock()` 获取所有 anon_vma 与 `i_mmap_rwsem`，`mm/vma.c:2157`、`2187`）。确实需要嵌套获取同类锁的代码（如按地址顺序锁住两个 inode）应使用 `mutex_lock_nested(lock, subclass)` 等接口为内层锁指定不同的子类。
+如果栈中已经持有**同一类**的锁，通常意味着递归加锁或同类锁嵌套，会被报告为 "possible recursive locking detected"。两种合法情况被排除：递归读锁（`read == 2`）；通过 `nest_lock` 声明了外层锁串行化的嵌套（如 `mm_take_all_locks()` 在持有 `mmap_lock` 时用 `down_write_nest_lock()` 获取所有 anon_vma 与 `i_mmap_rwsem`，[`mm/vma.c:2157`](../../linux/mm/vma.c#L2157)、`2187`）。确实需要嵌套获取同类锁的代码（如按地址顺序锁住两个 inode）应使用 `mutex_lock_nested(lock, subclass)` 等接口为内层锁指定不同的子类。
 
 ### 检查二：依赖环
 
+[`kernel/locking/lockdep.c:3149-3198`](../../linux/kernel/locking/lockdep.c#L3149-L3198)（v6.18.60）
+
 ```c
-// kernel/locking/lockdep.c:3149-3198（v6.18.60）
 static int
 check_prev_add(struct task_struct *curr, struct held_lock *prev,
 	       struct held_lock *next, u16 distance,
@@ -369,8 +376,9 @@ check_prev_add(struct task_struct *curr, struct held_lock *prev,
 
 `check_noncircular()` 用广度优先搜索实现：
 
+[`kernel/locking/lockdep.c:2177-2190`](../../linux/kernel/locking/lockdep.c#L2177-L2190)（v6.18.60）
+
 ```c
-// kernel/locking/lockdep.c:2177-2190（v6.18.60）
 check_noncircular(struct held_lock *src, struct held_lock *target,
 		  struct lock_trace **const trace)
 {
@@ -397,8 +405,9 @@ check_noncircular(struct held_lock *src, struct held_lock *target,
 
 ### 检查四：等待上下文
 
+[`include/linux/lockdep_types.h:17-31`](../../linux/include/linux/lockdep_types.h#L17-L31)（v6.18.60）
+
 ```c
-// include/linux/lockdep_types.h:17-31（v6.18.60）
 enum lockdep_wait_type {
 	LD_WAIT_INV = 0,	/* not checked, catch all */
 
@@ -416,8 +425,9 @@ enum lockdep_wait_type {
 };
 ```
 
+[`kernel/locking/lockdep.c:4880-4933`](../../linux/kernel/locking/lockdep.c#L4880-L4933)（v6.18.60）
+
 ```c
-// kernel/locking/lockdep.c:4880-4933（v6.18.60）
 static int check_wait_context(struct task_struct *curr, struct held_lock *next)
 {
 	u8 next_inner = hlock_class(next)->wait_type_inner;
@@ -487,7 +497,7 @@ static int check_wait_context(struct task_struct *curr, struct held_lock *next)
 | `/proc/lockdep_stats` | 锁类、依赖、链的数量与上限 |
 | `/proc/lock_stat` | 需要 `CONFIG_LOCK_STAT`：每个锁类的竞争次数、等待与持有时间 |
 
-lockdep 的所有数据结构都是静态数组，容量由 `MAX_LOCKDEP_KEYS`（8192 个锁类）、`MAX_LOCKDEP_ENTRIES`（`1 << CONFIG_LOCKDEP_BITS` 条依赖，`kernel/locking/lockdep_internals.h:104`）等决定。耗尽时打印 "BUG: MAX_LOCKDEP_ENTRIES too low!" 并**永久关闭** lockdep（`debug_locks = 0`）。同样，lockdep 报告第一个问题后也会自行关闭，后续问题不再报告——修复第一个报告后需要重新测试。
+lockdep 的所有数据结构都是静态数组，容量由 `MAX_LOCKDEP_KEYS`（8192 个锁类）、`MAX_LOCKDEP_ENTRIES`（`1 << CONFIG_LOCKDEP_BITS` 条依赖，[`kernel/locking/lockdep_internals.h:104`](../../linux/kernel/locking/lockdep_internals.h#L104)）等决定。耗尽时打印 "BUG: MAX_LOCKDEP_ENTRIES too low!" 并**永久关闭** lockdep（`debug_locks = 0`）。同样，lockdep 报告第一个问题后也会自行关闭，后续问题不再报告——修复第一个报告后需要重新测试。
 
 ## 生产环境中的锁问题诊断
 
@@ -499,7 +509,7 @@ lockdep 开销较大（加锁路径慢数倍、额外内存数十 MB），通常
 
 ### 软锁死与硬锁死检测
 
-`CONFIG_SOFTLOCKUP_DETECTOR=y`：每个 CPU 上的高精度定时器检查 `watchdog/N`（stopper）任务是否在 `2 × watchdog_thresh`（默认 20 秒，`kernel/watchdog.c:49`）内得到运行；若否，说明该 CPU 长时间在内核态不可调度（如持自旋锁死循环），报告 "BUG: soft lockup"。
+`CONFIG_SOFTLOCKUP_DETECTOR=y`：每个 CPU 上的高精度定时器检查 `watchdog/N`（stopper）任务是否在 `2 × watchdog_thresh`（默认 20 秒，[`kernel/watchdog.c:49`](../../linux/kernel/watchdog.c#L49)）内得到运行；若否，说明该 CPU 长时间在内核态不可调度（如持自旋锁死循环），报告 "BUG: soft lockup"。
 
 `CONFIG_HARDLOCKUP_DETECTOR=y`（本书配置使用基于 perf NMI 的实现）：用 NMI 检查定时器中断是否仍在递增，若 CPU 长时间关中断不响应，报告 "Watchdog detected hard LOCKUP"。
 

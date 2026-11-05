@@ -1,6 +1,6 @@
 # 4.2 内存初始化：从 memblock 到伙伴系统
 
-> **本节源码**：`arch/x86/kernel/setup.c`、`arch/x86/kernel/e820.c`、`arch/x86/mm/init.c`、`arch/x86/mm/init_64.c`、`mm/memblock.c`、`mm/sparse.c`、`mm/mm_init.c`、`mm/page_alloc.c`
+> **本节源码**：[`arch/x86/kernel/setup.c`](../../linux/arch/x86/kernel/setup.c)、[`arch/x86/kernel/e820.c`](../../linux/arch/x86/kernel/e820.c)、[`arch/x86/mm/init.c`](../../linux/arch/x86/mm/init.c)、[`arch/x86/mm/init_64.c`](../../linux/arch/x86/mm/init_64.c)、[`mm/memblock.c`](../../linux/mm/memblock.c)、[`mm/sparse.c`](../../linux/mm/sparse.c)、[`mm/mm_init.c`](../../linux/mm/mm_init.c)、[`mm/page_alloc.c`](../../linux/mm/page_alloc.c)
 > **关键函数**：`e820__memblock_setup()`、`memblock_alloc_range_nid()`、`init_mem_mapping()`、`sparse_init()`、`free_area_init()`、`build_zonelists()`、`memblock_free_all()`、`__free_pages_core()`
 > **前置知识**：4.1 物理内存模型
 
@@ -41,8 +41,9 @@ start_kernel()                                    init/main.c:870
 
 memblock 把物理内存描述为两组区间：`memory`（所有可用内存）与 `reserved`（已被占用的部分）。空闲内存即 `memory − reserved`。
 
+[`include/linux/memblock.h:73-110`](../../linux/include/linux/memblock.h#L73-L110)（v6.18.60，删去注释）
+
 ```c
-// include/linux/memblock.h:73-110（v6.18.60，删去注释）
 struct memblock_region {
 	phys_addr_t base;
 	phys_addr_t size;
@@ -70,8 +71,9 @@ struct memblock {
 
 全局实例 `memblock` 使用静态数组作为初始存储，因此在任何动态分配器可用之前就能工作：
 
+[`mm/memblock.c:122-139`](../../linux/mm/memblock.c#L122-L139)（v6.18.60，省略 CONFIG_HAVE_MEMBLOCK_PHYS_MAP 相关代码）
+
 ```c
-// mm/memblock.c:122-139（v6.18.60，省略 CONFIG_HAVE_MEMBLOCK_PHYS_MAP 相关代码）
 static struct memblock_region memblock_memory_init_regions[INIT_MEMBLOCK_MEMORY_REGIONS] __initdata_memblock;
 static struct memblock_region memblock_reserved_init_regions[INIT_MEMBLOCK_RESERVED_REGIONS] __initdata_memblock;
 ...
@@ -89,14 +91,15 @@ struct memblock memblock __initdata_memblock = {
 };
 ```
 
-`INIT_MEMBLOCK_REGIONS` 为 128（`mm/memblock.c:31`）。当区间数超过数组容量时，memblock 可以用自身分配一块更大的数组并迁移过去，但前提是调用过 `memblock_allow_resize()`。`__initdata_memblock` 表示这些数据在 x86_64 上（未定义 `CONFIG_ARCH_KEEP_MEMBLOCK`）启动完成后会被丢弃。
+`INIT_MEMBLOCK_REGIONS` 为 128（[`mm/memblock.c:31`](../../linux/mm/memblock.c#L31)）。当区间数超过数组容量时，memblock 可以用自身分配一块更大的数组并迁移过去，但前提是调用过 `memblock_allow_resize()`。`__initdata_memblock` 表示这些数据在 x86_64 上（未定义 `CONFIG_ARCH_KEEP_MEMBLOCK`）启动完成后会被丢弃。
 
 ### 从 e820 到 memblock
 
 BIOS/UEFI 通过 e820 表告诉内核物理内存布局（第 1 章）。`e820__memblock_setup()` 遍历这张表，把 `E820_TYPE_RAM` 类型的区间加入 `memblock.memory`：
 
+[`arch/x86/kernel/e820.c:1273-1300`](../../linux/arch/x86/kernel/e820.c#L1273-L1300)（v6.18.60，节选）
+
 ```c
-// arch/x86/kernel/e820.c:1273-1300（v6.18.60，节选）
 	memblock_set_current_limit(ISA_END_ADDRESS);
 	...
 	memblock_allow_resize();
@@ -118,14 +121,15 @@ BIOS/UEFI 通过 e820 表告诉内核物理内存布局（第 1 章）。`e820__
 	}
 ```
 
-注意 `current_limit` 被设为 `ISA_END_ADDRESS`（1 MB）：此时只有低 1 MB 和内核镜像确定已被映射，memblock 分配出的内存必须能被立即访问，所以要等直接映射建立后再放开限制。在此之前，内核镜像、initrd、BIOS 数据区等已经由 `early_reserve_memory()`（`arch/x86/kernel/setup.c:798`）等函数加入 `memblock.reserved`。
+注意 `current_limit` 被设为 `ISA_END_ADDRESS`（1 MB）：此时只有低 1 MB 和内核镜像确定已被映射，memblock 分配出的内存必须能被立即访问，所以要等直接映射建立后再放开限制。在此之前，内核镜像、initrd、BIOS 数据区等已经由 `early_reserve_memory()`（[`arch/x86/kernel/setup.c:798`](../../linux/arch/x86/kernel/setup.c#L798)）等函数加入 `memblock.reserved`。
 
 ### 分配
 
 memblock 的分配只是在 `memory − reserved` 中找一段满足对齐要求的空闲区间，并将其加入 `reserved`：
 
+[`mm/memblock.c:1473-1518`](../../linux/mm/memblock.c#L1473-L1518)（v6.18.60，节选）
+
 ```c
-// mm/memblock.c:1473-1518（v6.18.60，节选）
 phys_addr_t __init memblock_alloc_range_nid(phys_addr_t size,
 					phys_addr_t align, phys_addr_t start,
 					phys_addr_t end, int nid,
@@ -158,8 +162,9 @@ again:
 
 查找方向由 `bottom_up` 决定，默认自顶向下（从高地址开始找），这样可以把启动期分配集中在高端，保护稀缺的低端内存（如 DMA 区）：
 
+[`mm/memblock.c:307-327`](../../linux/mm/memblock.c#L307-L327)（v6.18.60）
+
 ```c
-// mm/memblock.c:307-327（v6.18.60）
 static phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
 					phys_addr_t align, phys_addr_t start,
 					phys_addr_t end, int nid,
@@ -183,14 +188,15 @@ static phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
 }
 ```
 
-启用内存热插拔且指定了 `movable_node` 启动参数时，`e820__memblock_setup()` 会切换为自底向上（`arch/x86/kernel/e820.c:1265-1266`），让内核数据尽量靠近内核镜像，避免落在可热拔的内存上。
+启用内存热插拔且指定了 `movable_node` 启动参数时，`e820__memblock_setup()` 会切换为自底向上（[`arch/x86/kernel/e820.c:1265-1266`](../../linux/arch/x86/kernel/e820.c#L1265-L1266)），让内核数据尽量靠近内核镜像，避免落在可热拔的内存上。
 
 ## 建立直接映射
 
 memblock 交出的是物理地址，内核要访问它们，必须先在页表中建立映射。`init_mem_mapping()` 把 `[0, max_pfn)` 的全部物理内存线性映射到 `PAGE_OFFSET` 起始的直接映射区：
 
+[`arch/x86/mm/init.c:759-797`](../../linux/arch/x86/mm/init.c#L759-L797)（v6.18.60，节选）
+
 ```c
-// arch/x86/mm/init.c:759-797（v6.18.60，节选）
 void __init init_mem_mapping(void)
 {
 	unsigned long end;
@@ -224,11 +230,11 @@ void __init init_mem_mapping(void)
 
 `probe_page_size_mask()` 检查 CPU 是否支持 2 MB / 1 GB 大页，直接映射会尽可能使用大页以减少页表开销和 TLB 缺失。映射建立的过程存在一个自举问题：映射新内存需要分配页表页，而页表页本身必须位于已映射的内存中。`memory_map_top_down()` 的策略是先映射高端一小块，用它来放页表，再逐步扩大映射范围。
 
-建立完成后，`setup_arch()` 调用 `memblock_set_current_limit(get_max_mapped())`（`arch/x86/kernel/setup.c:1150`），memblock 从此可以分配任意已映射的内存。
+建立完成后，`setup_arch()` 调用 `memblock_set_current_limit(get_max_mapped())`（[`arch/x86/kernel/setup.c:1150`](../../linux/arch/x86/kernel/setup.c#L1150)），memblock 从此可以分配任意已映射的内存。
 
 ## NUMA 初始化
 
-`initmem_init()`（`arch/x86/mm/init_64.c:832`）调用 `x86_numa_init()`（`arch/x86/mm/numa.c:225`），依次尝试从 ACPI SRAT 表（`CONFIG_ACPI_NUMA`）、AMD 北桥等来源获取"哪段物理内存属于哪个节点"，然后用 `memblock_set_node()` 把节点号写入每个 `memblock_region` 的 `nid` 字段，并为每个在线节点分配 `pg_data_t`（`alloc_node_data()`）。所有方法都失败时回退到 `dummy_numa_init()`，把全部内存放入节点 0。节点间距离来自 ACPI SLIT 表，`build_zonelists()` 会用到它。
+`initmem_init()`（[`arch/x86/mm/init_64.c:832`](../../linux/arch/x86/mm/init_64.c#L832)）调用 `x86_numa_init()`（[`arch/x86/mm/numa.c:225`](../../linux/arch/x86/mm/numa.c#L225)），依次尝试从 ACPI SRAT 表（`CONFIG_ACPI_NUMA`）、AMD 北桥等来源获取"哪段物理内存属于哪个节点"，然后用 `memblock_set_node()` 把节点号写入每个 `memblock_region` 的 `nid` 字段，并为每个在线节点分配 `pg_data_t`（`alloc_node_data()`）。所有方法都失败时回退到 `dummy_numa_init()`，把全部内存放入节点 0。节点间距离来自 ACPI SLIT 表，`build_zonelists()` 会用到它。
 
 ## 初始化 `struct page`
 
@@ -236,8 +242,9 @@ void __init init_mem_mapping(void)
 
 `paging_init()` 先调用 `sparse_init()`：
 
+[`arch/x86/mm/init_64.c:837-851`](../../linux/arch/x86/mm/init_64.c#L837-L851)（v6.18.60）
+
 ```c
-// arch/x86/mm/init_64.c:837-851（v6.18.60）
 void __init paging_init(void)
 {
 	sparse_init();
@@ -257,8 +264,9 @@ void __init paging_init(void)
 
 `sparse_init()` 先用 `memblocks_present()` 根据 memblock 标记哪些 128 MB 段存在内存，然后按节点分组，为每个存在的段填充 vmemmap：
 
+[`mm/sparse.c:594-624`](../../linux/mm/sparse.c#L594-L624)（v6.18.60，节选）
+
 ```c
-// mm/sparse.c:594-624（v6.18.60，节选）
 void __init sparse_init(void)
 {
 	unsigned long pnum_end, pnum_begin, map_count = 1;
@@ -288,7 +296,7 @@ void __init sparse_init(void)
 	sparse_init_nid(nid_begin, pnum_begin, pnum_end, map_count);
 ```
 
-`sparse_init_nid()` 对每个段调用 `__populate_section_memmap()`（`mm/sparse-vmemmap.c:508`），最终进入 x86 的 `vmemmap_populate()`（`arch/x86/mm/init_64.c:1577`）：在 vmemmap 虚拟区间为这一段的 `struct page` 建立页表，并从**本节点**分配物理页作为后备存储（优先用 2 MB 大页）。一个 128 MB 段有 32768 个页，对应 32768 × 64 B = 2 MB 的 `struct page`，恰好一个 PMD 大页。
+`sparse_init_nid()` 对每个段调用 `__populate_section_memmap()`（[`mm/sparse-vmemmap.c:508`](../../linux/mm/sparse-vmemmap.c#L508)），最终进入 x86 的 `vmemmap_populate()`（[`arch/x86/mm/init_64.c:1577`](../../linux/arch/x86/mm/init_64.c#L1577)）：在 vmemmap 虚拟区间为这一段的 `struct page` 建立页表，并从**本节点**分配物理页作为后备存储（优先用 2 MB 大页）。一个 128 MB 段有 32768 个页，对应 32768 × 64 B = 2 MB 的 `struct page`，恰好一个 PMD 大页。
 
 注意这一步只是分配了内存，`struct page` 的内容尚未初始化。
 
@@ -296,8 +304,9 @@ void __init sparse_init(void)
 
 `zone_sizes_init()` 计算出每个 zone 的结束 PFN 后调用 `free_area_init()`。它首先把"每个 zone 的最大 PFN"转换为每个 zone 的 `[lowest, highest)` 区间：
 
+[`mm/mm_init.c:1849-1879`](../../linux/mm/mm_init.c#L1849-L1879)（v6.18.60）
+
 ```c
-// mm/mm_init.c:1849-1879（v6.18.60）
 void __init free_area_init(unsigned long *max_zone_pfn)
 {
 	unsigned long start_pfn, end_pfn;
@@ -336,8 +345,9 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 
 随后打印我们在 `dmesg` 中常见的 "Zone ranges"、"Early memory node ranges" 信息，再对每个节点调用 `free_area_init_node()`，最后统一初始化 `struct page`：
 
+[`mm/mm_init.c:1927-1954`](../../linux/mm/mm_init.c#L1927-L1954)（v6.18.60，节选）
+
 ```c
-// mm/mm_init.c:1927-1954（v6.18.60，节选）
 	for_each_node(nid) {
 		pg_data_t *pgdat;
 
@@ -360,10 +370,11 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 	memmap_init();
 ```
 
-`free_area_init_node()` 通过 `calculate_node_totalpages()`（`mm/mm_init.c:1350`）计算每个 zone 的 `spanned_pages` 和 `present_pages`，再调用 `free_area_init_core()` 初始化 zone：
+`free_area_init_node()` 通过 `calculate_node_totalpages()`（[`mm/mm_init.c:1350`](../../linux/mm/mm_init.c#L1350)）计算每个 zone 的 `spanned_pages` 和 `present_pages`，再调用 `free_area_init_core()` 初始化 zone：
+
+[`mm/mm_init.c:1621-1645`](../../linux/mm/mm_init.c#L1621-L1645)（v6.18.60）
 
 ```c
-// mm/mm_init.c:1621-1645（v6.18.60）
 static void __init free_area_init_core(struct pglist_data *pgdat)
 {
 	enum zone_type j;
@@ -391,14 +402,15 @@ static void __init free_area_init_core(struct pglist_data *pgdat)
 }
 ```
 
-`init_currently_empty_zone()` 调用 `zone_init_free_lists()`（`mm/mm_init.c:1446`）把所有 `free_area[order].free_list[mt]` 初始化为空链表。注意此时 `managed_pages` 为 0：zone 已经存在，但里面还没有任何空闲页。
+`init_currently_empty_zone()` 调用 `zone_init_free_lists()`（[`mm/mm_init.c:1446`](../../linux/mm/mm_init.c#L1446)）把所有 `free_area[order].free_list[mt]` 初始化为空链表。注意此时 `managed_pages` 为 0：zone 已经存在，但里面还没有任何空闲页。
 
 ### `memmap_init()`：逐页初始化
 
 `memmap_init()` 遍历每个 zone 的每段内存，调用 `memmap_init_range()`：
 
+[`mm/mm_init.c:919-948`](../../linux/mm/mm_init.c#L919-L948)（v6.18.60，节选）
+
 ```c
-// mm/mm_init.c:919-948（v6.18.60，节选）
 	for (pfn = start_pfn; pfn < end_pfn; ) {
 		/*
 		 * There can be holes in boot-time mem_map[]s handed to this
@@ -425,8 +437,9 @@ static void __init free_area_init_core(struct pglist_data *pgdat)
 
 `__init_single_page()` 把页清零、写入 zone/node 链接、引用计数设为 1、映射计数设为 -1：
 
+[`mm/mm_init.c:581-597`](../../linux/mm/mm_init.c#L581-L597)（v6.18.60）
+
 ```c
-// mm/mm_init.c:581-597（v6.18.60）
 void __meminit __init_single_page(struct page *page, unsigned long pfn,
 				unsigned long zone, int nid)
 {
@@ -454,8 +467,9 @@ void __meminit __init_single_page(struct page *page, unsigned long pfn,
 
 进入 `mm_core_init()` 后，`build_all_zonelists()` 为每个节点生成 zonelist。核心是 `build_zonelists()`：先用 `find_next_best_node()` 按距离对所有节点排序，再把每个节点的 zone **从高到低**加入列表：
 
+[`mm/page_alloc.c:5598-5614`](../../linux/mm/page_alloc.c#L5598-L5614)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:5598-5614（v6.18.60）
 static int build_zonerefs_node(pg_data_t *pgdat, struct zoneref *zonerefs)
 {
 	struct zone *zone;
@@ -475,7 +489,7 @@ static int build_zonerefs_node(pg_data_t *pgdat, struct zoneref *zonerefs)
 }
 ```
 
-`find_next_best_node()` 的打分规则（`mm/page_alloc.c:5663-5713`）：
+`find_next_best_node()` 的打分规则（[`mm/page_alloc.c:5663-5713`](../../linux/mm/page_alloc.c#L5663-L5713)）：
 
 1. 本地节点（且有内存）总是第一个；
 2. 其余节点按 `node_distance()` 升序；
@@ -483,8 +497,9 @@ static int build_zonerefs_node(pg_data_t *pgdat, struct zoneref *zonerefs)
 4. 有 CPU 的节点加 `PENALTY_FOR_NODE_WITH_CPUS` 分（无 CPU 的纯内存节点压力小，优先使用）；
 5. 乘以 `MAX_NUMNODES` 后加上 `node_load[]`，使同距离的节点在不同本地节点的列表中轮流靠前。
 
+[`mm/page_alloc.c:5751-5782`](../../linux/mm/page_alloc.c#L5751-L5782)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:5751-5782（v6.18.60，节选）
 static void build_zonelists(pg_data_t *pgdat)
 {
 	static int node_order[MAX_NUMNODES];
@@ -523,14 +538,15 @@ static void build_zonelists(pg_data_t *pgdat)
 Node0/Normal → Node0/DMA32 → Node0/DMA → Node1/Normal → Node1/DMA32 ...
 ```
 
-这种"节点优先"顺序最大化了局部性，代价是本地 DMA 区可能先于远端 Normal 区被耗尽；4.4 节的 `lowmem_reserve` 机制用于缓解这一问题。早期内核还支持"zone 优先"顺序，v4.14 起已删除，`numa_zonelist_order` 参数只保留兼容性警告（`mm/page_alloc.c:5620-5631`）。
+这种"节点优先"顺序最大化了局部性，代价是本地 DMA 区可能先于远端 Normal 区被耗尽；4.4 节的 `lowmem_reserve` 机制用于缓解这一问题。早期内核还支持"zone 优先"顺序，v4.14 起已删除，`numa_zonelist_order` 参数只保留兼容性警告（[`mm/page_alloc.c:5620-5631`](../../linux/mm/page_alloc.c#L5620-L5631)）。
 
 ## 交接：`memblock_free_all()`
 
 一切就绪后，`mm_core_init()` 调用 `memblock_free_all()` 把空闲内存交给伙伴系统：
 
+[`mm/memblock.c:2339-2349`](../../linux/mm/memblock.c#L2339-L2349)（v6.18.60）
+
 ```c
-// mm/memblock.c:2339-2349（v6.18.60）
 void __init memblock_free_all(void)
 {
 	unsigned long pages;
@@ -546,8 +562,9 @@ void __init memblock_free_all(void)
 
 `free_low_memory_core_early()` 先把所有 reserved 区间对应的页标记为 `PG_reserved`（`memmap_init_reserved_pages()`），再遍历所有空闲区间：
 
+[`mm/memblock.c:2291-2310`](../../linux/mm/memblock.c#L2291-L2310)（v6.18.60）
+
 ```c
-// mm/memblock.c:2291-2310（v6.18.60）
 static unsigned long __init free_low_memory_core_early(void)
 {
 	unsigned long count = 0;
@@ -573,8 +590,9 @@ static unsigned long __init free_low_memory_core_early(void)
 
 `__free_pages_memory()` 把每段空闲区间切成尽可能大的、自然对齐的 2 的幂次块：
 
+[`mm/memblock.c:2199-2223`](../../linux/mm/memblock.c#L2199-L2223)（v6.18.60）
+
 ```c
-// mm/memblock.c:2199-2223（v6.18.60）
 static void __init __free_pages_memory(unsigned long start, unsigned long end)
 {
 	int order;
@@ -606,8 +624,9 @@ static void __init __free_pages_memory(unsigned long start, unsigned long end)
 
 每个块最终进入 `__free_pages_core()`：
 
+[`mm/page_alloc.c:1626-1671`](../../linux/mm/page_alloc.c#L1626-L1671)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:1626-1671（v6.18.60，节选）
 void __meminit __free_pages_core(struct page *page, unsigned int order,
 		enum meminit_context context)
 {
@@ -673,7 +692,7 @@ sequenceDiagram
 sudo dmesg | grep -E "BIOS-e820|Zone ranges|  (DMA|DMA32|Normal|Movable|Device)|Early memory node|node +[0-9]+: \[mem|Fallback order|Memory: "
 ```
 
-输出依次对应 e820 表、`free_area_init()` 打印的 zone 范围与节点范围、`build_zonelists()` 打印的回退顺序，以及 `mem_init_print_info()` 打印的内存汇总（`mm/mm_init.c:2646`）。
+输出依次对应 e820 表、`free_area_init()` 打印的 zone 范围与节点范围、`build_zonelists()` 打印的回退顺序，以及 `mem_init_print_info()` 打印的内存汇总（[`mm/mm_init.c:2646`](../../linux/mm/mm_init.c#L2646)）。
 
 开启 `memblock=debug` 启动参数，可以看到每次 memblock 分配与保留的调用者：
 

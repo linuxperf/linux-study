@@ -1,6 +1,6 @@
 # 4.8 页表与缺页异常
 
-> **本节源码**：`arch/x86/include/asm/pgtable_types.h`、`arch/x86/include/asm/pgtable_64_types.h`、`arch/x86/include/asm/trap_pf.h`、`arch/x86/mm/fault.c`、`mm/memory.c`、`mm/mmap_lock.c`、`include/linux/mm.h`
+> **本节源码**：[`arch/x86/include/asm/pgtable_types.h`](../../linux/arch/x86/include/asm/pgtable_types.h)、[`arch/x86/include/asm/pgtable_64_types.h`](../../linux/arch/x86/include/asm/pgtable_64_types.h)、[`arch/x86/include/asm/trap_pf.h`](../../linux/arch/x86/include/asm/trap_pf.h)、[`arch/x86/mm/fault.c`](../../linux/arch/x86/mm/fault.c)、[`mm/memory.c`](../../linux/mm/memory.c)、[`mm/mmap_lock.c`](../../linux/mm/mmap_lock.c)、[`include/linux/mm.h`](../../linux/include/linux/mm.h)
 > **关键函数**：`exc_page_fault()`、`do_user_addr_fault()`、`access_error()`、`handle_mm_fault()`、`__handle_mm_fault()`、`handle_pte_fault()`、`do_anonymous_page()`、`alloc_anon_folio()`、`do_fault()`、`do_read_fault()`、`do_fault_around()`
 > **前置知识**：4.7 进程地址空间
 
@@ -18,8 +18,9 @@
 
 四级页表把 48 位虚拟地址分为 4 个 9 位索引加 12 位页内偏移；五级页表在最上层再加一级 P4D，支持 57 位地址。Linux 用统一的五级抽象（PGD → P4D → PUD → PMD → PTE）描述所有架构，四级页表下 P4D 层被"折叠"：
 
+[`arch/x86/include/asm/pgtable_64_types.h:50-80`](../../linux/arch/x86/include/asm/pgtable_64_types.h#L50-L80)（v6.18.60，节选）
+
 ```c
-// arch/x86/include/asm/pgtable_64_types.h:50-80（v6.18.60，节选）
 #define PGDIR_SHIFT	pgdir_shift
 #define PTRS_PER_PGD	512
 ...
@@ -56,8 +57,9 @@
 
 页表项的低 12 位和最高几位是标志位：
 
+[`arch/x86/include/asm/pgtable_types.h:10-36`](../../linux/arch/x86/include/asm/pgtable_types.h#L10-L36)（v6.18.60，节选）
+
 ```c
-// arch/x86/include/asm/pgtable_types.h:10-36（v6.18.60，节选）
 #define _PAGE_BIT_PRESENT	0	/* is present */
 #define _PAGE_BIT_RW		1	/* writeable */
 #define _PAGE_BIT_USER		2	/* userspace addressable */
@@ -95,16 +97,17 @@
 | 59～62 | PKEY | 内核 | 内存保护键（Protection Keys） |
 | 63 | NX | 内核 | 禁止执行 |
 
-`_PAGE_PROTNONE` 与 `_PAGE_GLOBAL` 共用第 8 位（`arch/x86/include/asm/pgtable_types.h:49`）：对用户页，Present 为 0 而 PROTNONE 为 1 表示"存在但禁止访问"，NUMA Balancing 用它制造可控的缺页（4.12 节）。
+`_PAGE_PROTNONE` 与 `_PAGE_GLOBAL` 共用第 8 位（[`arch/x86/include/asm/pgtable_types.h:49`](../../linux/arch/x86/include/asm/pgtable_types.h#L49)）：对用户页，Present 为 0 而 PROTNONE 为 1 表示"存在但禁止访问"，NUMA Balancing 用它制造可控的缺页（4.12 节）。
 
 ### 页表锁
 
-修改页表需要加锁。整个 mm 只有一把 `page_table_lock` 会严重限制并发缺页，因此启用 `CONFIG_SPLIT_PTE_PTLOCKS`（本书配置已启用）后，**每个 PTE 页表页有自己的自旋锁**，存放在该页表页的 `struct ptdesc` 中（`ptlock_ptr()`，`include/linux/mm.h:3176-3197`）。PMD 层同理（`CONFIG_SPLIT_PMD_PTLOCKS=y`）。这样，同一进程中不同 2 MB 区域的缺页可以完全并行。
+修改页表需要加锁。整个 mm 只有一把 `page_table_lock` 会严重限制并发缺页，因此启用 `CONFIG_SPLIT_PTE_PTLOCKS`（本书配置已启用）后，**每个 PTE 页表页有自己的自旋锁**，存放在该页表页的 `struct ptdesc` 中（`ptlock_ptr()`，[`include/linux/mm.h:3176-3197`](../../linux/include/linux/mm.h#L3176-L3197)）。PMD 层同理（`CONFIG_SPLIT_PMD_PTLOCKS=y`）。这样，同一进程中不同 2 MB 区域的缺页可以完全并行。
 
 ## 缺页入口：`exc_page_fault()`
 
+[`arch/x86/mm/fault.c:1483-1531`](../../linux/arch/x86/mm/fault.c#L1483-L1531)（v6.18.60，节选）
+
 ```c
-// arch/x86/mm/fault.c:1483-1531（v6.18.60，节选）
 DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
 {
 	irqentry_state_t state;
@@ -127,8 +130,9 @@ DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
 
 出错地址来自 `CR2`（启用 FRED 时由硬件放在事件数据中）。`handle_page_fault()` 按地址所在半区分流：
 
+[`arch/x86/mm/fault.c:1461-1481`](../../linux/arch/x86/mm/fault.c#L1461-L1481)（v6.18.60）
+
 ```c
-// arch/x86/mm/fault.c:1461-1481（v6.18.60）
 static __always_inline void
 handle_page_fault(struct pt_regs *regs, unsigned long error_code,
 			      unsigned long address)
@@ -152,12 +156,13 @@ handle_page_fault(struct pt_regs *regs, unsigned long error_code,
 }
 ```
 
-内核地址的缺页（`do_kern_addr_fault()`，`arch/x86/mm/fault.c:1134`）在 x86_64 上几乎都是错误：vmalloc 区的上层页表已预先分配（4.6 节），不存在需要惰性同步的情况，因此这里主要处理"虚假缺页"（TLB 中残留的旧权限）、kprobes，以及通过异常表（exception table）修复的 `copy_from_kernel_nofault()` 类访问，其余情况进入 oops。
+内核地址的缺页（`do_kern_addr_fault()`，[`arch/x86/mm/fault.c:1134`](../../linux/arch/x86/mm/fault.c#L1134)）在 x86_64 上几乎都是错误：vmalloc 区的上层页表已预先分配（4.6 节），不存在需要惰性同步的情况，因此这里主要处理"虚假缺页"（TLB 中残留的旧权限）、kprobes，以及通过异常表（exception table）修复的 `copy_from_kernel_nofault()` 类访问，其余情况进入 oops。
 
 ### 错误码
 
+[`arch/x86/include/asm/trap_pf.h:20-30`](../../linux/arch/x86/include/asm/trap_pf.h#L20-L30)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/trap_pf.h:20-30（v6.18.60）
 enum x86_pf_error_code {
 	X86_PF_PROT	=		BIT(0),
 	X86_PF_WRITE	=		BIT(1),
@@ -185,8 +190,9 @@ enum x86_pf_error_code {
 
 ### 前置检查
 
+[`arch/x86/mm/fault.c:1220-1279`](../../linux/arch/x86/mm/fault.c#L1220-L1279)（v6.18.60，节选）
+
 ```c
-// arch/x86/mm/fault.c:1220-1279（v6.18.60，节选）
 	if (unlikely((error_code & (X86_PF_USER | X86_PF_INSTR)) == X86_PF_INSTR)) {
 		...
 		page_fault_oops(regs, error_code, address);
@@ -224,8 +230,9 @@ enum x86_pf_error_code {
 
 ### 优先尝试 per-VMA 锁
 
+[`arch/x86/mm/fault.c:1322-1352`](../../linux/arch/x86/mm/fault.c#L1322-L1352)（v6.18.60）
+
 ```c
-// arch/x86/mm/fault.c:1322-1352（v6.18.60）
 	if (!(flags & FAULT_FLAG_USER))
 		goto lock_mmap;
 
@@ -264,8 +271,9 @@ enum x86_pf_error_code {
 
 ### 传统路径：`mmap_lock` 读锁
 
+[`arch/x86/mm/fault.c:1354-1413`](../../linux/arch/x86/mm/fault.c#L1354-L1413)（v6.18.60，节选）
+
 ```c
-// arch/x86/mm/fault.c:1354-1413（v6.18.60，节选）
 lock_mmap:
 
 retry:
@@ -303,14 +311,15 @@ retry:
 	mmap_read_unlock(mm);
 ```
 
-`lock_mm_and_find_vma()`（`mm/mmap_lock.c:424`）获取 `mmap_lock` 读锁并查找 VMA。若地址刚好位于一个 `VM_GROWSDOWN` 栈 VMA 下方，它会升级为写锁并扩展栈 VMA——这是 v6.5 为修复栈扩展竞态（StackRot）而重构的逻辑，之前栈扩展在读锁下进行。
+`lock_mm_and_find_vma()`（[`mm/mmap_lock.c:424`](../../linux/mm/mmap_lock.c#L424)）获取 `mmap_lock` 读锁并查找 VMA。若地址刚好位于一个 `VM_GROWSDOWN` 栈 VMA 下方，它会升级为写锁并扩展栈 VMA——这是 v6.5 为修复栈扩展竞态（StackRot）而重构的逻辑，之前栈扩展在读锁下进行。
 
 **重试机制**：文件页缺页等待 I/O 时，`filemap_fault()` 会主动释放 `mmap_lock` 并返回 `VM_FAULT_RETRY`，I/O 完成后再重新获取锁、重新查找 VMA（因为 VMA 可能已被其他线程修改）。第二次带 `FAULT_FLAG_TRIED` 标志，不再允许释放锁。这避免了一个线程等待磁盘 I/O 时长时间持有 `mmap_lock`。
 
 ### 权限检查：`access_error()`
 
+[`arch/x86/mm/fault.c:1095-1112`](../../linux/arch/x86/mm/fault.c#L1095-L1112)（v6.18.60，节选）
+
 ```c
-// arch/x86/mm/fault.c:1095-1112（v6.18.60，节选）
 	if (error_code & X86_PF_WRITE) {
 		/* write, present and write, not present: */
 		if (unlikely(vma->vm_flags & VM_SHADOW_STACK))
@@ -335,8 +344,9 @@ retry:
 
 ### 错误结果的处理
 
+[`arch/x86/mm/fault.c:1414-1447`](../../linux/arch/x86/mm/fault.c#L1414-L1447)（v6.18.60，节选）
+
 ```c
-// arch/x86/mm/fault.c:1414-1447（v6.18.60，节选）
 done:
 	if (likely(!(fault & VM_FAULT_ERROR)))
 		return;
@@ -382,8 +392,9 @@ handle_mm_fault()                                mm/memory.c:6490
 
 ### `handle_mm_fault()`
 
+[`mm/memory.c:6490-6525`](../../linux/mm/memory.c#L6490-L6525)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:6490-6525（v6.18.60，节选）
 vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 			   unsigned int flags, struct pt_regs *regs)
 {
@@ -414,14 +425,15 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	...
 ```
 
-`lru_gen_enter_fault()` 为 MGLRU 记录本次缺页所在 VMA 是否"具有时间局部性"：带 `VM_SEQ_READ`/`VM_RAND_READ`（`madvise()` 声明的顺序/随机访问）或文件以 `FMODE_NOREUSE` 打开时不具有（`vma_has_recency()`，`include/linux/mm_inline.h:609-618`），此时读入的页不会被当作工作集（4.10 节）。
+`lru_gen_enter_fault()` 为 MGLRU 记录本次缺页所在 VMA 是否"具有时间局部性"：带 `VM_SEQ_READ`/`VM_RAND_READ`（`madvise()` 声明的顺序/随机访问）或文件以 `FMODE_NOREUSE` 打开时不具有（`vma_has_recency()`，[`include/linux/mm_inline.h:609-618`](../../linux/include/linux/mm_inline.h#L609-L618)），此时读入的页不会被当作工作集（4.10 节）。
 
 ### `struct vm_fault`
 
 缺页处理的所有上下文都打包在 `struct vm_fault` 中，沿调用链传递：
 
+[`include/linux/mm.h:625-669`](../../linux/include/linux/mm.h#L625-L669)（v6.18.60，节选）
+
 ```c
-// include/linux/mm.h:625-669（v6.18.60，节选）
 struct vm_fault {
 	const struct {
 		struct vm_area_struct *vma;	/* Target VMA */
@@ -469,8 +481,9 @@ struct vm_fault {
 
 ### 逐级分配页表：`__handle_mm_fault()`
 
+[`mm/memory.c:6260-6327`](../../linux/mm/memory.c#L6260-L6327)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:6260-6327（v6.18.60，节选）
 static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		unsigned long address, unsigned int flags)
 {
@@ -523,8 +536,9 @@ retry_pud:
 
 ### 分发：`handle_pte_fault()`
 
+[`mm/memory.c:6166-6252`](../../linux/mm/memory.c#L6166-L6252)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:6166-6252（v6.18.60，节选）
 static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 {
 	pte_t entry;
@@ -602,8 +616,9 @@ unlock:
 
 ## 匿名页缺页：`do_anonymous_page()`
 
+[`mm/memory.c:5149-5191`](../../linux/mm/memory.c#L5149-L5191)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:5149-5191（v6.18.60，节选）
 static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -640,8 +655,9 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 
 写访问则分配新的匿名 folio：
 
+[`mm/memory.c:5193-5252`](../../linux/mm/memory.c#L5193-L5252)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:5193-5252（v6.18.60，节选）
 	/* Allocate our own private page. */
 	ret = vmf_anon_prepare(vmf);
 	if (ret)
@@ -706,8 +722,9 @@ setpte:
 
 `alloc_anon_folio()` 在启用 THP 时会尝试分配**大于 4 KB 但小于 2 MB** 的 folio（v6.8 引入的"多尺寸 THP"，mTHP）：
 
+[`mm/memory.c:5059-5141`](../../linux/mm/memory.c#L5059-L5141)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:5059-5141（v6.18.60，节选）
 static struct folio *alloc_anon_folio(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -758,8 +775,9 @@ fallback:
 
 ## 文件页缺页：`do_fault()`
 
+[`mm/memory.c:5835-5869`](../../linux/mm/memory.c#L5835-L5869)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:5835-5869（v6.18.60，节选）
 static vm_fault_t do_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -790,8 +808,9 @@ static vm_fault_t do_fault(struct vm_fault *vmf)
 
 ### 读缺页与 fault-around
 
+[`mm/memory.c:5711-5741`](../../linux/mm/memory.c#L5711-L5741)（v6.18.60）
+
 ```c
-// mm/memory.c:5711-5741（v6.18.60）
 static vm_fault_t do_read_fault(struct vm_fault *vmf)
 {
 	vm_fault_t ret = 0;
@@ -827,14 +846,16 @@ static vm_fault_t do_read_fault(struct vm_fault *vmf)
 
 **fault-around** 是一项重要优化：程序访问文件映射的某一页时，很可能马上会访问相邻的页。`do_fault_around()` 调用 `vm_ops->map_pages()`（对普通文件是 `filemap_map_pages()`），一次性把出错地址周围**已经在 page cache 中且就绪**的页全部映射上，默认范围为 64 KB：
 
+[`mm/memory.c:5605-5606`](../../linux/mm/memory.c#L5605-L5606)（v6.18.60）
+
 ```c
-// mm/memory.c:5605-5606（v6.18.60）
 static unsigned long fault_around_pages __read_mostly =
 	65536 >> PAGE_SHIFT;
 ```
 
+[`mm/memory.c:5665-5695`](../../linux/mm/memory.c#L5665-L5695)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:5665-5695（v6.18.60，节选）
 static vm_fault_t do_fault_around(struct vm_fault *vmf)
 {
 	pgoff_t nr_pages = READ_ONCE(fault_around_pages);
@@ -864,7 +885,7 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 
 映射范围被限制在当前 VMA 和当前 PTE 页表之内，这样只需获取一次 PTE 锁。`map_pages()` 在 RCU 下无锁地查找 page cache，遇到未就绪的页直接跳过，不会发起 I/O。如果出错地址本身的页被成功映射，返回 `VM_FAULT_NOPAGE`，整个缺页结束；否则回退到 `__do_fault()` 调用 `vm_ops->fault()`（`filemap_fault()`），后者会在 page cache 未命中时发起读 I/O 和预读（第 9 章）。
 
-`finish_fault()`（`mm/memory.c:5488`）负责最后一步：分配 PTE 页表（如果还没有）、加锁验证、调用 `set_pte_range()`（`mm/memory.c:5429`）建立映射并增加文件页的映射计数。
+`finish_fault()`（[`mm/memory.c:5488`](../../linux/mm/memory.c#L5488)）负责最后一步：分配 PTE 页表（如果还没有）、加锁验证、调用 `set_pte_range()`（[`mm/memory.c:5429`](../../linux/mm/memory.c#L5429)）建立映射并增加文件页的映射计数。
 
 ### 主缺页与次缺页
 

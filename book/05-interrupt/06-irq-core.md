@@ -1,6 +1,6 @@
 # 5.6 通用中断层：irq_desc、irq_chip 与 irq_domain
 
-> **本节源码**：`include/linux/irqdesc.h`、`include/linux/irq.h`、`include/linux/irqdomain.h`、`kernel/irq/irqdesc.c`、`kernel/irq/irqdomain.c`、`kernel/irq/handle.c`、`arch/x86/kernel/apic/vector.c`、`arch/x86/kernel/apic/io_apic.c`、`arch/x86/kernel/irq.c`
+> **本节源码**：[`include/linux/irqdesc.h`](../../linux/include/linux/irqdesc.h)、[`include/linux/irq.h`](../../linux/include/linux/irq.h)、[`include/linux/irqdomain.h`](../../linux/include/linux/irqdomain.h)、[`kernel/irq/irqdesc.c`](../../linux/kernel/irq/irqdesc.c)、[`kernel/irq/irqdomain.c`](../../linux/kernel/irq/irqdomain.c)、[`kernel/irq/handle.c`](../../linux/kernel/irq/handle.c)、[`arch/x86/kernel/apic/vector.c`](../../linux/arch/x86/kernel/apic/vector.c)、[`arch/x86/kernel/apic/io_apic.c`](../../linux/arch/x86/kernel/apic/io_apic.c)、[`arch/x86/kernel/irq.c`](../../linux/arch/x86/kernel/irq.c)
 > **关键函数**：`irq_to_desc()`、`early_irq_init()`、`generic_handle_irq_desc()`、`__irq_domain_alloc_irqs()`、`irq_domain_alloc_irq_data()`、`irq_domain_alloc_irqs_parent()`、`irq_domain_activate_irq()`、`mp_irqdomain_alloc()`、`handle_irq_event()`
 > **前置知识**：5.2 中断入口与出口、5.5 中断控制器、7.9 RCU 原理与使用
 
@@ -34,8 +34,9 @@ Linux 需要支持的中断控制器多得惊人：x86 的 LAPIC / I/O APIC / MS
 
 ### struct irq_desc
 
+[`include/linux/irqdesc.h:67-120`](../../linux/include/linux/irqdesc.h#L67-L120)（v6.18.60）
+
 ```c
-// include/linux/irqdesc.h:67-120（v6.18.60）
 struct irq_desc {
 	struct irq_common_data	irq_common_data;
 	struct irq_data		irq_data;	// [注] 最外层（离设备最近）的 irq_data
@@ -94,8 +95,9 @@ struct irq_desc {
 
 ### struct irq_data 与 irq_common_data
 
+[`include/linux/irq.h:145-188`](../../linux/include/linux/irq.h#L145-L188)（v6.18.60）
+
 ```c
-// include/linux/irq.h:145-188（v6.18.60）
 struct irq_common_data {
 	unsigned int		__private state_use_accessors;
 #ifdef CONFIG_NUMA
@@ -132,8 +134,9 @@ struct irq_data {
 
 ### struct irq_chip
 
+[`include/linux/irq.h:492-544`](../../linux/include/linux/irq.h#L492-L544)（v6.18.60）
+
 ```c
-// include/linux/irq.h:492-544（v6.18.60）
 struct irq_chip {
 	const char	*name;
 	unsigned int	(*irq_startup)(struct irq_data *data);
@@ -187,8 +190,9 @@ struct irq_chip {
 
 ### struct irq_domain
 
+[`include/linux/irqdomain.h:147-176`](../../linux/include/linux/irqdomain.h#L147-L176)（v6.18.60）
+
 ```c
-// include/linux/irqdomain.h:147-176（v6.18.60）
 struct irq_domain {
 	struct list_head		link;
 	const char			*name;
@@ -225,8 +229,9 @@ struct irq_domain {
 
 域的操作集：
 
+[`include/linux/irqdomain.h:79-104`](../../linux/include/linux/irqdomain.h#L79-L104)（v6.18.60）
+
 ```c
-// include/linux/irqdomain.h:79-104（v6.18.60）
 struct irq_domain_ops {
 	int	(*match)(struct irq_domain *d, struct device_node *node,
 			 enum irq_domain_bus_token bus_token);
@@ -258,8 +263,9 @@ struct irq_domain_ops {
 
 本书配置开启了 `CONFIG_SPARSE_IRQ`，描述符按需动态分配，并存放在一棵**枫树**（maple tree，4.7 节 VMA 管理使用的同一种数据结构）中：
 
+[`kernel/irq/irqdesc.c:167-181`](../../linux/kernel/irq/irqdesc.c#L167-L181)（v6.18.60）
+
 ```c
-// kernel/irq/irqdesc.c:167-181（v6.18.60）
 static DEFINE_MUTEX(sparse_irq_lock);
 static struct maple_tree sparse_irqs = MTREE_INIT_EXT(sparse_irqs,
 					MT_FLAGS_ALLOC_RANGE |
@@ -277,8 +283,9 @@ static int irq_find_free_area(unsigned int from, unsigned int cnt)
 }
 ```
 
+[`kernel/irq/irqdesc.c:414-417`](../../linux/kernel/irq/irqdesc.c#L414-L417)（v6.18.60）
+
 ```c
-// kernel/irq/irqdesc.c:414-417（v6.18.60）
 struct irq_desc *irq_to_desc(unsigned int irq)
 {
 	return mtree_load(&sparse_irqs, irq);
@@ -289,8 +296,9 @@ v6.5 之前这里是一棵基数树加一个位图（`allocated_irqs`），v6.5 
 
 启动时 `early_irq_init()` 预分配传统的 16 个 ISA 中断描述符：
 
+[`kernel/irq/irqdesc.c:549-575`](../../linux/kernel/irq/irqdesc.c#L549-L575)（v6.18.60）
+
 ```c
-// kernel/irq/irqdesc.c:549-575（v6.18.60）
 int __init early_irq_init(void)
 {
 	int i, initcnt, node = first_online_node;
@@ -322,8 +330,9 @@ int __init early_irq_init(void)
 
 `arch_early_irq_init()` 在 x86 上创建根中断域——**向量域**：
 
+[`arch/x86/kernel/apic/vector.c:805-821`](../../linux/arch/x86/kernel/apic/vector.c#L805-L821)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:805-821（v6.18.60）
 	x86_vector_domain = irq_domain_create_tree(fn, &x86_vector_domain_ops,
 						   NULL);
 	BUG_ON(x86_vector_domain == NULL);
@@ -367,7 +376,7 @@ int __init early_irq_init(void)
 
 *图 5-6：x86 上的中断域层级（上为父，下为子；箭头方向即 `parent` 指针方向的反向）*
 
-无中断重映射时，I/O APIC 域和 PCI-MSI 域的父域都是向量域；有中断重映射时，中间多一层 IR 域。v6.2 起 PCI-MSI 改为"每个设备一个 MSI 域"（per-device MSI domain），父域实现 `msi_parent_ops`（`arch/x86/kernel/apic/msi.c:269-271` 把向量域标记为 MSI 父域），使不同设备可以有不同的 MSI 特性组合。`/proc/interrupts` 中的 `PCI-MSIX-0000:00:03.0` 就是这种 per-device 域的芯片名。
+无中断重映射时，I/O APIC 域和 PCI-MSI 域的父域都是向量域；有中断重映射时，中间多一层 IR 域。v6.2 起 PCI-MSI 改为"每个设备一个 MSI 域"（per-device MSI domain），父域实现 `msi_parent_ops`（[`arch/x86/kernel/apic/msi.c:269-271`](../../linux/arch/x86/kernel/apic/msi.c#L269-L271) 把向量域标记为 MSI 父域），使不同设备可以有不同的 MSI 特性组合。`/proc/interrupts` 中的 `PCI-MSIX-0000:00:03.0` 就是这种 per-device 域的芯片名。
 
 一个 MSI-X 中断因此有两层 `irq_data`：外层属于 PCI-MSIX 域，`hwirq` 是 MSI-X 表索引，`chip` 负责屏蔽表项和写消息；内层属于向量域，`hwirq` 等于 Linux 中断号，`chip_data` 是 `struct apic_chip_data`，其中的 `irq_cfg` 保存当前的向量和目标 APIC ID。
 
@@ -377,8 +386,9 @@ int __init early_irq_init(void)
 
 以 I/O APIC 中断为例（ACPI 解析 PCI 中断路由时调用 `mp_map_pin_to_irq()` → `__irq_domain_alloc_irqs()`）。核心步骤在 `irq_domain_alloc_irqs_locked()` 中：
 
+[`kernel/irq/irqdomain.c:1593-1637`](../../linux/kernel/irq/irqdomain.c#L1593-L1637)（v6.18.60）
+
 ```c
-// kernel/irq/irqdomain.c:1593-1637（v6.18.60）
 static int irq_domain_alloc_irqs_locked(struct irq_domain *domain, int irq_base,
 					unsigned int nr_irqs, int node, void *arg,
 					bool realloc, const struct irq_affinity_desc *affinity)
@@ -429,8 +439,9 @@ out_free_desc:
 1. `irq_domain_alloc_descs()`：在枫树中找一段空闲的 Linux 中断号并分配 `irq_desc`。`affinity` 参数用于多队列设备的 managed interrupt，使描述符分配在目标 CPU 所在的 NUMA 节点上（5.8 节）。
 2. `irq_domain_alloc_irq_data()`：沿 `parent` 链为每一层分配一个 `irq_data` 并串起来：
 
+[`kernel/irq/irqdomain.c:1436-1458`](../../linux/kernel/irq/irqdomain.c#L1436-L1458)（v6.18.60）
+
 ```c
-// kernel/irq/irqdomain.c:1436-1458（v6.18.60）
 static int irq_domain_alloc_irq_data(struct irq_domain *domain,
 				     unsigned int virq, unsigned int nr_irqs)
 {
@@ -458,8 +469,9 @@ static int irq_domain_alloc_irq_data(struct irq_domain *domain,
 
 3. `irq_domain_alloc_irqs_hierarchy()`：调用最外层域的 `ops->alloc()`。每层的 `alloc` 负责**先调用父层的 alloc**，再填写本层的 `hwirq`、`chip`、`chip_data`。以 I/O APIC 为例：
 
+[`arch/x86/kernel/apic/io_apic.c:2859-2900`](../../linux/arch/x86/kernel/apic/io_apic.c#L2859-L2900)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/io_apic.c:2859-2900（v6.18.60）
 int mp_irqdomain_alloc(struct irq_domain *domain, unsigned int virq,
 		       unsigned int nr_irqs, void *arg)
 {
@@ -504,7 +516,7 @@ int mp_irqdomain_alloc(struct irq_domain *domain, unsigned int virq,
 	mp_register_handler(virq, data->is_level);
 ```
 
-注意它根据父域是否为向量域来选择 `ioapic_chip` 还是 `ioapic_ir_chip`——中断重映射的存在对上层几乎透明，只影响表项格式与 EOI 方式。`mp_register_handler()`（`arch/x86/kernel/apic/io_apic.c:845-860`）按触发方式设置流控处理函数：电平触发用 `handle_fasteoi_irq`，边沿触发用 `handle_edge_irq`。
+注意它根据父域是否为向量域来选择 `ioapic_chip` 还是 `ioapic_ir_chip`——中断重映射的存在对上层几乎透明，只影响表项格式与 EOI 方式。`mp_register_handler()`（[`arch/x86/kernel/apic/io_apic.c:845-860`](../../linux/arch/x86/kernel/apic/io_apic.c#L845-L860)）按触发方式设置流控处理函数：电平触发用 `handle_fasteoi_irq`，边沿触发用 `handle_edge_irq`。
 
 4. `irq_domain_insert_irq()`：把各层的 `irq_data` 登记到各自域的反向映射中。
 
@@ -512,8 +524,9 @@ int mp_irqdomain_alloc(struct irq_domain *domain, unsigned int virq,
 
 ### 激活：自下而上编程硬件
 
+[`kernel/irq/irqdomain.c:1938-1976`](../../linux/kernel/irq/irqdomain.c#L1938-L1976)（v6.18.60）
+
 ```c
-// kernel/irq/irqdomain.c:1938-1976（v6.18.60）
 static int __irq_domain_activate_irq(struct irq_data *irqd, bool reserve)
 {
 	int ret = 0;
@@ -580,8 +593,9 @@ sequenceDiagram
 
 5.2 节的 `call_irq_handler()` 用 `vector_irq[vector]` 查到描述符后调用 `handle_irq()`，在 x86_64 上它就是：
 
+[`include/linux/irqdesc.h:167-174`](../../linux/include/linux/irqdesc.h#L167-L174)（v6.18.60）
+
 ```c
-// include/linux/irqdesc.h:167-174（v6.18.60）
 /*
  * Architectures call this to let the generic IRQ layer
  * handle an interrupt.
@@ -594,8 +608,9 @@ static inline void generic_handle_irq_desc(struct irq_desc *desc)
 
 一次间接调用进入流控处理函数，后者在完成控制器相关的应答 / 屏蔽后调用 `handle_irq_event()`：
 
+[`kernel/irq/handle.c:249-262`](../../linux/kernel/irq/handle.c#L249-L262)（v6.18.60）
+
 ```c
-// kernel/irq/handle.c:249-262（v6.18.60）
 irqreturn_t handle_irq_event(struct irq_desc *desc)
 {
 	irqreturn_t ret;
@@ -616,8 +631,9 @@ irqreturn_t handle_irq_event(struct irq_desc *desc)
 
 真正遍历 action 链的是 `__handle_irq_event_percpu()`：
 
+[`kernel/irq/handle.c:177-234`](../../linux/kernel/irq/handle.c#L177-L234)（v6.18.60）
+
 ```c
-// kernel/irq/handle.c:177-234（v6.18.60）
 irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc)
 {
 	irqreturn_t retval = IRQ_NONE;
@@ -681,9 +697,9 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc)
 - 共享中断线上的**每个** action 都会被调用，处理函数需自行检查"是不是我的设备发的中断"，不是则返回 `IRQ_NONE`。
 - 处理函数返回后若发现中断被打开了，打印警告并重新关闭——这是 5.2 节"硬中断处理函数总在关中断下运行"规则的运行时检查。
 - 返回 `IRQ_WAKE_THREAD` 表示需要唤醒中断线程执行剩余工作（5.7 节）。
-- `irq_handler_entry` / `irq_handler_exit` 跟踪点就在这里；启动参数 `irqhandler.duration_warn_us=` 可以打开处理函数耗时告警（`kernel/irq/handle.c:139-175`）。
+- `irq_handler_entry` / `irq_handler_exit` 跟踪点就在这里；启动参数 `irqhandler.duration_warn_us=` 可以打开处理函数耗时告警（[`kernel/irq/handle.c:139-175`](../../linux/kernel/irq/handle.c#L139-L175)）。
 
-外层的 `handle_irq_event_percpu()`（`kernel/irq/handle.c:236-247`）再做两件事：`add_interrupt_randomness()` 用中断时间为随机数子系统提供熵；`note_interrupt()` 统计 `IRQ_NONE` 的比例，检测"伪中断风暴"（5.7 节）。
+外层的 `handle_irq_event_percpu()`（[`kernel/irq/handle.c:236-247`](../../linux/kernel/irq/handle.c#L236-L247)）再做两件事：`add_interrupt_randomness()` 用中断时间为随机数子系统提供熵；`note_interrupt()` 统计 `IRQ_NONE` 的比例，检测"伪中断风暴"（5.7 节）。
 
 整个分发链如下：
 
@@ -703,7 +719,7 @@ common_interrupt()                          arch/x86/kernel/irq.c
 
 ### 为什么 x86 不用反向映射分发
 
-ARM GIC 等控制器在中断到来时提供 hwirq，通用代码用 `generic_handle_domain_irq(domain, hwirq)`（`include/linux/irqdesc.h:186`）查反向映射得到描述符。x86 硬件只提供向量号，而向量号是"每 CPU、可迁移"的，无法对应到某个固定的域。所以 x86 维护了自己的 per-CPU `vector_irq[]`，在向量分配、迁移时同步更新，中断分发时一次数组访问即可得到描述符，比任何树查找都快。代价是向量分配与迁移的逻辑更复杂（5.8 节需要处理新旧向量并存的过渡期）。
+ARM GIC 等控制器在中断到来时提供 hwirq，通用代码用 `generic_handle_domain_irq(domain, hwirq)`（[`include/linux/irqdesc.h:186`](../../linux/include/linux/irqdesc.h#L186)）查反向映射得到描述符。x86 硬件只提供向量号，而向量号是"每 CPU、可迁移"的，无法对应到某个固定的域。所以 x86 维护了自己的 per-CPU `vector_irq[]`，在向量分配、迁移时同步更新，中断分发时一次数组访问即可得到描述符，比任何树查找都快。代价是向量分配与迁移的逻辑更复杂（5.8 节需要处理新旧向量并存的过渡期）。
 
 ### desc->lock 与中断处理的并发
 

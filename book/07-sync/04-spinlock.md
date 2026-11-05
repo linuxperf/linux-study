@@ -1,6 +1,6 @@
 # 7.4 自旋锁与 qspinlock
 
-> **本节源码**：`include/linux/spinlock.h`、`include/linux/spinlock_types.h`、`include/linux/spinlock_types_raw.h`、`include/linux/spinlock_api_smp.h`、`kernel/locking/spinlock.c`、`include/asm-generic/qspinlock_types.h`、`include/asm-generic/qspinlock.h`、`arch/x86/include/asm/qspinlock.h`、`kernel/locking/qspinlock.c`、`kernel/locking/qspinlock.h`、`kernel/locking/mcs_spinlock.h`、`kernel/locking/qspinlock_paravirt.h`
+> **本节源码**：[`include/linux/spinlock.h`](../../linux/include/linux/spinlock.h)、[`include/linux/spinlock_types.h`](../../linux/include/linux/spinlock_types.h)、[`include/linux/spinlock_types_raw.h`](../../linux/include/linux/spinlock_types_raw.h)、[`include/linux/spinlock_api_smp.h`](../../linux/include/linux/spinlock_api_smp.h)、[`kernel/locking/spinlock.c`](../../linux/kernel/locking/spinlock.c)、[`include/asm-generic/qspinlock_types.h`](../../linux/include/asm-generic/qspinlock_types.h)、[`include/asm-generic/qspinlock.h`](../../linux/include/asm-generic/qspinlock.h)、[`arch/x86/include/asm/qspinlock.h`](../../linux/arch/x86/include/asm/qspinlock.h)、[`kernel/locking/qspinlock.c`](../../linux/kernel/locking/qspinlock.c)、[`kernel/locking/qspinlock.h`](../../linux/kernel/locking/qspinlock.h)、[`kernel/locking/mcs_spinlock.h`](../../linux/kernel/locking/mcs_spinlock.h)、[`kernel/locking/qspinlock_paravirt.h`](../../linux/kernel/locking/qspinlock_paravirt.h)
 > **关键函数**：`spin_lock()`、`_raw_spin_lock()`、`__raw_spin_lock()`、`queued_spin_lock()`、`queued_spin_lock_slowpath()`、`queued_spin_unlock()`、`pv_wait_node()`
 > **前置知识**：7.1 并发来源与执行上下文、7.2 原子操作、7.3 内存屏障
 
@@ -16,8 +16,9 @@
 
 ### spinlock_t 与 raw_spinlock_t
 
+[`include/linux/spinlock_types_raw.h:14-23`](../../linux/include/linux/spinlock_types_raw.h#L14-L23)（v6.18.60）
+
 ```c
-// include/linux/spinlock_types_raw.h:14-23（v6.18.60）
 typedef struct raw_spinlock {
 	arch_spinlock_t raw_lock;
 #ifdef CONFIG_DEBUG_SPINLOCK
@@ -30,8 +31,9 @@ typedef struct raw_spinlock {
 } raw_spinlock_t;
 ```
 
+[`include/linux/spinlock_types.h:17-29`](../../linux/include/linux/spinlock_types.h#L17-L29)（v6.18.60）
+
 ```c
-// include/linux/spinlock_types.h:17-29（v6.18.60）
 typedef struct spinlock {
 	union {
 		struct raw_spinlock rlock;
@@ -47,12 +49,13 @@ typedef struct spinlock {
 } spinlock_t;
 ```
 
-在非 PREEMPT_RT 内核中，`spinlock_t` 只是 `raw_spinlock_t` 的包装；两者行为相同。区分它们是为了 PREEMPT_RT：RT 内核中 `spinlock_t` 被替换为基于 rt_mutex 的可睡眠锁（`include/linux/spinlock_types.h:50-55`），而 `raw_spinlock_t` 始终是真正的自旋锁。因此调度器、中断控制器、定时器等在 RT 下也不能睡眠的路径必须使用 `raw_spinlock_t`，其余代码应使用 `spinlock_t`。本书配置未开启 lockdep 与 `CONFIG_DEBUG_SPINLOCK`，两者都只有 4 字节。
+在非 PREEMPT_RT 内核中，`spinlock_t` 只是 `raw_spinlock_t` 的包装；两者行为相同。区分它们是为了 PREEMPT_RT：RT 内核中 `spinlock_t` 被替换为基于 rt_mutex 的可睡眠锁（[`include/linux/spinlock_types.h:50-55`](../../linux/include/linux/spinlock_types.h#L50-L55)），而 `raw_spinlock_t` 始终是真正的自旋锁。因此调度器、中断控制器、定时器等在 RT 下也不能睡眠的路径必须使用 `raw_spinlock_t`，其余代码应使用 `spinlock_t`。本书配置未开启 lockdep 与 `CONFIG_DEBUG_SPINLOCK`，两者都只有 4 字节。
 
 ### qspinlock 的 32 位编码
 
+[`include/asm-generic/qspinlock_types.h:14-44`](../../linux/include/asm-generic/qspinlock_types.h#L14-L44)（v6.18.60）
+
 ```c
-// include/asm-generic/qspinlock_types.h:14-44（v6.18.60）
 typedef struct qspinlock {
 	union {
 		atomic_t val;
@@ -86,8 +89,9 @@ typedef struct qspinlock {
 } arch_spinlock_t;
 ```
 
+[`include/asm-generic/qspinlock_types.h:51-93`](../../linux/include/asm-generic/qspinlock_types.h#L51-L93)（v6.18.60）
+
 ```c
-// include/asm-generic/qspinlock_types.h:51-93（v6.18.60）
 /*
  * Bitfields in the atomic value:
  *
@@ -155,8 +159,9 @@ typedef struct qspinlock {
 
 传统 MCS 锁需要一个指向队尾节点的指针，等待者节点通常分配在栈上。qspinlock 改用静态的 per-CPU 节点数组：
 
+[`kernel/locking/qspinlock.c:72-80`](../../linux/kernel/locking/qspinlock.c#L72-L80)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.c:72-80（v6.18.60）
 /*
  * Per-CPU queue node structures; we can never have more than 4 nested
  * contexts: task, softirq, hardirq, nmi.
@@ -168,8 +173,9 @@ typedef struct qspinlock {
 static DEFINE_PER_CPU_ALIGNED(struct qnode, qnodes[_Q_MAX_NODES]);
 ```
 
+[`kernel/locking/qspinlock.h:40-75`](../../linux/kernel/locking/qspinlock.h#L40-L75)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.h:40-75（v6.18.60）
 struct qnode {
 	struct mcs_spinlock mcs;
 #ifdef CONFIG_PARAVIRT_SPINLOCKS
@@ -212,8 +218,9 @@ struct mcs_spinlock *grab_mcs_node(struct mcs_spinlock *base, int idx)
 
 `struct mcs_spinlock` 本身只有三个字段：
 
+[`include/asm-generic/mcs_spinlock.h:4-8`](../../linux/include/asm-generic/mcs_spinlock.h#L4-L8)（v6.18.60）
+
 ```c
-// include/asm-generic/mcs_spinlock.h:4-8（v6.18.60）
 struct mcs_spinlock {
 	struct mcs_spinlock *next;
 	int locked; /* 1 if lock acquired */
@@ -249,8 +256,9 @@ spin_unlock(lock)
 
 本书配置未定义 `CONFIG_INLINE_SPIN_LOCK`，`_raw_spin_lock()` 是 `kernel/locking/spinlock.c` 中的一个非内联函数，便于在性能剖析中定位；`CONFIG_UNINLINE_SPIN_UNLOCK=y` 使解锁同样不内联。真正的逻辑在 `spinlock_api_smp.h`：
 
+[`include/linux/spinlock_api_smp.h:104-161`](../../linux/include/linux/spinlock_api_smp.h#L104-L161)（v6.18.60）
+
 ```c
-// include/linux/spinlock_api_smp.h:104-161（v6.18.60）
 static inline unsigned long __raw_spin_lock_irqsave(raw_spinlock_t *lock)
 {
 	unsigned long flags;
@@ -320,14 +328,15 @@ static inline void __raw_spin_unlock_irq(raw_spinlock_t *lock)
 | `spin_lock_irq()` | 关中断、关抢占 | 开中断、开抢占 | 确定调用前中断是开着的 |
 | `spin_lock_irqsave()` | 保存并关中断、关抢占 | 恢复中断、开抢占 | 不确定中断状态（最通用） |
 
-`LOCK_CONTENDED()` 在未开启 `CONFIG_LOCK_STAT` 时就是直接调用 `do_raw_spin_lock()`（`include/linux/lockdep.h:467-468`）。
+`LOCK_CONTENDED()` 在未开启 `CONFIG_LOCK_STAT` 时就是直接调用 `do_raw_spin_lock()`（[`include/linux/lockdep.h:467-468`](../../linux/include/linux/lockdep.h#L467-L468)）。
 
 注意顺序：加锁时**先关抢占再获取锁**，解锁时**先释放锁再开抢占**。若顺序相反，任务可能在持锁后、关抢占前被换下，其他 CPU 将在它身上空转。`spin_unlock_irqrestore()` 也是先恢复中断再开抢占，让 `preempt_enable()` 中可能发生的调度在中断打开的状态下进行。
 
 ### 快速路径
 
+[`include/asm-generic/qspinlock.h:102-130`](../../linux/include/asm-generic/qspinlock.h#L102-L130)（v6.18.60）
+
 ```c
-// include/asm-generic/qspinlock.h:102-130（v6.18.60）
 #ifndef queued_spin_lock
 /**
  * queued_spin_lock - acquire a queued spinlock
@@ -361,7 +370,7 @@ static __always_inline void queued_spin_unlock(struct qspinlock *lock)
 
 无竞争时，加锁就是一次 `lock cmpxchg`：把 `val` 从 0 改为 `_Q_LOCKED_VAL`。失败时 `try_cmpxchg` 已把当前值写回 `val`，直接作为参数传给慢速路径，省去一次读取。
 
-解锁是对 `locked` 字节的一次 `smp_store_release()`，在 x86 上就是一条普通的 `movb $0`：不需要原子指令，因为只有持锁者会写 `locked` 字节，`pending` 与 `tail` 位于其他字节，不会被这次写入覆盖。本书配置开启了 `CONFIG_PARAVIRT_SPINLOCKS`，解锁经过 `pv_queued_spin_unlock()`（`arch/x86/include/asm/qspinlock.h:54-58`），在裸机上被 alternatives 补丁为与 `native_queued_spin_unlock()` 等价的内联代码。
+解锁是对 `locked` 字节的一次 `smp_store_release()`，在 x86 上就是一条普通的 `movb $0`：不需要原子指令，因为只有持锁者会写 `locked` 字节，`pending` 与 `tail` 位于其他字节，不会被这次写入覆盖。本书配置开启了 `CONFIG_PARAVIRT_SPINLOCKS`，解锁经过 `pv_queued_spin_unlock()`（[`arch/x86/include/asm/qspinlock.h:54-58`](../../linux/arch/x86/include/asm/qspinlock.h#L54-L58)），在裸机上被 alternatives 补丁为与 `native_queued_spin_unlock()` 等价的内联代码。
 
 ### 慢速路径第一级：pending 位
 
@@ -383,12 +392,13 @@ qspinlock 的状态机由 `queued_spin_lock_slowpath()` 上方的注释给出：
    queue               :         ^--'                             :
 ```
 
-*图 7-3：qspinlock 状态转换（三元组为 tail, pending, locked），引自 `kernel/locking/qspinlock.c:116-128`*
+*图 7-3：qspinlock 状态转换（三元组为 tail, pending, locked），引自 [`kernel/locking/qspinlock.c:116-128`](../../linux/kernel/locking/qspinlock.c#L116-L128)*
 
 慢速路径首先处理"只有一个竞争者"的常见情况：
 
+[`kernel/locking/qspinlock.c:130-160`](../../linux/kernel/locking/qspinlock.c#L130-L160)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.c:130-160（v6.18.60）
 void __lockfunc queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
 {
 	struct mcs_spinlock *prev, *next, *node;
@@ -427,8 +437,9 @@ void __lockfunc queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
 
 否则尝试成为 pending 者：
 
+[`kernel/locking/qspinlock.c:167-206`](../../linux/kernel/locking/qspinlock.c#L167-L206)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.c:167-206（v6.18.60）
 	val = queued_fetch_set_pending_acquire(lock);
 
 	/*
@@ -471,7 +482,7 @@ void __lockfunc queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
 	return;
 ```
 
-x86 的 `queued_fetch_set_pending_acquire()`（`arch/x86/include/asm/qspinlock.h:14-28`）用 `lock btsl` 原子地置位 pending 并取回旧值。成为 pending 者后，它在 `locked` 字节上自旋直到持锁者释放，然后用一次 16 位写 `clear_pending_set_locked()` 把 `(0,1,0)` 变为 `(0,0,1)`——同时清除 pending 并置位 locked。
+x86 的 `queued_fetch_set_pending_acquire()`（[`arch/x86/include/asm/qspinlock.h:14-28`](../../linux/arch/x86/include/asm/qspinlock.h#L14-L28)）用 `lock btsl` 原子地置位 pending 并取回旧值。成为 pending 者后，它在 `locked` 字节上自旋直到持锁者释放，然后用一次 16 位写 `clear_pending_set_locked()` 把 `(0,1,0)` 变为 `(0,0,1)`——同时清除 pending 并置位 locked。
 
 pending 位的意义在于：**两个 CPU 竞争时不必触碰 MCS 节点**。访问 per-CPU 节点意味着至少多一次缓存未命中，而大多数锁竞争都只有两方参与。
 
@@ -479,8 +490,9 @@ pending 位的意义在于：**两个 CPU 竞争时不必触碰 MCS 节点**。�
 
 三个及以上的竞争者进入排队阶段：
 
+[`kernel/locking/qspinlock.c:212-261`](../../linux/kernel/locking/qspinlock.c#L212-L261)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.c:212-261（v6.18.60）
 queue:
 	lockevent_inc(lock_slowpath);
 pv_queue:
@@ -537,8 +549,9 @@ pv_queue:
 
 接下来发布自己为新的队尾：
 
+[`kernel/locking/qspinlock.c:268-302`](../../linux/kernel/locking/qspinlock.c#L268-L302)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.c:268-302（v6.18.60）
 	smp_wmb();
 
 	/*
@@ -576,7 +589,7 @@ pv_queue:
 	}
 ```
 
-`xchg_tail()` 对高 16 位做一次 `xchg`（`kernel/locking/qspinlock.h:114-122`），原子地取回旧的 tail。如果旧 tail 非空，就把自己挂到前驱的 `next` 上，然后在**自己节点的** `locked` 字段上自旋（`arch_mcs_spin_lock_contended()` 即 `smp_cond_load_acquire(l, VAL)`）。每个等待者只在本地缓存行上自旋，锁释放时只有队首被通知，消除了"惊群"式的缓存行争抢。
+`xchg_tail()` 对高 16 位做一次 `xchg`（[`kernel/locking/qspinlock.h:114-122`](../../linux/kernel/locking/qspinlock.h#L114-L122)），原子地取回旧的 tail。如果旧 tail 非空，就把自己挂到前驱的 `next` 上，然后在**自己节点的** `locked` 字段上自旋（`arch_mcs_spin_lock_contended()` 即 `smp_cond_load_acquire(l, VAL)`）。每个等待者只在本地缓存行上自旋，锁释放时只有队首被通知，消除了"惊群"式的缓存行争抢。
 
 `smp_wmb()` 保证节点初始化先于 tail 发布可见：其他 CPU 一旦通过 tail 找到这个节点，看到的必须是初始化后的内容。
 
@@ -584,8 +597,9 @@ pv_queue:
 
 成为队首后（无前驱，或被前驱"传位"），等待者改为在锁字本身上自旋：
 
+[`kernel/locking/qspinlock.c:325-371`](../../linux/kernel/locking/qspinlock.c#L325-L371)（v6.18.60）
+
 ```c
-// kernel/locking/qspinlock.c:325-371（v6.18.60）
 	if ((val = pv_wait_head_or_lock(lock, node)))
 		goto locked;
 
@@ -676,8 +690,9 @@ sequenceDiagram
 
 在不支持半虚拟化自旋锁的超级调用（hypervisor）上，x86 干脆放弃公平性：
 
+[`arch/x86/include/asm/qspinlock.h:79-110`](../../linux/arch/x86/include/asm/qspinlock.h#L79-L110)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/qspinlock.h:79-110（v6.18.60）
 /*
  * Shortcut for the queued_spin_lock_slowpath() function that allows
  * virt to hijack it.
@@ -712,14 +727,15 @@ static inline bool virt_spin_lock(struct qspinlock *lock)
 }
 ```
 
-`virt_spin_lock_key` 在检测到运行于虚拟机中时由 `native_pv_lock_init()`（`arch/x86/kernel/paravirt.c:57`）打开；KVM 与 Xen 在启用了更优的半虚拟化自旋锁、或判断无需该机制（如 vCPU 独占物理 CPU）时再关闭它（`arch/x86/kernel/kvm.c:1165`）。开启时，慢速路径的第一步就是用 test-and-set 循环取锁，绕过整个排队机制。
+`virt_spin_lock_key` 在检测到运行于虚拟机中时由 `native_pv_lock_init()`（[`arch/x86/kernel/paravirt.c:57`](../../linux/arch/x86/kernel/paravirt.c#L57)）打开；KVM 与 Xen 在启用了更优的半虚拟化自旋锁、或判断无需该机制（如 vCPU 独占物理 CPU）时再关闭它（[`arch/x86/kernel/kvm.c:1165`](../../linux/arch/x86/kernel/kvm.c#L1165)）。开启时，慢速路径的第一步就是用 test-and-set 循环取锁，绕过整个排队机制。
 
 ### pv_wait / pv_kick
 
-KVM 与 Xen 支持更好的方案：`__pv_queued_spin_lock_slowpath()` 由同一份 `qspinlock.c` 源码在定义 `_GEN_PV_LOCK_SLOWPATH` 后再编译一遍得到（`kernel/locking/qspinlock.c:384-404`），把 `pv_wait_node()` 等钩子替换为真实实现：
+KVM 与 Xen 支持更好的方案：`__pv_queued_spin_lock_slowpath()` 由同一份 `qspinlock.c` 源码在定义 `_GEN_PV_LOCK_SLOWPATH` 后再编译一遍得到（[`kernel/locking/qspinlock.c:384-404`](../../linux/kernel/locking/qspinlock.c#L384-L404)），把 `pv_wait_node()` 等钩子替换为真实实现：
+
+[`kernel/locking/qspinlock_paravirt.h:290-322`](../../linux/kernel/locking/qspinlock_paravirt.h#L290-L322)（v6.18.60）
 
 ```c
-// kernel/locking/qspinlock_paravirt.h:290-322（v6.18.60）
 static void pv_wait_node(struct mcs_spinlock *node, struct mcs_spinlock *prev)
 {
 	struct pv_node *pn = (struct pv_node *)node;
@@ -755,7 +771,7 @@ static void pv_wait_node(struct mcs_spinlock *node, struct mcs_spinlock *prev)
 			pv_wait(&pn->state, VCPU_HALTED);
 ```
 
-排队的 vCPU 先自旋 `SPIN_THRESHOLD`（`1 << 15`，`arch/x86/include/asm/spinlock.h:25`）次，仍未拿到就把自己标记为 `VCPU_HALTED` 并调用 `pv_wait()` 让出物理 CPU。KVM 上 `pv_wait` 为 `kvm_wait()`（执行 `HLT` 陷入宿主机），`pv_kick` 为 `kvm_kick_cpu()`（发起 `KVM_HC_KICK_CPU` 超级调用唤醒目标 vCPU），注册于 `arch/x86/kernel/kvm.c:1156-1157`。
+排队的 vCPU 先自旋 `SPIN_THRESHOLD`（`1 << 15`，[`arch/x86/include/asm/spinlock.h:25`](../../linux/arch/x86/include/asm/spinlock.h#L25)）次，仍未拿到就把自己标记为 `VCPU_HALTED` 并调用 `pv_wait()` 让出物理 CPU。KVM 上 `pv_wait` 为 `kvm_wait()`（执行 `HLT` 陷入宿主机），`pv_kick` 为 `kvm_kick_cpu()`（发起 `KVM_HC_KICK_CPU` 超级调用唤醒目标 vCPU），注册于 [`arch/x86/kernel/kvm.c:1156-1157`](../../linux/arch/x86/kernel/kvm.c#L1156-L1157)。
 
 队首 vCPU 睡眠前会把 `locked` 字节设为 `_Q_SLOW_VAL`（值为 3）并把锁登记到哈希表；解锁者发现 `locked == _Q_SLOW_VAL` 时走慢速解锁路径，查哈希表找到并踢醒队首。普通解锁（`locked == 1`）仍只是一次字节写。启动参数 `nopvspin` 可以关闭这一机制。
 
@@ -770,7 +786,7 @@ static void pv_wait_node(struct mcs_spinlock *node, struct mcs_spinlock *prev)
 
 ### 作用域锁 guard
 
-v6.5 起内核提供基于 `__attribute__((cleanup))` 的作用域锁（`include/linux/cleanup.h`）。`spinlock.h` 为各种变体定义了 guard 类型（如 `include/linux/spinlock.h:565` 的 `DEFINE_LOCK_GUARD_1(spinlock, ...)`），使用方式为：
+v6.5 起内核提供基于 `__attribute__((cleanup))` 的作用域锁（`include/linux/cleanup.h`）。`spinlock.h` 为各种变体定义了 guard 类型（如 [`include/linux/spinlock.h:565`](../../linux/include/linux/spinlock.h#L565) 的 `DEFINE_LOCK_GUARD_1(spinlock, ...)`），使用方式为：
 
 ```c
 // 用法示例（非源码原文）
@@ -783,7 +799,7 @@ if (!dev->ready)
 
 ### lockref：自旋锁与计数合一
 
-dentry 的引用计数需要在持有 `d_lock` 时修改，但大多数引用增减并不需要锁。`struct lockref`（`include/linux/lockref.h:25-35`）把 4 字节的 `spinlock_t` 与 4 字节的计数放进一个 64 位字：只要锁空闲（`queued_spin_value_unlocked()` 为真），就用一次 64 位 cmpxchg 直接修改计数；锁被持有时才退回加锁路径。这依赖 `CONFIG_ARCH_USE_CMPXCHG_LOCKREF=y` 以及 `spinlock_t` 恰好 4 字节——这也是 qspinlock 坚持压缩到 32 位的原因之一。
+dentry 的引用计数需要在持有 `d_lock` 时修改，但大多数引用增减并不需要锁。`struct lockref`（[`include/linux/lockref.h:25-35`](../../linux/include/linux/lockref.h#L25-L35)）把 4 字节的 `spinlock_t` 与 4 字节的计数放进一个 64 位字：只要锁空闲（`queued_spin_value_unlocked()` 为真），就用一次 64 位 cmpxchg 直接修改计数；锁被持有时才退回加锁路径。这依赖 `CONFIG_ARCH_USE_CMPXCHG_LOCKREF=y` 以及 `spinlock_t` 恰好 4 字节——这也是 qspinlock 坚持压缩到 32 位的原因之一。
 
 ## 动手实验
 

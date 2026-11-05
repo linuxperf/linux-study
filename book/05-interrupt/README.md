@@ -86,5 +86,5 @@
 - [ ] 5.4 的机器检查部分只覆盖入口与可恢复路径，MCA bank 解析、CMCI 与 `mce_severity()` 的细节可另行展开。
 - [ ] 5.5 未展开 Intel VT-d / AMD-Vi 中断重映射驱动（`drivers/iommu/`）与 posted interrupt（`CONFIG_X86_POSTED_MSI` 未开启）。
 - [ ] 部分历史版本号（如 IDT 重构 v4.14、x86 分层 irqdomain v3.19～v4.1、清理 IPI 改为定时器 v6.6、BH 工作队列 v6.9）依据社区资料整理，后续可补充对应提交号以便核对。
-- [ ] 若干代码块（如 `arch/x86/entry/entry_64.S:1207-1247`、`kernel/irq/manage.c:1553-1612`、`kernel/smp.c:811-879`、`kernel/workqueue.c:187-236`）超过 40 行建议值，可进一步拆分讲解。
+- [ ] 若干代码块（如 [`arch/x86/entry/entry_64.S:1207-1247`](../../linux/arch/x86/entry/entry_64.S#L1207-L1247)、[`kernel/irq/manage.c:1553-1612`](../../linux/kernel/irq/manage.c#L1553-L1612)、[`kernel/smp.c:811-879`](../../linux/kernel/smp.c#L811-L879)、[`kernel/workqueue.c:187-236`](../../linux/kernel/workqueue.c#L187-L236)）超过 40 行建议值，可进一步拆分讲解。
 - [ ] 图 5-3、5-7、5-9、5-10、5-14 的 Mermaid 时序图与图 5-4、5-12 的状态图需在目标渲染器中确认显示效果。

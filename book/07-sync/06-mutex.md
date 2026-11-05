@@ -1,6 +1,6 @@
 # 7.6 互斥锁与乐观自旋
 
-> **本节源码**：`include/linux/mutex_types.h`、`include/linux/mutex.h`、`kernel/locking/mutex.h`、`kernel/locking/mutex.c`、`kernel/locking/osq_lock.c`、`include/linux/osq_lock.h`、`include/linux/sched.h`
+> **本节源码**：[`include/linux/mutex_types.h`](../../linux/include/linux/mutex_types.h)、[`include/linux/mutex.h`](../../linux/include/linux/mutex.h)、[`kernel/locking/mutex.h`](../../linux/kernel/locking/mutex.h)、[`kernel/locking/mutex.c`](../../linux/kernel/locking/mutex.c)、[`kernel/locking/osq_lock.c`](../../linux/kernel/locking/osq_lock.c)、[`include/linux/osq_lock.h`](../../linux/include/linux/osq_lock.h)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)
 > **关键函数**：`mutex_lock()`、`__mutex_trylock_fast()`、`__mutex_lock_common()`、`__mutex_trylock_common()`、`mutex_optimistic_spin()`、`mutex_spin_on_owner()`、`osq_lock()`、`mutex_unlock()`、`__mutex_unlock_slowpath()`、`__mutex_handoff()`
 > **前置知识**：7.4 自旋锁与 qspinlock、3.4 任务创建与唤醒（睡眠与唤醒的协议）
 
@@ -16,8 +16,9 @@
 
 ### struct mutex
 
+[`include/linux/mutex_types.h:41-54`](../../linux/include/linux/mutex_types.h#L41-L54)（v6.18.60）
+
 ```c
-// include/linux/mutex_types.h:41-54（v6.18.60）
 struct mutex {
 	atomic_long_t		owner;
 	raw_spinlock_t		wait_lock;
@@ -43,8 +44,9 @@ struct mutex {
 
 ### owner 的标志位
 
+[`kernel/locking/mutex.h:22-36`](../../linux/kernel/locking/mutex.h#L22-L36)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.h:22-36（v6.18.60）
 
 /*
  * @owner: contains: 'struct task_struct *' to the current lock owner,
@@ -70,8 +72,9 @@ struct mutex {
 
 ### 等待者
 
+[`kernel/locking/mutex.h:14-21`](../../linux/kernel/locking/mutex.h#L14-L21)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.h:14-21（v6.18.60）
 struct mutex_waiter {
 	struct list_head	list;
 	struct task_struct	*task;
@@ -113,8 +116,9 @@ mutex_unlock()                              kernel/locking/mutex.c:530
 
 ### 快速路径
 
+[`kernel/locking/mutex.c:269-275`](../../linux/kernel/locking/mutex.c#L269-L275)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:269-275（v6.18.60）
 void __sched mutex_lock(struct mutex *lock)
 {
 	might_sleep();
@@ -124,8 +128,9 @@ void __sched mutex_lock(struct mutex *lock)
 }
 ```
 
+[`kernel/locking/mutex.c:150-168`](../../linux/kernel/locking/mutex.c#L150-L168)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:150-168（v6.18.60）
 static __always_inline bool __mutex_trylock_fast(struct mutex *lock)
 {
 	unsigned long curr = (unsigned long)current;
@@ -155,8 +160,9 @@ static __always_inline bool __mutex_unlock_fast(struct mutex *lock)
 
 慢速路径中的各处"尝试获取"都调用 `__mutex_trylock_common()`：
 
+[`kernel/locking/mutex.c:87-121`](../../linux/kernel/locking/mutex.c#L87-L121)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:87-121（v6.18.60）
 static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, bool handoff)
 {
 	unsigned long owner, curr = (unsigned long)current;
@@ -204,8 +210,9 @@ static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, boo
 
 ### 慢速路径：先自旋，再睡眠
 
+[`kernel/locking/mutex.c:597-621`](../../linux/kernel/locking/mutex.c#L597-L621)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:597-621（v6.18.60）
 	preempt_disable();
 	mutex_acquire_nest(&lock->dep_map, subclass, 0, nest_lock, ip);
 
@@ -237,8 +244,9 @@ static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, boo
 
 如果乐观自旋失败，就获取 `wait_lock` 并最后试一次，然后入队睡眠：
 
+[`kernel/locking/mutex.c:630-676`](../../linux/kernel/locking/mutex.c#L630-L676)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:630-676（v6.18.60）
 	if (!use_ww_ctx) {
 		/* add waiting tasks to the end of the waitqueue (FIFO): */
 		__mutex_add_waiter(lock, &waiter, &lock->wait_list);
@@ -292,8 +300,9 @@ static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, boo
 
 被唤醒之后：
 
+[`kernel/locking/mutex.c:678-711`](../../linux/kernel/locking/mutex.c#L678-L711)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:678-711（v6.18.60）
 		first = __mutex_waiter_is_first(lock, &waiter);
 
 		/*
@@ -337,8 +346,9 @@ static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, boo
 
 ### 乐观自旋
 
+[`kernel/locking/mutex.c:428-479`](../../linux/kernel/locking/mutex.c#L428-L479)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:428-479（v6.18.60）
 static __always_inline bool
 mutex_optimistic_spin(struct mutex *lock, struct ww_acquire_ctx *ww_ctx,
 		      struct mutex_waiter *waiter)
@@ -398,8 +408,9 @@ mutex_optimistic_spin(struct mutex *lock, struct ww_acquire_ctx *ww_ctx,
 1. **OSQ 排队**：所有想要自旋的任务先获取 `lock->osq`，只有 OSQ 的持有者才在 `owner` 上自旋。这避免了几十个 CPU 同时轮询 `mutex->owner` 所在缓存行。
 2. **在持锁者上自旋**：只要 `owner` 不变且持锁者还在 CPU 上运行，就一直等待：
 
+[`kernel/locking/mutex.c:339-375`](../../linux/kernel/locking/mutex.c#L339-L375)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:339-375（v6.18.60）
 static noinline
 bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
 			 struct ww_acquire_ctx *ww_ctx, struct mutex_waiter *waiter)
@@ -441,8 +452,9 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
 
 退出自旋的条件有三个：`owner` 变化（锁被释放或易主，回到循环开头重新 trylock）；持锁者不再运行（它睡眠了，继续自旋没有意义）；本 CPU 需要重新调度（`need_resched()`，不能霸占 CPU）。`owner_on_cpu()` 还检查持锁者所在的 vCPU 是否被宿主机抢占：
 
+[`include/linux/sched.h:2292-2299`](../../linux/include/linux/sched.h#L2292-L2299)（v6.18.60）
+
 ```c
-// include/linux/sched.h:2292-2299（v6.18.60）
 static inline bool owner_on_cpu(struct task_struct *owner)
 {
 	/*
@@ -459,8 +471,9 @@ static inline bool owner_on_cpu(struct task_struct *owner)
 
 OSQ（Optimistic Spin Queue）是专为乐观自旋设计的 MCS 锁变体，与 qspinlock 一样使用 per-CPU 节点，但多了一个关键能力：**可以中途放弃排队**。
 
+[`kernel/locking/osq_lock.c:15-21`](../../linux/kernel/locking/osq_lock.c#L15-L21)（v6.18.60）
+
 ```c
-// kernel/locking/osq_lock.c:15-21（v6.18.60）
 struct optimistic_spin_node {
 	struct optimistic_spin_node *next, *prev;
 	int locked; /* 1 if lock acquired */
@@ -470,8 +483,9 @@ struct optimistic_spin_node {
 static DEFINE_PER_CPU_SHARED_ALIGNED(struct optimistic_spin_node, osq_node);
 ```
 
+[`include/linux/osq_lock.h:10-18`](../../linux/include/linux/osq_lock.h#L10-L18)（v6.18.60）
+
 ```c
-// include/linux/osq_lock.h:10-18（v6.18.60）
 struct optimistic_spin_queue {
 	/*
 	 * Stores an encoded value of the CPU # of the tail node in the queue.
@@ -485,8 +499,9 @@ struct optimistic_spin_queue {
 
 `osq_lock()` 的前半部分是标准的 MCS 入队：
 
+[`kernel/locking/osq_lock.c:93-148`](../../linux/kernel/locking/osq_lock.c#L93-L148)（v6.18.60）
+
 ```c
-// kernel/locking/osq_lock.c:93-148（v6.18.60）
 bool osq_lock(struct optimistic_spin_queue *lock)
 {
 	struct optimistic_spin_node *node = this_cpu_ptr(&osq_node);
@@ -549,8 +564,9 @@ bool osq_lock(struct optimistic_spin_queue *lock)
 
 ### 解锁慢速路径与移交
 
+[`kernel/locking/mutex.c:915-966`](../../linux/kernel/locking/mutex.c#L915-L966)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:915-966（v6.18.60）
 static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigned long ip)
 {
 	struct task_struct *next = NULL;
@@ -609,8 +625,9 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 
 如果队首设置了 `HANDOFF`，解锁者就不清除 owner，而是在唤醒队首的同时调用 `__mutex_handoff()`：
 
+[`kernel/locking/mutex.c:219-237`](../../linux/kernel/locking/mutex.c#L219-L237)（v6.18.60）
+
 ```c
-// kernel/locking/mutex.c:219-237（v6.18.60）
 static void __mutex_handoff(struct mutex *lock, struct task_struct *task)
 {
 	unsigned long owner = atomic_long_read(&lock->owner);
@@ -651,7 +668,7 @@ v4.10 之前的 mutex 允许任意次数的抢锁，等待者在极端情况下�
 - 只能由持锁者解锁，不能在中断上下文中加锁或解锁。
 - 不可递归加锁。
 - 持锁任务不能退出。
-- `mutex_unlock()` 返回前，mutex 本身必须保持有效：解锁慢速路径在 `owner` 被清除后仍会访问 `wait_lock`，因此**不能**用 `mutex_unlock()` 之后立即释放包含它的对象的方式来管理生命周期（`mutex_unlock()` 的注释专门指出这一点，`kernel/locking/mutex.c:523-526`）；应使用引用计数。
+- `mutex_unlock()` 返回前，mutex 本身必须保持有效：解锁慢速路径在 `owner` 被清除后仍会访问 `wait_lock`，因此**不能**用 `mutex_unlock()` 之后立即释放包含它的对象的方式来管理生命周期（`mutex_unlock()` 的注释专门指出这一点，[`kernel/locking/mutex.c:523-526`](../../linux/kernel/locking/mutex.c#L523-L526)）；应使用引用计数。
 
 ### ww_mutex
 
@@ -659,7 +676,7 @@ v4.10 之前的 mutex 允许任意次数的抢锁，等待者在极端情况下�
 
 ### PREEMPT_RT 下的 mutex
 
-开启 `CONFIG_PREEMPT_RT` 后，`struct mutex` 改为基于 `rt_mutex_base`（`include/linux/mutex_types.h:62-67`），从而获得优先级继承能力（7.8 节）。普通内核中 mutex 不支持优先级继承。
+开启 `CONFIG_PREEMPT_RT` 后，`struct mutex` 改为基于 `rt_mutex_base`（[`include/linux/mutex_types.h:62-67`](../../linux/include/linux/mutex_types.h#L62-L67)），从而获得优先级继承能力（7.8 节）。普通内核中 mutex 不支持优先级继承。
 
 ## 动手实验
 

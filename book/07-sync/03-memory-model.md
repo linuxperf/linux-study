@@ -1,6 +1,6 @@
 # 7.3 内存屏障与 Linux 内核内存模型
 
-> **本节源码**：`include/linux/compiler.h`、`include/asm-generic/rwonce.h`、`arch/x86/include/asm/barrier.h`、`include/asm-generic/barrier.h`、`include/linux/spinlock.h`、`tools/memory-model/`
+> **本节源码**：[`include/linux/compiler.h`](../../linux/include/linux/compiler.h)、[`include/asm-generic/rwonce.h`](../../linux/include/asm-generic/rwonce.h)、[`arch/x86/include/asm/barrier.h`](../../linux/arch/x86/include/asm/barrier.h)、[`include/asm-generic/barrier.h`](../../linux/include/asm-generic/barrier.h)、[`include/linux/spinlock.h`](../../linux/include/linux/spinlock.h)、[`tools/memory-model/`](../../linux/tools/memory-model/)
 > **关键函数**：`barrier()`、`READ_ONCE()`、`WRITE_ONCE()`、`smp_mb()`、`smp_rmb()`、`smp_wmb()`、`smp_store_release()`、`smp_load_acquire()`、`smp_cond_load_acquire()`、`smp_mb__after_spinlock()`
 > **前置知识**：7.2 原子操作、位操作与引用计数
 
@@ -18,8 +18,9 @@ Linux 不依赖 C11 内存模型，而是定义了自己的 **Linux 内核内存
 
 编译器在不改变单线程语义的前提下可以：把循环中的读提出循环、合并两次写、把写推迟到函数末尾、甚至在寄存器压力大时重新读一次内存。最基本的对策是编译器屏障：
 
+[`include/linux/compiler.h:85`](../../linux/include/linux/compiler.h#L85)（v6.18.60）
+
 ```c
-// include/linux/compiler.h:85（v6.18.60）
 # define barrier() __asm__ __volatile__("": : :"memory")
 ```
 
@@ -29,8 +30,9 @@ Linux 不依赖 C11 内存模型，而是定义了自己的 **Linux 内核内存
 
 `barrier()` 作用于所有内存，粒度太粗。对单个共享变量，内核使用 `READ_ONCE()` / `WRITE_ONCE()`：
 
+[`include/asm-generic/rwonce.h:35-62`](../../linux/include/asm-generic/rwonce.h#L35-L62)（v6.18.60）
+
 ```c
-// include/asm-generic/rwonce.h:35-62（v6.18.60）
 #define compiletime_assert_rwonce_type(t)					\
 	compiletime_assert(__native_word(t) || sizeof(t) == sizeof(long long),	\
 		"Unsupported access size for {READ,WRITE}_ONCE().")
@@ -88,8 +90,9 @@ LKMM 中，所有可能与其他 CPU 并发访问的普通变量都应该使用 
 
 内核有两组 CPU 屏障。`mb()` / `rmb()` / `wmb()` 是**强制屏障**，即使在单处理器内核上也生效，用于与设备之间的同步（例如写完 DMA 描述符后再写门铃寄存器）。`smp_mb()` / `smp_rmb()` / `smp_wmb()` 是 **SMP 屏障**，只用于 CPU 之间的同步，在 `CONFIG_SMP=n` 时退化为 `barrier()`。x86_64 的实现如下：
 
+[`arch/x86/include/asm/barrier.h:21-25`](../../linux/arch/x86/include/asm/barrier.h#L21-L25)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/barrier.h:21-25（v6.18.60）
 #else
 #define __mb()	asm volatile("mfence":::"memory")
 #define __rmb()	asm volatile("lfence":::"memory")
@@ -97,8 +100,9 @@ LKMM 中，所有可能与其他 CPU 并发访问的普通变量都应该使用 
 #endif
 ```
 
+[`arch/x86/include/asm/barrier.h:50-79`](../../linux/arch/x86/include/asm/barrier.h#L50-L79)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/barrier.h:50-79（v6.18.60）
 #define __dma_rmb()	barrier()
 #define __dma_wmb()	barrier()
 
@@ -141,8 +145,9 @@ do {									\
 
 通用层在这些架构原语外面加上 KCSAN 钩子：
 
+[`include/asm-generic/barrier.h:96-122`](../../linux/include/asm-generic/barrier.h#L96-L122)（v6.18.60）
+
 ```c
-// include/asm-generic/barrier.h:96-122（v6.18.60）
 #ifdef CONFIG_SMP
 
 #ifndef smp_mb
@@ -189,8 +194,9 @@ do {									\
 
 生产者先写数据再写标志，消费者先读标志再读数据。若无任何屏障，弱内存序 CPU 上消费者可能看到"标志已置位但数据还是旧的"。正确写法：
 
+[`tools/memory-model/litmus-tests/MP+pooncerelease+poacquireonce.litmus:1-28`](../../linux/tools/memory-model/litmus-tests/MP+pooncerelease+poacquireonce.litmus#L1-L28)（v6.18.60）
+
 ```c
-// tools/memory-model/litmus-tests/MP+pooncerelease+poacquireonce.litmus:1-28（v6.18.60）
 C MP+pooncerelease+poacquireonce
 
 (*
@@ -227,8 +233,9 @@ exists (1:r0=1 /\ 1:r1=0) (* Bad outcome. *)
 
 ### 存储缓冲（Store Buffering）
 
+[`tools/memory-model/litmus-tests/SB+poonceonces.litmus:1-29`](../../linux/tools/memory-model/litmus-tests/SB+poonceonces.litmus#L1-L29)（v6.18.60）
+
 ```c
-// tools/memory-model/litmus-tests/SB+poonceonces.litmus:1-29（v6.18.60）
 C SB+poonceonces
 
 (*
@@ -272,8 +279,9 @@ exists (0:r0=0 /\ 1:r0=0)
 - **地址依赖**：`p = READ_ONCE(gp); x = p->a;` 第二次读的地址取决于第一次读的值，所有现代 CPU（Alpha 除外，内核在 `READ_ONCE()` 中为其补屏障）都不会重排这两次读。`rcu_dereference()` 正是利用这一点，读端零开销（7.9 节）。
 - **控制依赖**：`if (READ_ONCE(x)) WRITE_ONCE(y, 1);` CPU 不会把依赖于条件的**写**提前到条件读之前执行（不能让推测执行的写对外可见），但依赖于条件的**读**可以提前。因此需要"读—读"有序时要补 `smp_acquire__after_ctrl_dep()`：
 
+[`include/asm-generic/barrier.h:222-233`](../../linux/include/asm-generic/barrier.h#L222-L233)（v6.18.60）
+
 ```c
-// include/asm-generic/barrier.h:222-233（v6.18.60）
 /**
  * smp_acquire__after_ctrl_dep() - Provide ACQUIRE ordering after a control dependency
  *
@@ -290,8 +298,9 @@ exists (0:r0=0 /\ 1:r0=0)
 
 自旋等待一个条件成立并获取 acquire 语义的常用写法是 `smp_cond_load_acquire()`：
 
+[`include/asm-generic/barrier.h:246-273`](../../linux/include/asm-generic/barrier.h#L246-L273)（v6.18.60）
+
 ```c
-// include/asm-generic/barrier.h:246-273（v6.18.60）
 #define smp_cond_load_relaxed(ptr, cond_expr) ({		\
 	typeof(ptr) __PTR = (ptr);				\
 	__unqual_scalar_typeof(*ptr) VAL;			\
@@ -328,8 +337,9 @@ exists (0:r0=0 /\ 1:r0=0)
 
 LKMM 规定 `spin_lock()` 是 acquire、`spin_unlock()` 是 release。这意味着"解锁之前的写"与"加锁之后的读"之间可以重排——锁并不是完整屏障。在需要完整屏障的地方，内核用 `smp_mb__after_spinlock()`：
 
+[`include/linux/spinlock.h:124-178`](../../linux/include/linux/spinlock.h#L124-L178)（v6.18.60）
+
 ```c
-// include/linux/spinlock.h:124-178（v6.18.60）
 /*
  * smp_mb__after_spinlock() provides the equivalent of a full memory barrier
  * between program-order earlier lock acquisitions and program-order later

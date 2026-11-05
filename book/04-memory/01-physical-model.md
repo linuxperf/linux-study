@@ -1,6 +1,6 @@
 # 4.1 物理内存模型：node、zone、page 与 folio
 
-> **本节源码**：`include/linux/mmzone.h`、`include/linux/mm_types.h`、`include/linux/page-flags.h`、`include/linux/page-flags-layout.h`、`include/asm-generic/memory_model.h`、`include/linux/gfp.h`、`arch/x86/mm/init.c`、`arch/x86/include/asm/page_64_types.h`
+> **本节源码**：[`include/linux/mmzone.h`](../../linux/include/linux/mmzone.h)、[`include/linux/mm_types.h`](../../linux/include/linux/mm_types.h)、[`include/linux/page-flags.h`](../../linux/include/linux/page-flags.h)、[`include/linux/page-flags-layout.h`](../../linux/include/linux/page-flags-layout.h)、[`include/asm-generic/memory_model.h`](../../linux/include/asm-generic/memory_model.h)、[`include/linux/gfp.h`](../../linux/include/linux/gfp.h)、[`arch/x86/mm/init.c`](../../linux/arch/x86/mm/init.c)、[`arch/x86/include/asm/page_64_types.h`](../../linux/arch/x86/include/asm/page_64_types.h)
 > **关键函数**：`zone_sizes_init()`、`gfp_zone()`、`node_zonelist()`、`page_zone()`、`page_folio()`、`pfn_to_page()`
 > **前置知识**：操作系统中的分页、物理地址与虚拟地址的概念
 
@@ -36,8 +36,9 @@ Linux 为此建立了三层抽象：**节点（Node）** 对应一组访问延�
 
 节点描述符通过 `NODE_DATA()` 访问：
 
+[`include/linux/numa.h:25-26`](../../linux/include/linux/numa.h#L25-L26)（v6.18.60）
+
 ```c
-// include/linux/numa.h:25-26（v6.18.60）
 extern struct pglist_data *node_data[];
 #define NODE_DATA(nid)	(node_data[nid])
 ```
@@ -46,8 +47,9 @@ extern struct pglist_data *node_data[];
 
 `pglist_data`（又名 `pg_data_t`）有上百行，这里只保留与本章相关的字段：
 
+[`include/linux/mmzone.h:1385-1525`](../../linux/include/linux/mmzone.h#L1385-L1525)（v6.18.60，节选，删去注释）
+
 ```c
-// include/linux/mmzone.h:1385-1525（v6.18.60，节选，删去注释）
 typedef struct pglist_data {
 	struct zone node_zones[MAX_NR_ZONES];		// [注] 本节点的所有 zone
 	struct zonelist node_zonelists[MAX_ZONELISTS];	// [注] 分配时的 zone 回退顺序
@@ -82,8 +84,9 @@ typedef struct pglist_data {
 
 ### zone 的类型
 
+[`include/linux/mmzone.h:784-877`](../../linux/include/linux/mmzone.h#L784-L877)（v6.18.60，删去长注释）
+
 ```c
-// include/linux/mmzone.h:784-877（v6.18.60，删去长注释）
 enum zone_type {
 #ifdef CONFIG_ZONE_DMA
 	ZONE_DMA,
@@ -116,8 +119,9 @@ enum zone_type {
 
 x86_64 的边界由 `zone_sizes_init()` 设定：
 
+[`arch/x86/mm/init.c:1000-1018`](../../linux/arch/x86/mm/init.c#L1000-L1018)（v6.18.60）
+
 ```c
-// arch/x86/mm/init.c:1000-1018（v6.18.60）
 void __init zone_sizes_init(void)
 {
 	unsigned long max_zone_pfns[MAX_NR_ZONES];
@@ -139,14 +143,15 @@ void __init zone_sizes_init(void)
 }
 ```
 
-`MAX_DMA_PFN` 与 `MAX_DMA32_PFN` 分别是 16 MB 和 4 GB 对应的 PFN（`arch/x86/include/asm/dma.h:74`、`:77`）。数组记录的是每个 zone 的**结束** PFN，`free_area_init()` 据此计算各 zone 的起止范围（4.2 节）。可见，内存不足 4 GB 的虚拟机上 `ZONE_NORMAL` 为空，绝大部分内存都在 `ZONE_DMA32` 中。
+`MAX_DMA_PFN` 与 `MAX_DMA32_PFN` 分别是 16 MB 和 4 GB 对应的 PFN（[`arch/x86/include/asm/dma.h:74`](../../linux/arch/x86/include/asm/dma.h#L74)、`:77`）。数组记录的是每个 zone 的**结束** PFN，`free_area_init()` 据此计算各 zone 的起止范围（4.2 节）。可见，内存不足 4 GB 的虚拟机上 `ZONE_NORMAL` 为空，绝大部分内存都在 `ZONE_DMA32` 中。
 
 ### 结构体字段
 
 `struct zone` 用 `CACHELINE_PADDING()` 分为三个区域：读多写少的字段、分配器频繁写的字段、规整与统计频繁写的字段，避免伪共享。
 
+[`include/linux/mmzone.h:879-1013`](../../linux/include/linux/mmzone.h#L879-L1013)（v6.18.60，节选，删去注释）
+
 ```c
-// include/linux/mmzone.h:879-1013（v6.18.60，节选，删去注释）
 struct zone {
 	/* Read-mostly fields */
 
@@ -198,8 +203,9 @@ managed_pages = present_pages - reserved_pages        （去掉启动期保留�
 
 `free_area[]` 是伙伴系统的核心，每个阶（order）一项，每项再按迁移类型分成多条链表：
 
+[`include/linux/mmzone.h:138-141`](../../linux/include/linux/mmzone.h#L138-L141)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:138-141（v6.18.60）
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
 	unsigned long		nr_free;
@@ -208,8 +214,9 @@ struct free_area {
 
 最大阶由 `MAX_PAGE_ORDER` 决定，x86_64 上未定义 `CONFIG_ARCH_FORCE_MAX_ORDER`，取默认值 10，即一次最多分配 2^10 × 4 KB = 4 MB 连续物理内存：
 
+[`include/linux/mmzone.h:29-38`](../../linux/include/linux/mmzone.h#L29-L38)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:29-38（v6.18.60）
 #ifndef CONFIG_ARCH_FORCE_MAX_ORDER
 #define MAX_PAGE_ORDER 10
 #else
@@ -226,8 +233,9 @@ struct free_area {
 
 迁移类型（Migrate Type）把物理内存按"页能否被移动"分组，是抗碎片化的基础：
 
+[`include/linux/mmzone.h:64-87`](../../linux/include/linux/mmzone.h#L64-L87)（v6.18.60，删去注释）
+
 ```c
-// include/linux/mmzone.h:64-87（v6.18.60，删去注释）
 enum migratetype {
 	MIGRATE_UNMOVABLE,
 	MIGRATE_MOVABLE,
@@ -247,14 +255,15 @@ enum migratetype {
 };
 ```
 
-迁移类型不是记录在单个页上，而是记录在**页块（pageblock）** 上：每 2^`pageblock_order` 个页共享一组标志位（本书配置 `CONFIG_PAGE_BLOCK_MAX_ORDER=10`，启用 `CONFIG_HUGETLB_PAGE` 时 `pageblock_order` 取 `MIN_T(unsigned int, HUGETLB_PAGE_ORDER, PAGE_BLOCK_MAX_ORDER)`（`include/linux/pageblock-flags.h:60`），x86_64 上为 9，对应 2 MB）。4.3 节会分析分配器如何在迁移类型之间"借用"页块。
+迁移类型不是记录在单个页上，而是记录在**页块（pageblock）** 上：每 2^`pageblock_order` 个页共享一组标志位（本书配置 `CONFIG_PAGE_BLOCK_MAX_ORDER=10`，启用 `CONFIG_HUGETLB_PAGE` 时 `pageblock_order` 取 `MIN_T(unsigned int, HUGETLB_PAGE_ORDER, PAGE_BLOCK_MAX_ORDER)`（[`include/linux/pageblock-flags.h:60`](../../linux/include/linux/pageblock-flags.h#L60)），x86_64 上为 9，对应 2 MB）。4.3 节会分析分配器如何在迁移类型之间"借用"页块。
 
 ### zonelist：分配回退顺序
 
 一次分配请求首先确定"最高可用 zone"，然后沿着 zonelist 从高到低、从近到远依次尝试。zonelist 中的每一项是 `zoneref`，缓存了 zone 下标以减少解引用：
 
+[`include/linux/mmzone.h:1298-1335`](../../linux/include/linux/mmzone.h#L1298-L1335)（v6.18.60，节选）
+
 ```c
-// include/linux/mmzone.h:1298-1335（v6.18.60，节选）
 enum {
 	ZONELIST_FALLBACK,	/* zonelist with fallback */
 #ifdef CONFIG_NUMA
@@ -279,8 +288,9 @@ struct zonelist {
 
 调用者通过 GFP（Get Free Pages）标志表达"能从哪些 zone 分配、能否睡眠、能否回收"等约束。常见组合定义在 `gfp_types.h`：
 
+[`include/linux/gfp_types.h:377-390`](../../linux/include/linux/gfp_types.h#L377-L390)（v6.18.60）
+
 ```c
-// include/linux/gfp_types.h:377-390（v6.18.60）
 #define GFP_ATOMIC	(__GFP_HIGH|__GFP_KSWAPD_RECLAIM)
 #define GFP_KERNEL	(__GFP_RECLAIM | __GFP_IO | __GFP_FS)
 #define GFP_KERNEL_ACCOUNT (GFP_KERNEL | __GFP_ACCOUNT)
@@ -299,8 +309,9 @@ struct zonelist {
 
 其中 `__GFP_DMA`、`__GFP_DMA32`、`__GFP_HIGHMEM`、`__GFP_MOVABLE` 四位是 **zone 修饰符**。`gfp_zone()` 把这四位当作下标，查一张编码在常量 `GFP_ZONE_TABLE` 里的表，得到允许使用的最高 zone：
 
+[`include/linux/gfp.h:156-165`](../../linux/include/linux/gfp.h#L156-L165)（v6.18.60）
+
 ```c
-// include/linux/gfp.h:156-165（v6.18.60）
 static inline enum zone_type gfp_zone(gfp_t flags)
 {
 	enum zone_type z;
@@ -317,8 +328,9 @@ static inline enum zone_type gfp_zone(gfp_t flags)
 
 zonelist 的选择则由 `__GFP_THISNODE` 决定：
 
+[`include/linux/gfp.h:174-181`](../../linux/include/linux/gfp.h#L174-L181)（v6.18.60）
+
 ```c
-// include/linux/gfp.h:174-181（v6.18.60）
 static inline int gfp_zonelist(gfp_t flags)
 {
 #ifdef CONFIG_NUMA
@@ -335,8 +347,9 @@ static inline int gfp_zonelist(gfp_t flags)
 
 每个物理页帧对应一个 `struct page`。由于数量巨大（16 GB 内存就有 400 万个），内核把它压缩到 64 字节（x86_64），并大量使用联合体让不同用途复用同一块空间：
 
+[`include/linux/mm_types.h:78-125`](../../linux/include/linux/mm_types.h#L78-L125)（v6.18.60，节选，删去部分注释）
+
 ```c
-// include/linux/mm_types.h:78-125（v6.18.60，节选，删去部分注释）
 struct page {
 	memdesc_flags_t flags;		/* Atomic flags, some possibly
 					 * updated asynchronously */
@@ -370,8 +383,9 @@ struct page {
 		...
 ```
 
+[`include/linux/mm_types.h:153-221`](../../linux/include/linux/mm_types.h#L153-L221)（v6.18.60，节选，删去注释）
+
 ```c
-// include/linux/mm_types.h:153-221（v6.18.60，节选，删去注释）
 	union {		/* This union is 4 bytes in size. */
 		unsigned int page_type;
 		atomic_t _mapcount;
@@ -411,8 +425,9 @@ struct page {
 
 `flags` 的低位是 `enum pageflags` 定义的标志位：
 
+[`include/linux/page-flags.h:93-113`](../../linux/include/linux/page-flags.h#L93-L113)（v6.18.60）
+
 ```c
-// include/linux/page-flags.h:93-113（v6.18.60）
 enum pageflags {
 	PG_locked,		/* Page is locked. Don't touch. */
 	PG_writeback,		/* Page is under writeback */
@@ -438,8 +453,9 @@ enum pageflags {
 
 高位则存放 node 号、zone 号以及（启用 MGLRU 时）代数信息等。`page-flags-layout.h` 的注释给出了几种布局，在 `CONFIG_SPARSEMEM_VMEMMAP` 下不需要存 section 号：
 
+[`include/linux/page-flags-layout.h:44-50`](../../linux/include/linux/page-flags-layout.h#L44-L50)（v6.18.60）
+
 ```c
-// include/linux/page-flags-layout.h:44-50（v6.18.60）
  * No sparsemem or sparsemem vmemmap: |       NODE     | ZONE |             ... | FLAGS |
  *      " plus space for last_cpupid: |       NODE     | ZONE | LAST_CPUPID ... | FLAGS |
  * classic sparse with space for node:| SECTION | NODE | ZONE |             ... | FLAGS |
@@ -449,8 +465,9 @@ enum pageflags {
 
 于是从 `struct page` 找到所属 zone 只需要两次移位与掩码：
 
+[`include/linux/mmzone.h:1187-1196`](../../linux/include/linux/mmzone.h#L1187-L1196)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:1187-1196（v6.18.60）
 static inline enum zone_type memdesc_zonenum(memdesc_flags_t flags)
 {
 	ASSERT_EXCLUSIVE_BITS(flags.f, ZONES_MASK << ZONES_PGSHIFT);
@@ -463,8 +480,9 @@ static inline enum zone_type page_zonenum(const struct page *page)
 }
 ```
 
+[`include/linux/mm.h:1909-1912`](../../linux/include/linux/mm.h#L1909-L1912)（v6.18.60）
+
 ```c
-// include/linux/mm.h:1909-1912（v6.18.60）
 static inline struct zone *page_zone(const struct page *page)
 {
 	return &NODE_DATA(page_to_nid(page))->node_zones[page_zonenum(page)];
@@ -483,8 +501,9 @@ static inline struct zone *page_zone(const struct page *page)
 
 `struct folio` 与连续 4 个 `struct page` 在内存上重叠。第一部分与头页字段一一对应，之后三部分复用第 1～3 个尾页的空间存放大 folio 的元数据：
 
+[`include/linux/mm_types.h:377-421`](../../linux/include/linux/mm_types.h#L377-L421)（v6.18.60，节选）
+
 ```c
-// include/linux/mm_types.h:377-421（v6.18.60，节选）
 struct folio {
 	/* private: don't document the anon union */
 	union {
@@ -514,8 +533,9 @@ struct folio {
 	};
 ```
 
+[`include/linux/mm_types.h:423-453`](../../linux/include/linux/mm_types.h#L423-L453)（v6.18.60，节选）
+
 ```c
-// include/linux/mm_types.h:423-453（v6.18.60，节选）
 	union {
 		struct {
 			unsigned long _flags_1;
@@ -547,8 +567,9 @@ struct folio {
 
 为了保证"重叠"严格成立，源码用一组 `static_assert` 检查偏移量：
 
+[`include/linux/mm_types.h:484-492`](../../linux/include/linux/mm_types.h#L484-L492)（v6.18.60）
+
 ```c
-// include/linux/mm_types.h:484-492（v6.18.60）
 #define FOLIO_MATCH(pg, fl)						\
 	static_assert(offsetof(struct page, pg) == offsetof(struct folio, fl))
 FOLIO_MATCH(flags, flags);
@@ -574,8 +595,9 @@ FOLIO_MATCH(_mapcount, _mapcount);
 
 从任意页找到所属 folio 就是找到头页：
 
+[`include/linux/page-flags.h:282-308`](../../linux/include/linux/page-flags.h#L282-L308)（v6.18.60，节选）
+
 ```c
-// include/linux/page-flags.h:282-308（v6.18.60，节选）
 static __always_inline unsigned long _compound_head(const struct page *page)
 {
 	unsigned long head = READ_ONCE(page->compound_head);
@@ -602,8 +624,9 @@ static __always_inline unsigned long _compound_head(const struct page *page)
 
 **稀疏内存模型（SPARSEMEM）** 把物理地址空间按固定大小切成段（section），x86_64 上每段 128 MB：
 
+[`arch/x86/include/asm/sparsemem.h:27-29`](../../linux/arch/x86/include/asm/sparsemem.h#L27-L29)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/sparsemem.h:27-29（v6.18.60）
 #else /* CONFIG_X86_32 */
 # define SECTION_SIZE_BITS	27 /* matt - 128 is convenient right now */
 # define MAX_PHYSMEM_BITS	(pgtable_l5_enabled() ? 52 : 46)
@@ -611,8 +634,9 @@ static __always_inline unsigned long _compound_head(const struct page *page)
 
 每个段用一个 `mem_section` 描述，只有存在内存的段才分配 `struct page`。本书配置启用 `CONFIG_SPARSEMEM_EXTREME`，`mem_section` 本身也是二级动态分配的：
 
+[`include/linux/mmzone.h:1937-1952`](../../linux/include/linux/mmzone.h#L1937-L1952)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:1937-1952（v6.18.60）
 #ifdef CONFIG_SPARSEMEM_EXTREME
 #define SECTIONS_PER_ROOT       (PAGE_SIZE / sizeof (struct mem_section))
 #else
@@ -634,8 +658,9 @@ extern struct mem_section mem_section[NR_SECTION_ROOTS][SECTIONS_PER_ROOT];
 
 经典 SPARSEMEM 中，`pfn_to_page()` 需要先找到 section 再计算偏移，开销较大。`CONFIG_SPARSEMEM_VMEMMAP`（本书配置已启用）的做法是：在内核虚拟地址空间中预留一段区域 `vmemmap`，把**所有可能的** `struct page` 按 PFN 顺序排列在这段虚拟地址上，但只为真正存在内存的部分建立页表映射。这样转换就退化为指针运算：
 
+[`include/asm-generic/memory_model.h:43-47`](../../linux/include/asm-generic/memory_model.h#L43-L47)（v6.18.60）
+
 ```c
-// include/asm-generic/memory_model.h:43-47（v6.18.60）
 #elif defined(CONFIG_SPARSEMEM_VMEMMAP)
 
 /* memmap is virtually contiguous.  */
@@ -643,7 +668,7 @@ extern struct mem_section mem_section[NR_SECTION_ROOTS][SECTIONS_PER_ROOT];
 #define __page_to_pfn(page)	(unsigned long)((page) - vmemmap)
 ```
 
-x86_64 上 `vmemmap` 的基址是 `vmemmap_base`，在四级页表下默认为 `0xffffea0000000000`（`arch/x86/include/asm/pgtable_64_types.h:113`），开启 `CONFIG_RANDOMIZE_MEMORY` 后会在启动时随机化（4.6 节）。
+x86_64 上 `vmemmap` 的基址是 `vmemmap_base`，在四级页表下默认为 `0xffffea0000000000`（[`arch/x86/include/asm/pgtable_64_types.h:113`](../../linux/arch/x86/include/asm/pgtable_64_types.h#L113)），开启 `CONFIG_RANDOMIZE_MEMORY` 后会在启动时随机化（4.6 节）。
 
 ## 地址转换小结
 
@@ -663,15 +688,17 @@ x86_64 上 `vmemmap` 的基址是 `vmemmap_base`，在四级页表下默认为 `
 
 x86_64 把全部物理内存线性映射在 `PAGE_OFFSET`（即 `page_offset_base`，四级页表下默认 `0xffff888000000000`）开始的区域，称为**直接映射区（Direct Map）**：
 
+[`arch/x86/include/asm/page.h:58`](../../linux/arch/x86/include/asm/page.h#L58)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/page.h:58（v6.18.60）
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
 ```
 
 反方向的 `__pa()` 稍复杂，因为内核镜像本身还被映射在 `__START_KERNEL_map`（`0xffffffff80000000`）开始的区域，需要区分两种来源：
 
+[`arch/x86/include/asm/page_64.h:22-30`](../../linux/arch/x86/include/asm/page_64.h#L22-L30)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/page_64.h:22-30（v6.18.60）
 static __always_inline unsigned long __phys_addr_nodebug(unsigned long x)
 {
 	unsigned long y = x - __START_KERNEL_map;

@@ -1,6 +1,6 @@
 # 7.9 RCU 原理与使用
 
-> **本节源码**：`include/linux/rcupdate.h`、`include/linux/rculist.h`、`kernel/rcu/tree_plugin.h`、`include/linux/sched.h`
+> **本节源码**：[`include/linux/rcupdate.h`](../../linux/include/linux/rcupdate.h)、[`include/linux/rculist.h`](../../linux/include/linux/rculist.h)、[`kernel/rcu/tree_plugin.h`](../../linux/kernel/rcu/tree_plugin.h)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)
 > **关键函数**：`rcu_read_lock()`、`rcu_read_unlock()`、`rcu_dereference()`、`rcu_assign_pointer()`、`synchronize_rcu()`、`call_rcu()`、`kfree_rcu()`、`__rcu_read_lock()`、`__rcu_read_unlock()`、`rcu_note_context_switch()`、`rcu_read_unlock_special()`
 > **前置知识**：7.3 内存屏障与 Linux 内核内存模型、7.5 读写锁与顺序锁
 
@@ -59,8 +59,9 @@ sequenceDiagram
 
 ### 读端：rcu_read_lock
 
+[`include/linux/rcupdate.h:863-900`](../../linux/include/linux/rcupdate.h#L863-L900)（v6.18.60）
+
 ```c
-// include/linux/rcupdate.h:863-900（v6.18.60）
 static __always_inline void rcu_read_lock(void)
 {
 	__rcu_read_lock();
@@ -103,15 +104,16 @@ static inline void rcu_read_unlock(void)
 
 `__acquire(RCU)` / `__release(RCU)` 供 sparse 静态检查，`rcu_lock_acquire()` 供 lockdep 使用，本书配置下都为空。真正的工作在 `__rcu_read_lock()`，它有两种实现：
 
-- **非可抢占 RCU**（`CONFIG_PREEMPT_RCU=n`）：就是 `preempt_disable()`（`include/linux/rcupdate.h:91-94`）。读者不会被抢占，CPU 发生上下文切换即证明读者已经结束。
+- **非可抢占 RCU**（`CONFIG_PREEMPT_RCU=n`）：就是 `preempt_disable()`（[`include/linux/rcupdate.h:91-94`](../../linux/include/linux/rcupdate.h#L91-L94)）。读者不会被抢占，CPU 发生上下文切换即证明读者已经结束。
 - **可抢占 RCU**（`CONFIG_PREEMPT_RCU=y`，本书配置，由 `CONFIG_PREEMPTION` 选中）：读临界区可以被抢占，只增加一个 per-task 计数，见下文。
 
 注释中提到"没有 `rcu_write_lock()`"：写者之间的互斥由使用者自己用普通锁解决，RCU 只负责读者与写者之间的同步。
 
 ### 发布与订阅：rcu_assign_pointer / rcu_dereference
 
+[`include/linux/rcupdate.h:588-597`](../../linux/include/linux/rcupdate.h#L588-L597)（v6.18.60）
+
 ```c
-// include/linux/rcupdate.h:588-597（v6.18.60）
 #define rcu_assign_pointer(p, v)					      \
 do {									      \
 	uintptr_t _r_a_p__v = (uintptr_t)(v);				      \
@@ -126,8 +128,9 @@ do {									      \
 
 `rcu_assign_pointer()` 就是一次 `smp_store_release()`：保证新对象的初始化写入先于指针发布可见（7.3 节消息传递模式的写端）。赋值为常量 `NULL` 时无需顺序，退化为 `WRITE_ONCE()`。
 
+[`include/linux/rcupdate.h:529-536`](../../linux/include/linux/rcupdate.h#L529-L536)（v6.18.60）
+
 ```c
-// include/linux/rcupdate.h:529-536（v6.18.60）
 #define __rcu_dereference_check(p, local, c, space) \
 ({ \
 	/* Dependency order vs. p above. */ \
@@ -144,8 +147,9 @@ do {									      \
 
 `include/linux/rculist.h` 提供了 RCU 版本的链表操作：
 
+[`include/linux/rculist.h:97-107`](../../linux/include/linux/rculist.h#L97-L107)（v6.18.60）
+
 ```c
-// include/linux/rculist.h:97-107（v6.18.60）
 static inline void __list_add_rcu(struct list_head *new,
 		struct list_head *prev, struct list_head *next)
 {
@@ -159,8 +163,9 @@ static inline void __list_add_rcu(struct list_head *new,
 }
 ```
 
+[`include/linux/rculist.h:176-180`](../../linux/include/linux/rculist.h#L176-L180)（v6.18.60）
+
 ```c
-// include/linux/rculist.h:176-180（v6.18.60）
 static inline void list_del_rcu(struct list_head *entry)
 {
 	__list_del_entry(entry);
@@ -209,7 +214,7 @@ void foo_del(int key)                      /* 写者：互相之间用锁串行�
 
 `synchronize_rcu()` 阻塞调用者直到一个完整的宽限期结束，通常需要数毫秒到数十毫秒（取决于 `HZ`、负载与 NO_HZ 状态）。它只能在可睡眠的上下文中调用，也绝不能在 RCU 读临界区中调用（会自我死锁）。
 
-`call_rcu(head, func)` 把一个回调挂到本 CPU 的回调队列上立即返回，宽限期结束后在软中断（或 `rcuc` / `rcuo` 内核线程）中调用 `func(head)`。`struct rcu_head` 通常嵌入在被保护的对象中，回调用 `container_of()` 找回对象并释放它。`kfree_rcu()` 是最常见的特例：它不需要使用者写回调函数，内部把待释放指针批量收集到页大小的数组中（`kvfree_call_rcu()`，`include/linux/rcupdate.h:1113`），宽限期后用 `kfree_bulk()` 一次释放，大幅减少回调数量。
+`call_rcu(head, func)` 把一个回调挂到本 CPU 的回调队列上立即返回，宽限期结束后在软中断（或 `rcuc` / `rcuo` 内核线程）中调用 `func(head)`。`struct rcu_head` 通常嵌入在被保护的对象中，回调用 `container_of()` 找回对象并释放它。`kfree_rcu()` 是最常见的特例：它不需要使用者写回调函数，内部把待释放指针批量收集到页大小的数组中（`kvfree_call_rcu()`，[`include/linux/rcupdate.h:1113`](../../linux/include/linux/rcupdate.h#L1113)），宽限期后用 `kfree_bulk()` 一次释放，大幅减少回调数量。
 
 ## 可抢占 RCU 的读端
 
@@ -217,8 +222,9 @@ void foo_del(int key)                      /* 写者：互相之间用锁串行�
 
 本书配置的读端实现位于 `kernel/rcu/tree_plugin.h`：
 
+[`kernel/rcu/tree_plugin.h:386-449`](../../linux/kernel/rcu/tree_plugin.h#L386-L449)（v6.18.60）
+
 ```c
-// kernel/rcu/tree_plugin.h:386-449（v6.18.60）
 /* limit value for ->rcu_read_lock_nesting. */
 #define RCU_NEST_PMAX (INT_MAX / 2)
 
@@ -287,8 +293,9 @@ EXPORT_SYMBOL_GPL(__rcu_read_unlock);
 
 读者进入时只把 `current->rcu_read_lock_nesting` 加一，退出时减一——普通的内存读写，没有原子指令、没有内存屏障，也不关抢占。`barrier()` 防止编译器把临界区内的访问挪到计数修改之外。只有最外层退出（计数归零）且 `rcu_read_unlock_special` 非零时，才进入慢速路径。
 
+[`include/linux/sched.h:781-789`](../../linux/include/linux/sched.h#L781-L789)（v6.18.60）
+
 ```c
-// include/linux/sched.h:781-789（v6.18.60）
 union rcu_special {
 	struct {
 		u8			blocked;
@@ -300,8 +307,9 @@ union rcu_special {
 };
 ```
 
+[`include/linux/sched.h:926-929`](../../linux/include/linux/sched.h#L926-L929)（v6.18.60）
+
 ```c
-// include/linux/sched.h:926-929（v6.18.60）
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;
 	struct list_head		rcu_node_entry;
@@ -321,8 +329,9 @@ union rcu_special {
 
 可抢占 RCU 的难点在于：读者可能在临界区中被换下 CPU，此后该 CPU 发生了上下文切换，但读者显然还没结束。因此调度器在每次切换前调用 `rcu_note_context_switch()`（由 `__schedule()` 调用，3.2 节）：
 
+[`kernel/rcu/tree_plugin.h:324-375`](../../linux/kernel/rcu/tree_plugin.h#L324-L375)（v6.18.60）
+
 ```c
-// kernel/rcu/tree_plugin.h:324-375（v6.18.60）
 void rcu_note_context_switch(bool preempt)
 {
 	struct task_struct *t = current;
@@ -385,8 +394,9 @@ EXPORT_SYMBOL_GPL(rcu_note_context_switch);
 
 `rcu_read_unlock()` 可能在持有调度器锁、关中断等上下文中调用，此时不能获取 `rcu_node` 锁或唤醒任务。`rcu_read_unlock_special()` 会检测这种情况，把静止状态报告推迟：
 
+[`kernel/rcu/tree_plugin.h:725-760`](../../linux/kernel/rcu/tree_plugin.h#L725-L760)（v6.18.60）
+
 ```c
-// kernel/rcu/tree_plugin.h:725-760（v6.18.60）
 static void rcu_read_unlock_special(struct task_struct *t)
 {
 	unsigned long flags;
@@ -433,7 +443,7 @@ static void rcu_read_unlock_special(struct task_struct *t)
 
 ## RCU 风味的统一
 
-历史上 Linux 有三种独立的 RCU "风味"（flavor）：RCU-preempt（`rcu_read_lock()`）、RCU-bh（`rcu_read_lock_bh()`）、RCU-sched（`rcu_read_lock_sched()` 或任何关抢占区间）。v4.20 起它们被统一：现在一个宽限期同时等待三类读者——关软中断区间、关抢占区间、关中断区间都被视为 RCU 读临界区。这正是 7.1 节说"关抢占也是 RCU 读临界区"的原因：`rcu_flavor_sched_clock_irq()` 在发现 `preempt_count()` 中有抢占或软中断计数时不报告静止状态（`kernel/rcu/tree_plugin.h:816-823`）。
+历史上 Linux 有三种独立的 RCU "风味"（flavor）：RCU-preempt（`rcu_read_lock()`）、RCU-bh（`rcu_read_lock_bh()`）、RCU-sched（`rcu_read_lock_sched()` 或任何关抢占区间）。v4.20 起它们被统一：现在一个宽限期同时等待三类读者——关软中断区间、关抢占区间、关中断区间都被视为 RCU 读临界区。这正是 7.1 节说"关抢占也是 RCU 读临界区"的原因：`rcu_flavor_sched_clock_irq()` 在发现 `preempt_count()` 中有抢占或软中断计数时不报告静止状态（[`kernel/rcu/tree_plugin.h:816-823`](../../linux/kernel/rcu/tree_plugin.h#L816-L823)）。
 
 此外还有几种用途特殊的变体：
 
@@ -470,7 +480,7 @@ RCU 并不适用于所有场景：如果读者必须看到最新数据，或更�
 
 ### SLAB_TYPESAFE_BY_RCU
 
-以 `SLAB_TYPESAFE_BY_RCU` 创建的 slab 缓存保证：对象被 `kmem_cache_free()` 后，其内存在一个宽限期内只会被重新分配为**同类型**对象，而 slab 页本身要等宽限期后才还给伙伴系统（4.5 节）。这让读者在 RCU 读临界区中访问一个可能已被释放并复用的对象时不会崩溃，但读者必须在获取引用后**重新验证**对象身份（例如比较键值），这正是 `refcount_inc_not_zero_acquire()` 存在的原因（7.2 节）。`sighand_struct`（`kernel/fork.c:2986`）、`anon_vma`（`mm/rmap.c:469`）、`struct file`（`fs/file_table.c:634`）等都采用这一技术。
+以 `SLAB_TYPESAFE_BY_RCU` 创建的 slab 缓存保证：对象被 `kmem_cache_free()` 后，其内存在一个宽限期内只会被重新分配为**同类型**对象，而 slab 页本身要等宽限期后才还给伙伴系统（4.5 节）。这让读者在 RCU 读临界区中访问一个可能已被释放并复用的对象时不会崩溃，但读者必须在获取引用后**重新验证**对象身份（例如比较键值），这正是 `refcount_inc_not_zero_acquire()` 存在的原因（7.2 节）。`sighand_struct`（[`kernel/fork.c:2986`](../../linux/kernel/fork.c#L2986)）、`anon_vma`（[`mm/rmap.c:469`](../../linux/mm/rmap.c#L469)）、`struct file`（[`fs/file_table.c:634`](../../linux/fs/file_table.c#L634)）等都采用这一技术。
 
 ## 动手实验
 

@@ -1,6 +1,6 @@
 # 7.7 信号量与读写信号量
 
-> **本节源码**：`include/linux/semaphore.h`、`kernel/locking/semaphore.c`、`include/linux/rwsem.h`、`kernel/locking/rwsem.c`、`include/linux/percpu-rwsem.h`、`kernel/locking/percpu-rwsem.c`
+> **本节源码**：[`include/linux/semaphore.h`](../../linux/include/linux/semaphore.h)、[`kernel/locking/semaphore.c`](../../linux/kernel/locking/semaphore.c)、[`include/linux/rwsem.h`](../../linux/include/linux/rwsem.h)、[`kernel/locking/rwsem.c`](../../linux/kernel/locking/rwsem.c)、[`include/linux/percpu-rwsem.h`](../../linux/include/linux/percpu-rwsem.h)、[`kernel/locking/percpu-rwsem.c`](../../linux/kernel/locking/percpu-rwsem.c)
 > **关键函数**：`down()`、`up()`、`___down_common()`、`down_read()`、`down_write()`、`rwsem_read_trylock()`、`rwsem_down_read_slowpath()`、`rwsem_down_write_slowpath()`、`rwsem_try_write_lock()`、`rwsem_mark_wake()`、`percpu_down_read()`
 > **前置知识**：7.6 互斥锁与乐观自旋
 
@@ -18,8 +18,9 @@ rwsem 在设计上与 mutex 一脉相承：一个原子计数字承载锁状态�
 
 ### 数据结构与实现
 
+[`include/linux/semaphore.h:15-23`](../../linux/include/linux/semaphore.h#L15-L23)（v6.18.60）
+
 ```c
-// include/linux/semaphore.h:15-23（v6.18.60）
 struct semaphore {
 	raw_spinlock_t		lock;
 	unsigned int		count;
@@ -33,8 +34,9 @@ struct semaphore {
 
 信号量的实现非常直接——所有操作都在 `sem->lock` 保护下进行，`count` 只是普通整数：
 
+[`kernel/locking/semaphore.c:91-102`](../../linux/kernel/locking/semaphore.c#L91-L102)（v6.18.60）
+
 ```c
-// kernel/locking/semaphore.c:91-102（v6.18.60）
 void __sched down(struct semaphore *sem)
 {
 	unsigned long flags;
@@ -49,8 +51,9 @@ void __sched down(struct semaphore *sem)
 }
 ```
 
+[`kernel/locking/semaphore.c:220-237`](../../linux/kernel/locking/semaphore.c#L220-L237)（v6.18.60）
+
 ```c
-// kernel/locking/semaphore.c:220-237（v6.18.60）
 void __sched up(struct semaphore *sem)
 {
 	unsigned long flags;
@@ -73,8 +76,9 @@ EXPORT_SYMBOL(up);
 
 `count > 0` 时 `down()` 直接减一返回；否则进入 `__down()` 排队睡眠。`up()` 在没有等待者时加一，有等待者时**不增加计数**，而是直接把"一个名额"交给队首：
 
+[`kernel/locking/semaphore.c:252-283`](../../linux/kernel/locking/semaphore.c#L252-L283)（v6.18.60）
+
 ```c
-// kernel/locking/semaphore.c:252-283（v6.18.60）
 static inline int __sched ___down_common(struct semaphore *sem, long state,
 								long timeout)
 {
@@ -109,8 +113,9 @@ static inline int __sched ___down_common(struct semaphore *sem, long state,
 }
 ```
 
+[`kernel/locking/semaphore.c:321-329`](../../linux/kernel/locking/semaphore.c#L321-L329)（v6.18.60）
+
 ```c
-// kernel/locking/semaphore.c:321-329（v6.18.60）
 static noinline void __sched __up(struct semaphore *sem,
 				  struct wake_q_head *wake_q)
 {
@@ -136,8 +141,9 @@ static noinline void __sched __up(struct semaphore *sem,
 
 ### 核心数据结构
 
+[`include/linux/rwsem.h:48-67`](../../linux/include/linux/rwsem.h#L48-L67)（v6.18.60）
+
 ```c
-// include/linux/rwsem.h:48-67（v6.18.60）
 struct rw_semaphore {
 	atomic_long_t count;
 	/*
@@ -162,8 +168,9 @@ struct rw_semaphore {
 
 64 位系统上 `count` 的编码：
 
+[`kernel/locking/rwsem.c:82-129`](../../linux/kernel/locking/rwsem.c#L82-L129)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:82-129（v6.18.60）
 /*
  * On 64-bit architectures, the bit definitions of the count are:
  *
@@ -228,8 +235,9 @@ struct rw_semaphore {
 
 `owner` 字段与 mutex 类似，存放写者的 `task_struct` 指针，低位用作标志：
 
+[`kernel/locking/rwsem.c:64-66`](../../linux/kernel/locking/rwsem.c#L64-L66)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:64-66（v6.18.60）
 #define RWSEM_READER_OWNED	(1UL << 0)
 #define RWSEM_NONSPINNABLE	(1UL << 1)
 #define RWSEM_OWNER_FLAGS_MASK	(RWSEM_READER_OWNED | RWSEM_NONSPINNABLE)
@@ -240,8 +248,9 @@ struct rw_semaphore {
 
 ### 快速路径
 
+[`kernel/locking/rwsem.c:249-274`](../../linux/kernel/locking/rwsem.c#L249-L274)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:249-274（v6.18.60）
 static inline bool rwsem_read_trylock(struct rw_semaphore *sem, long *cntp)
 {
 	*cntp = atomic_long_add_return_acquire(RWSEM_READER_BIAS, &sem->count);
@@ -274,8 +283,9 @@ static inline bool rwsem_write_trylock(struct rw_semaphore *sem)
 
 **写者**只有在 `count` 为 0 时才能用 cmpxchg 置位 `RWSEM_WRITER_LOCKED`。
 
+[`kernel/locking/rwsem.c:1254-1269`](../../linux/kernel/locking/rwsem.c#L1254-L1269)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:1254-1269（v6.18.60）
 static __always_inline int __down_read_common(struct rw_semaphore *sem, int state)
 {
 	int ret = 0;
@@ -294,8 +304,9 @@ out:
 	return ret;
 ```
 
+[`kernel/locking/rwsem.c:1311-1322`](../../linux/kernel/locking/rwsem.c#L1311-L1322)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:1311-1322（v6.18.60）
 static __always_inline int __down_write_common(struct rw_semaphore *sem, int state)
 {
 	int ret = 0;
@@ -314,8 +325,9 @@ static __always_inline int __down_write_common(struct rw_semaphore *sem, int sta
 
 ### 解锁
 
+[`kernel/locking/rwsem.c:1349-1389`](../../linux/kernel/locking/rwsem.c#L1349-L1389)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:1349-1389（v6.18.60）
 static inline void __up_read(struct rw_semaphore *sem)
 {
 	long tmp;
@@ -364,8 +376,9 @@ static inline void __up_write(struct rw_semaphore *sem)
 
 ### 读者慢速路径
 
+[`kernel/locking/rwsem.c:992-1028`](../../linux/kernel/locking/rwsem.c#L992-L1028)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:992-1028（v6.18.60）
 static struct rw_semaphore __sched *
 rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int state)
 {
@@ -409,8 +422,9 @@ rwsem_down_read_slowpath(struct rw_semaphore *sem, long count, unsigned int stat
 
 否则入队等待：
 
+[`kernel/locking/rwsem.c:1030-1097`](../../linux/kernel/locking/rwsem.c#L1030-L1097)（v6.18.60，节选）
+
 ```c
-// kernel/locking/rwsem.c:1030-1097（v6.18.60，节选）
 
 queue:
 	waiter.task = current;
@@ -478,8 +492,9 @@ queue:
 
 `rwsem_mark_wake()` 根据队首等待者的类型决定唤醒谁：
 
+[`kernel/locking/rwsem.c:424-440`](../../linux/kernel/locking/rwsem.c#L424-L440)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:424-440（v6.18.60）
 	waiter = rwsem_first_waiter(sem);
 
 	if (waiter->type == RWSEM_WAITING_FOR_WRITE) {
@@ -502,8 +517,9 @@ queue:
 - **队首是写者**：只唤醒它，由它醒来后自己去竞争（期间其他写者可以抢锁）。
 - **队首是读者**：唤醒队列中**所有**读者（最多 `MAX_READERS_WAKEUP` 即 256 个），无论它们是否排在写者之后。这是"阶段公平"（phase-fair）读写锁的思想：读阶段让所有读者一起进入，写者按队列顺序进入。
 
+[`kernel/locking/rwsem.c:508-567`](../../linux/kernel/locking/rwsem.c#L508-L567)（v6.18.60，节选）
+
 ```c
-// kernel/locking/rwsem.c:508-567（v6.18.60，节选）
 	INIT_LIST_HEAD(&wlist);
 	list_for_each_entry_safe(waiter, tmp, &sem->wait_list, list) {
 		if (waiter->type == RWSEM_WAITING_FOR_WRITE)
@@ -551,8 +567,9 @@ queue:
 
 ### 写者慢速路径
 
+[`kernel/locking/rwsem.c:1110-1149`](../../linux/kernel/locking/rwsem.c#L1110-L1149)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:1110-1149（v6.18.60）
 static struct rw_semaphore __sched *
 rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 {
@@ -595,12 +612,13 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 	}
 ```
 
-写者先尝试乐观自旋（`rwsem_optimistic_spin()`，`kernel/locking/rwsem.c:816` 起）：与 mutex 一样通过 OSQ 排队后在 `owner` 上自旋。不同的是，rwsem 的持有者可能是读者，而读者的身份无法确知、也无法判断它们是否在运行，所以对读者持有的锁只自旋有限的时间（`rspin_threshold`），超时后设置 `RWSEM_NONSPINNABLE`。
+写者先尝试乐观自旋（`rwsem_optimistic_spin()`，[`kernel/locking/rwsem.c:816`](../../linux/kernel/locking/rwsem.c#L816) 起）：与 mutex 一样通过 OSQ 排队后在 `owner` 上自旋。不同的是，rwsem 的持有者可能是读者，而读者的身份无法确知、也无法判断它们是否在运行，所以对读者持有的锁只自旋有限的时间（`rspin_threshold`），超时后设置 `RWSEM_NONSPINNABLE`。
 
 自旋失败则入队，在 `wait_lock` 保护下循环调用 `rwsem_try_write_lock()`：
 
+[`kernel/locking/rwsem.c:603-664`](../../linux/kernel/locking/rwsem.c#L603-L664)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:603-664（v6.18.60）
 static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 					struct rwsem_waiter *waiter)
 {
@@ -668,8 +686,9 @@ static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 - 锁空闲时置位 `WRITER_LOCKED` 并清除 `HANDOFF`；若自己是最后一个等待者，同时清除 `WAITERS`。
 - 锁被占用时，若等待者是实时 / Deadline 任务，或者等待已超过 `RWSEM_WAIT_TIMEOUT`，就设置 `HANDOFF`。
 
+[`kernel/locking/rwsem.c:353-358`](../../linux/kernel/locking/rwsem.c#L353-L358)（v6.18.60）
+
 ```c
-// kernel/locking/rwsem.c:353-358（v6.18.60）
 /*
  * The typical HZ value is either 250 or 1000. So set the minimum waiting
  * time to at least 4ms or 1 jiffy (if it is higher than 4ms) in the wait
@@ -684,8 +703,9 @@ static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 
 对于"读者极多、写者极罕见"的全局锁，即使 rwsem 读者的一次原子加法也会成为瓶颈——所有 CPU 都在修改同一缓存行。`percpu_rw_semaphore` 把读者计数分散到每个 CPU：
 
+[`include/linux/percpu-rwsem.h:13-22`](../../linux/include/linux/percpu-rwsem.h#L13-L22)（v6.18.60）
+
 ```c
-// include/linux/percpu-rwsem.h:13-22（v6.18.60）
 struct percpu_rw_semaphore {
 	struct rcu_sync		rss;
 	unsigned int __percpu	*read_count;
@@ -698,8 +718,9 @@ struct percpu_rw_semaphore {
 };
 ```
 
+[`include/linux/percpu-rwsem.h:48-73`](../../linux/include/linux/percpu-rwsem.h#L48-L73)（v6.18.60）
+
 ```c
-// include/linux/percpu-rwsem.h:48-73（v6.18.60）
 static inline void percpu_down_read_internal(struct percpu_rw_semaphore *sem,
 					     bool freezable)
 {

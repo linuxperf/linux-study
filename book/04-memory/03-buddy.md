@@ -1,6 +1,6 @@
 # 4.3 伙伴系统与 per-CPU 页缓存
 
-> **本节源码**：`mm/page_alloc.c`、`mm/internal.h`、`mm/mempolicy.c`、`include/linux/mmzone.h`、`include/linux/gfp.h`
+> **本节源码**：[`mm/page_alloc.c`](../../linux/mm/page_alloc.c)、[`mm/internal.h`](../../linux/mm/internal.h)、[`mm/mempolicy.c`](../../linux/mm/mempolicy.c)、[`include/linux/mmzone.h`](../../linux/include/linux/mmzone.h)、[`include/linux/gfp.h`](../../linux/include/linux/gfp.h)
 > **关键函数**：`__alloc_frozen_pages_noprof()`、`get_page_from_freelist()`、`rmqueue()`、`__rmqueue_smallest()`、`expand()`、`__rmqueue()`、`try_to_claim_block()`、`__free_frozen_pages()`、`__free_one_page()`、`free_frozen_page_commit()`
 > **前置知识**：4.1 物理内存模型、4.2 内存初始化
 
@@ -18,16 +18,17 @@
 
 | 结构 | 位置 | 作用 |
 |---|---|---|
-| `zone->free_area[order]` | `include/linux/mmzone.h:138` | 每阶一组空闲链表，`free_list[mt]` 按迁移类型区分 |
-| `zone->lock` | `include/linux/mmzone.h:1013` | 保护 `free_area` 的自旋锁 |
-| `zone->per_cpu_pageset` | `include/linux/mmzone.h:744` | 每 CPU 一个 `per_cpu_pages`，缓存小阶空闲页 |
+| `zone->free_area[order]` | [`include/linux/mmzone.h:138`](../../linux/include/linux/mmzone.h#L138) | 每阶一组空闲链表，`free_list[mt]` 按迁移类型区分 |
+| `zone->lock` | [`include/linux/mmzone.h:1013`](../../linux/include/linux/mmzone.h#L1013) | 保护 `free_area` 的自旋锁 |
+| `zone->per_cpu_pageset` | [`include/linux/mmzone.h:744`](../../linux/include/linux/mmzone.h#L744) | 每 CPU 一个 `per_cpu_pages`，缓存小阶空闲页 |
 | `page->private` + `PG_buddy` | `include/linux/mm_types.h` | 空闲块首页记录阶数，并以 `PageBuddy()` 标识 |
 | pageblock 标志位 | `mem_section->usage->pageblock_flags` | 每个页块的迁移类型 |
 
 `per_cpu_pages` 的字段如下：
 
+[`include/linux/mmzone.h:744-761`](../../linux/include/linux/mmzone.h#L744-L761)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:744-761（v6.18.60）
 struct per_cpu_pages {
 	spinlock_t lock;	/* Protects lists field */
 	int count;		/* number of pages in the list */
@@ -47,10 +48,11 @@ struct per_cpu_pages {
 } ____cacheline_aligned_in_smp;
 ```
 
-`lists[]` 的数量是 `NR_PCP_LISTS`：阶 0～3（`PAGE_ALLOC_COSTLY_ORDER`）每阶 3 个迁移类型共 12 条，加上启用 THP 时的 2 条 PMD 阶链表（可移动 / 不可移动各一条），共 14 条（`include/linux/mmzone.h:721-727`）。下标由 `order_to_pindex()` 计算：
+`lists[]` 的数量是 `NR_PCP_LISTS`：阶 0～3（`PAGE_ALLOC_COSTLY_ORDER`）每阶 3 个迁移类型共 12 条，加上启用 THP 时的 2 条 PMD 阶链表（可移动 / 不可移动各一条），共 14 条（[`include/linux/mmzone.h:721-727`](../../linux/include/linux/mmzone.h#L721-L727)）。下标由 `order_to_pindex()` 计算：
+
+[`mm/page_alloc.c:684-701`](../../linux/mm/page_alloc.c#L684-L701)（v6.18.60）
 
 ```c
-// mm/page_alloc.c:684-701（v6.18.60）
 static inline unsigned int order_to_pindex(int migratetype, int order)
 {
 
@@ -100,8 +102,9 @@ alloc_pages(gfp, order)                              include/linux/gfp.h:346
 
 `__alloc_frozen_pages_noprof()` 是所有页分配的汇合点。"frozen"指返回的页引用计数为 0，由调用者决定何时设为 1；普通的 `__alloc_pages_noprof()` 只是在它外面包了一层 `set_page_refcounted()`：
 
+[`mm/page_alloc.c:5259-5311`](../../linux/mm/page_alloc.c#L5259-L5311)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:5259-5311（v6.18.60，节选）
 struct page *__alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order,
 		int preferred_nid, nodemask_t *nodemask)
 {
@@ -155,8 +158,9 @@ out:
 
 `prepare_alloc_pages()` 把 GFP 翻译为一个 `alloc_context`，后续所有函数都基于它工作：
 
+[`mm/page_alloc.c:5041-5087`](../../linux/mm/page_alloc.c#L5041-L5087)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:5041-5087（v6.18.60，节选）
 static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 		int preferred_nid, nodemask_t *nodemask,
 		struct alloc_context *ac, gfp_t *alloc_gfp,
@@ -199,8 +203,9 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 
 快速路径沿 zonelist 从 `preferred_zoneref` 开始，跳过所有高于 `highest_zoneidx` 或不在 `nodemask` 中的 zone，对每个 zone 检查水位，通过则调用 `rmqueue()`：
 
+[`mm/page_alloc.c:3868-3947`](../../linux/mm/page_alloc.c#L3868-L3947)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:3868-3947（v6.18.60，节选）
 		if (test_bit(ZONE_BELOW_HIGH, &zone->flags))
 			goto check_alloc_wmark;
 
@@ -253,13 +258,14 @@ try_this_zone:
 函数中还有几个跳过 zone 的条件，例如：
 
 - `ALLOC_NOFRAGMENT` 时一旦要跨到远端节点，就去掉该标志从头重试——"局部性比避免碎片更重要"；
-- 多节点系统上，若某节点的 kswapd 正在运行（`kswapd_wait` 上没有等待者），优先尝试其他节点，都不行再回头（`mm/page_alloc.c:3846-3857`）；
+- 多节点系统上，若某节点的 kswapd 正在运行（`kswapd_wait` 上没有等待者），优先尝试其他节点，都不行再回头（[`mm/page_alloc.c:3846-3857`](../../linux/mm/page_alloc.c#L3846-L3857)）；
 - `__GFP_WRITE` 分配会跳过脏页超标的节点。
 
 ### `rmqueue()`：PCP 还是伙伴系统
 
+[`mm/page_alloc.c:3375-3402`](../../linux/mm/page_alloc.c#L3375-L3402)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:3375-3402（v6.18.60）
 struct page *rmqueue(struct zone *preferred_zone,
 			struct zone *zone, unsigned int order,
 			gfp_t gfp_flags, unsigned int alloc_flags,
@@ -290,7 +296,7 @@ out:
 }
 ```
 
-`pcp_allowed_order()`（`mm/page_alloc.c:717-726`）对 order ≤ 3 以及 THP 的 PMD 阶（9）返回 true。PCP 取不到（例如 trylock 失败）时回退到 `rmqueue_buddy()`。`ZONE_BOOSTED_WATERMARK` 与"水位提升"相关，在迁移类型回退一节说明。
+`pcp_allowed_order()`（[`mm/page_alloc.c:717-726`](../../linux/mm/page_alloc.c#L717-L726)）对 order ≤ 3 以及 THP 的 PMD 阶（9）返回 true。PCP 取不到（例如 trylock 失败）时回退到 `rmqueue_buddy()`。`ZONE_BOOSTED_WATERMARK` 与"水位提升"相关，在迁移类型回退一节说明。
 
 ## 伙伴算法
 
@@ -298,8 +304,9 @@ out:
 
 在持有 `zone->lock` 的前提下，`__rmqueue_smallest()` 从请求的阶开始向上找第一个非空的链表：
 
+[`mm/page_alloc.c:1927-1950`](../../linux/mm/page_alloc.c#L1927-L1950)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:1927-1950（v6.18.60）
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
 {
@@ -328,8 +335,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 找到的块若比需要的大，由 `expand()` 逐级对半拆分，把**后半部分**挂回低一阶的链表，前半部分继续拆分，最终返回最前面的 2^order 页：
 
+[`mm/page_alloc.c:1740-1776`](../../linux/mm/page_alloc.c#L1740-L1776)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:1740-1776（v6.18.60）
 static inline unsigned int expand(struct zone *zone, struct page *page, int low,
 				  int high, int migratetype)
 {
@@ -372,8 +380,9 @@ static __always_inline void page_del_and_expand(struct zone *zone,
 
 `set_buddy_order()` 把阶写入 `page->private` 并设置 `PG_buddy`（实际是 `page_type` 中的一种类型）：
 
+[`mm/page_alloc.c:752-756`](../../linux/mm/page_alloc.c#L752-L756)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:752-756（v6.18.60）
 static inline void set_buddy_order(struct page *page, unsigned int order)
 {
 	set_page_private(page, order);
@@ -396,8 +405,9 @@ high=1:   [0x100 ─ 1 ─ 0x101] [0x102 ─ 挂回 order 1 ─ 0x103]
 
 伙伴关系由一条简单的位运算决定：order 为 O、起始 PFN 为 B 的块，其伙伴起始 PFN 为 `B ^ (1 << O)`，合并后的父块起始 PFN 为 `B & ~(1 << O)`。
 
+[`mm/internal.h:677-708`](../../linux/mm/internal.h#L677-L708)（v6.18.60，删去注释）
+
 ```c
-// mm/internal.h:677-708（v6.18.60，删去注释）
 static inline unsigned long
 __find_buddy_pfn(unsigned long page_pfn, unsigned int order)
 {
@@ -422,8 +432,9 @@ static inline struct page *find_buddy_page_pfn(struct page *page,
 
 算出伙伴的位置后，还要确认它确实是一个**同阶、同 zone 的空闲块**：
 
+[`mm/internal.h:639-658`](../../linux/mm/internal.h#L639-L658)（v6.18.60）
+
 ```c
-// mm/internal.h:639-658（v6.18.60）
 static inline bool page_is_buddy(struct page *page, struct page *buddy,
 				 unsigned int order)
 {
@@ -448,8 +459,9 @@ static inline bool page_is_buddy(struct page *page, struct page *buddy,
 
 `__free_one_page()` 循环执行"找伙伴 → 摘下伙伴 → 合并 → 阶加一"，直到伙伴不空闲或达到 `MAX_PAGE_ORDER`：
 
+[`mm/page_alloc.c:998-1046`](../../linux/mm/page_alloc.c#L998-L1046)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:998-1046（v6.18.60，节选）
 	while (order < MAX_PAGE_ORDER) {
 		int buddy_mt = migratetype;
 
@@ -500,8 +512,9 @@ static inline bool page_is_buddy(struct page *page, struct page *buddy,
 
 合并结束后决定挂在链表头还是尾：
 
+[`mm/page_alloc.c:1049-1064`](../../linux/mm/page_alloc.c#L1049-L1064)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:1049-1064（v6.18.60）
 done_merging:
 	set_buddy_order(page, order);
 
@@ -520,7 +533,7 @@ done_merging:
 }
 ```
 
-`buddy_merge_likely()`（`mm/page_alloc.c:926-941`）检查"再高一阶的伙伴"是否空闲：如果是，说明当前块的伙伴很可能马上也会被释放，从而合并成更大的块，于是把当前块放到链表**尾部**，降低它被立刻分配出去的概率。`is_shuffle_order()` 对应 `CONFIG_SHUFFLE_PAGE_ALLOCATOR`（本书配置已启用，但需启动参数 `page_alloc.shuffle=1` 或检测到内存侧缓存才生效），随机选择头尾以降低可预测性。
+`buddy_merge_likely()`（[`mm/page_alloc.c:926-941`](../../linux/mm/page_alloc.c#L926-L941)）检查"再高一阶的伙伴"是否空闲：如果是，说明当前块的伙伴很可能马上也会被释放，从而合并成更大的块，于是把当前块放到链表**尾部**，降低它被立刻分配出去的概率。`is_shuffle_order()` 对应 `CONFIG_SHUFFLE_PAGE_ALLOCATOR`（本书配置已启用，但需启动参数 `page_alloc.shuffle=1` 或检测到内存侧缓存才生效），随机选择头尾以降低可预测性。
 
 `page_reporting_notify_free()` 服务于 `CONFIG_PAGE_REPORTING`：虚拟机中把大块空闲页报告给宿主机（如 virtio-balloon 的 free page reporting），使宿主机能回收这部分内存。
 
@@ -534,8 +547,9 @@ Linux 的对策（Mel Gorman 的反碎片化补丁，v2.6.24 合入）是按页�
 
 ### 回退顺序
 
+[`mm/page_alloc.c:1959-1963`](../../linux/mm/page_alloc.c#L1959-L1963)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:1959-1963（v6.18.60）
 static int fallbacks[MIGRATE_PCPTYPES][MIGRATE_PCPTYPES - 1] = {
 	[MIGRATE_UNMOVABLE]   = { MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE   },
 	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE },
@@ -547,8 +561,9 @@ static int fallbacks[MIGRATE_PCPTYPES][MIGRATE_PCPTYPES - 1] = {
 
 `__rmqueue()` 按碎片化风险从低到高依次尝试四种模式：
 
+[`mm/page_alloc.c:2485-2549`](../../linux/mm/page_alloc.c#L2485-L2549)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:2485-2549（v6.18.60，节选）
 static __always_inline struct page *
 __rmqueue(struct zone *zone, unsigned int order, int migratetype,
 	  unsigned int alloc_flags, enum rmqueue_mode *mode)
@@ -619,8 +634,9 @@ __rmqueue(struct zone *zone, unsigned int order, int migratetype,
 
 `__rmqueue_claim()` 从**最高阶**往下找其他类型的空闲块，因为大块所在的页块通常空闲页更多，认领它对碎片化影响最小：
 
+[`mm/page_alloc.c:2394-2443`](../../linux/mm/page_alloc.c#L2394-L2443)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:2394-2443（v6.18.60，节选）
 static __always_inline struct page *
 __rmqueue_claim(struct zone *zone, int order, int start_migratetype,
 						unsigned int alloc_flags)
@@ -664,8 +680,9 @@ __rmqueue_claim(struct zone *zone, int order, int start_migratetype,
 
 `ALLOC_NOFRAGMENT` 下 `min_order` 被提升到 `pageblock_order`，即只认领**完全空闲**的页块。`try_to_claim_block()` 对不完全空闲的页块做统计，只有"空闲页 + 兼容页"超过半个页块时才改变其类型：
 
+[`mm/page_alloc.c:2327-2386`](../../linux/mm/page_alloc.c#L2327-L2386)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:2327-2386（v6.18.60，节选）
 	/* Take ownership for orders >= pageblock_order */
 	if (current_order >= pageblock_order) {
 		unsigned int nr_added;
@@ -709,8 +726,9 @@ __rmqueue_claim(struct zone *zone, int order, int start_migratetype,
 
 ### 分配：`rmqueue_pcplist()`
 
+[`mm/page_alloc.c:3329-3361`](../../linux/mm/page_alloc.c#L3329-L3361)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:3329-3361（v6.18.60）
 static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 			struct zone *zone, unsigned int order,
 			int migratetype, unsigned int alloc_flags)
@@ -750,8 +768,9 @@ PCP 用一把 per-CPU 的自旋锁 `pcp->lock` 保护，并且只 **trylock**：
 
 `__rmqueue_pcplist()` 在链表为空时调用 `rmqueue_bulk()`，持一次 `zone->lock` 连续取 `batch` 个块：
 
+[`mm/page_alloc.c:3297-3326`](../../linux/mm/page_alloc.c#L3297-L3326)（v6.18.60）
+
 ```c
-// mm/page_alloc.c:3297-3326（v6.18.60）
 static inline
 struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 			int migratetype,
@@ -788,8 +807,9 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 
 `batch` 和 `high` 并非固定值。初始值由 `zone_batchsize()` 与 `zone_highsize()` 计算：
 
+[`mm/page_alloc.c:5980-5995`](../../linux/mm/page_alloc.c#L5980-L5995)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:5980-5995（v6.18.60，节选）
 	batch = min(zone_managed_pages(zone) >> 10, SZ_1M / PAGE_SIZE);
 	batch /= 4;		/* We effectively *= 4 below */
 	if (batch < 1)
@@ -798,20 +818,21 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 	batch = rounddown_pow_of_two(batch + batch/2) - 1;
 ```
 
-即约为 zone 大小的 0.1% 或 1 MB 中较小者的四分之一，再修正为 2^n − 1（避免缓存着色问题）。对 1 GB 以上的 zone，batch 为 63。`high` 的范围由 `zone_set_pageset_high_and_batch()`（`mm/page_alloc.c:6130-6160`）调用 `zone_highsize()`（`mm/page_alloc.c:6018-6063`）确定：下限 `high_min` 是 zone 的 **low 水位**平分到本节点各 CPU 上，使所有 PCP 都装满时也不至于触发后台回收；上限 `high_max` 是 zone 的 1/8（`MIN_PERCPU_PAGELIST_HIGH_FRACTION`）平分到各 CPU；两者都不小于 `batch * 4`。若设置了 `vm.percpu_pagelist_high_fraction`，`high_min` 与 `high_max` 取同一个手动值，自动调节随之关闭。
+即约为 zone 大小的 0.1% 或 1 MB 中较小者的四分之一，再修正为 2^n − 1（避免缓存着色问题）。对 1 GB 以上的 zone，batch 为 63。`high` 的范围由 `zone_set_pageset_high_and_batch()`（[`mm/page_alloc.c:6130-6160`](../../linux/mm/page_alloc.c#L6130-L6160)）调用 `zone_highsize()`（[`mm/page_alloc.c:6018-6063`](../../linux/mm/page_alloc.c#L6018-L6063)）确定：下限 `high_min` 是 zone 的 **low 水位**平分到本节点各 CPU 上，使所有 PCP 都装满时也不至于触发后台回收；上限 `high_max` 是 zone 的 1/8（`MIN_PERCPU_PAGELIST_HIGH_FRACTION`）平分到各 CPU；两者都不小于 `batch * 4`。若设置了 `vm.percpu_pagelist_high_fraction`，`high_min` 与 `high_max` 取同一个手动值，自动调节随之关闭。
 
 运行时，`pcp->high` 在 `[high_min, high_max]` 之间动态调整：
 
-- **分配侧**（`nr_pcp_alloc()`，`mm/page_alloc.c:3246-3295`）：连续分配而没有释放时，每次补充的数量按 `alloc_factor` 翻倍，上限为 `batch << CONFIG_PCP_BATCH_SCALE_MAX`（本书配置为 5，即 32 倍）；若 zone 未处于 `ZONE_BELOW_HIGH`，还会把 `high` 提高一个 batch，以容纳更多缓存。
-- **释放侧**（`nr_pcp_high()`，`mm/page_alloc.c:2812-2858`）：若 zone 正在回收（`ZONE_RECLAIM_ACTIVE`）或低于 high 水位（`ZONE_BELOW_HIGH`），就降低 `high`，尽快把页还给伙伴系统。
-- **周期衰减**：vmstat 的周期性工作调用 `decay_pcp_high()`（`mm/page_alloc.c:2596`），逐步把 `high` 降回 `high_min`。
+- **分配侧**（`nr_pcp_alloc()`，[`mm/page_alloc.c:3246-3295`](../../linux/mm/page_alloc.c#L3246-L3295)）：连续分配而没有释放时，每次补充的数量按 `alloc_factor` 翻倍，上限为 `batch << CONFIG_PCP_BATCH_SCALE_MAX`（本书配置为 5，即 32 倍）；若 zone 未处于 `ZONE_BELOW_HIGH`，还会把 `high` 提高一个 batch，以容纳更多缓存。
+- **释放侧**（`nr_pcp_high()`，[`mm/page_alloc.c:2812-2858`](../../linux/mm/page_alloc.c#L2812-L2858)）：若 zone 正在回收（`ZONE_RECLAIM_ACTIVE`）或低于 high 水位（`ZONE_BELOW_HIGH`），就降低 `high`，尽快把页还给伙伴系统。
+- **周期衰减**：vmstat 的周期性工作调用 `decay_pcp_high()`（[`mm/page_alloc.c:2596`](../../linux/mm/page_alloc.c#L2596)），逐步把 `high` 降回 `high_min`。
 
 这套 PCP high 自动调节机制由 Huang Ying 的补丁系列在 v6.7 引入，目标是在吞吐和内存占用之间自动平衡。
 
 ### 释放：`__free_frozen_pages()`
 
+[`mm/page_alloc.c:2934-2981`](../../linux/mm/page_alloc.c#L2934-L2981)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:2934-2981（v6.18.60，节选）
 static void __free_frozen_pages(struct page *page, unsigned int order,
 				fpi_t fpi_flags)
 {
@@ -860,8 +881,9 @@ static void __free_frozen_pages(struct page *page, unsigned int order,
 
 `__free_pages_prepare()` 做释放前的检查与清理：清除页标志、检查是否有残留映射（"bad page"）、处理 `init_on_free`、通知 KASAN/memcg 等。`free_frozen_page_commit()` 把页挂到 PCP 链表头部，若 `count` 达到 `high` 则调用 `free_pcppages_bulk()` 批量归还：
 
+[`mm/page_alloc.c:2873-2916`](../../linux/mm/page_alloc.c#L2873-L2916)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:2873-2916（v6.18.60，节选）
 	pcp->alloc_factor >>= 1;
 	__count_vm_events(PGFREE, 1 << order);
 	pindex = order_to_pindex(migratetype, order);
@@ -881,14 +903,15 @@ static void __free_frozen_pages(struct page *page, unsigned int order,
 			   pcp, pindex);
 ```
 
-`free_pcppages_bulk()`（`mm/page_alloc.c:1494`）持 `zone->lock`，在各条 PCP 链表间轮转，从链表**尾部**（最冷的页）取出页，逐个调用 `__free_one_page()` 合并回伙伴系统。
+`free_pcppages_bulk()`（[`mm/page_alloc.c:1494`](../../linux/mm/page_alloc.c#L1494)）持 `zone->lock`，在各条 PCP 链表间轮转，从链表**尾部**（最冷的页）取出页，逐个调用 `__free_one_page()` 合并回伙伴系统。
 
 ### 直接进入伙伴系统：`free_one_page()`
 
 不走 PCP 的释放（高阶页、隔离页、trylock 失败）进入 `free_one_page()`：
 
+[`mm/page_alloc.c:1580-1614`](../../linux/mm/page_alloc.c#L1580-L1614)（v6.18.60，节选）
+
 ```c
-// mm/page_alloc.c:1580-1614（v6.18.60，节选）
 static void free_one_page(struct zone *zone, struct page *page,
 			  unsigned long pfn, unsigned int order,
 			  fpi_t fpi_flags)
@@ -940,8 +963,8 @@ flowchart TD
 
 ## 关键细节
 
-- **`__GFP_COMP` 与复合页**：带 `__GFP_COMP` 的高阶分配由 `prep_new_page()` → `prep_compound_page()` 设置头尾页结构，成为一个大 folio。`folio_alloc()` 总是带此标志（`mm/page_alloc.c:5336-5342` 中的 `__folio_alloc_noprof()`）。
-- **非复合高阶页的释放**：`___free_pages()`（`mm/page_alloc.c:5367-5389`）处理"别人还持有首页引用"的情况：首页留给最后一个持有者释放，其余部分拆成若干小块立即释放，避免泄漏。
+- **`__GFP_COMP` 与复合页**：带 `__GFP_COMP` 的高阶分配由 `prep_new_page()` → `prep_compound_page()` 设置头尾页结构，成为一个大 folio。`folio_alloc()` 总是带此标志（[`mm/page_alloc.c:5336-5342`](../../linux/mm/page_alloc.c#L5336-L5342) 中的 `__folio_alloc_noprof()`）。
+- **非复合高阶页的释放**：`___free_pages()`（[`mm/page_alloc.c:5367-5389`](../../linux/mm/page_alloc.c#L5367-L5389)）处理"别人还持有首页引用"的情况：首页留给最后一个持有者释放，其余部分拆成若干小块立即释放，避免泄漏。
 - **`init_on_alloc`**：本书配置 `CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y`，`post_alloc_hook()` 会对所有新分配页清零，防止信息泄露，代价是一定的性能开销，可用启动参数 `init_on_alloc=0` 关闭。
 - **PCP drain**：内存热插拔、页块隔离等操作需要把所有 CPU 的 PCP 清空，由 `drain_all_pages()` 通过工作队列在各 CPU 上执行；NUMA 下远端节点的 PCP 还会在 `expire` 计数归零时被周期性清空。
 

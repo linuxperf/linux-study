@@ -1,6 +1,6 @@
 # 4.7 进程地址空间：mm_struct、VMA 与 mmap
 
-> **本节源码**：`include/linux/mm_types.h`、`mm/mmap.c`、`mm/vma.c`、`mm/util.c`、`mm/mmap_lock.c`、`arch/x86/mm/mmap.c`、`arch/x86/kernel/sys_x86_64.c`
+> **本节源码**：[`include/linux/mm_types.h`](../../linux/include/linux/mm_types.h)、[`mm/mmap.c`](../../linux/mm/mmap.c)、[`mm/vma.c`](../../linux/mm/vma.c)、[`mm/util.c`](../../linux/mm/util.c)、[`mm/mmap_lock.c`](../../linux/mm/mmap_lock.c)、[`arch/x86/mm/mmap.c`](../../linux/arch/x86/mm/mmap.c)、[`arch/x86/kernel/sys_x86_64.c`](../../linux/arch/x86/kernel/sys_x86_64.c)
 > **关键函数**：`ksys_mmap_pgoff()`、`vm_mmap_pgoff()`、`do_mmap()`、`__get_unmapped_area()`、`arch_get_unmapped_area_topdown()`、`__mmap_region()`、`vma_merge_new_range()`、`find_vma()`、`lock_vma_under_rcu()`、`sys_brk()`、`__vm_enough_memory()`
 > **前置知识**：4.6 内核虚拟地址空间
 
@@ -16,8 +16,9 @@ Linux 采用**按需分配（Demand Paging）** 策略：`mmap()`、`brk()` 等�
 
 ### `struct mm_struct`
 
+[`include/linux/mm_types.h:946-1134`](../../linux/include/linux/mm_types.h#L946-L1134)（v6.18.60，节选，删去部分注释）
+
 ```c
-// include/linux/mm_types.h:946-1134（v6.18.60，节选，删去部分注释）
 struct mm_struct {
 	struct {
 		struct {
@@ -90,8 +91,9 @@ struct mm_struct {
 
 ### `struct vm_area_struct`
 
+[`include/linux/mm_types.h:815-919`](../../linux/include/linux/mm_types.h#L815-L919)（v6.18.60，节选，删去部分注释）
+
 ```c
-// include/linux/mm_types.h:815-919（v6.18.60，节选，删去部分注释）
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
 
@@ -174,8 +176,9 @@ maple tree 是一种为区间设计的 B 树变体：每个节点可容纳多个
 
 `find_vma()` 返回第一个 `vm_end > addr` 的 VMA（注意它可能不包含 `addr`）：
 
+[`mm/mmap.c:904-910`](../../linux/mm/mmap.c#L904-L910)（v6.18.60）
+
 ```c
-// mm/mmap.c:904-910（v6.18.60）
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 {
 	unsigned long index = addr;
@@ -185,7 +188,7 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 }
 ```
 
-需要"恰好包含 `addr` 的 VMA"时应使用 `vma_lookup()`（`include/linux/mm.h:2663`）。内核代码中遍历 VMA 使用 `VMA_ITERATOR` / `for_each_vma()` 迭代器。
+需要"恰好包含 `addr` 的 VMA"时应使用 `vma_lookup()`（[`include/linux/mm.h:2663`](../../linux/include/linux/mm.h#L2663)）。内核代码中遍历 VMA 使用 `VMA_ITERATOR` / `for_each_vma()` 迭代器。
 
 ## 用户地址空间布局
 
@@ -211,8 +214,9 @@ x86_64 默认使用**自顶向下（top-down）** 的 mmap 布局：栈位于用
 
 `mmap_base` 由 `arch_pick_mmap_layout()` 在 `execve()` 时确定：
 
+[`arch/x86/mm/mmap.c:82-99`](../../linux/arch/x86/mm/mmap.c#L82-L99)（v6.18.60）
+
 ```c
-// arch/x86/mm/mmap.c:82-99（v6.18.60）
 static unsigned long mmap_base(unsigned long rnd, unsigned long task_size,
 			       const struct rlimit *rlim_stack)
 {
@@ -233,9 +237,9 @@ static unsigned long mmap_base(unsigned long rnd, unsigned long task_size,
 }
 ```
 
-即在栈的 rlimit（默认 8 MB）基础上加上栈随机化范围和栈保护间隙（`stack_guard_gap`，默认 256 页 = 1 MB），夹在 128 MB 与 5/6 用户空间之间，再减去随机偏移 `rnd`。`rnd` 来自 `arch_rnd(mmap64_rnd_bits)`，随机熵位数（以页为单位）由 `CONFIG_ARCH_MMAP_RND_BITS` 决定，本书配置为 32，运行时可通过 `/proc/sys/vm/mmap_rnd_bits` 调整。设置 `vm.legacy_va_layout=1` 或 `ADDR_COMPAT_LAYOUT` personality 会切换回传统的自底向上布局（`arch/x86/mm/mmap.c:62-68`）。
+即在栈的 rlimit（默认 8 MB）基础上加上栈随机化范围和栈保护间隙（`stack_guard_gap`，默认 256 页 = 1 MB），夹在 128 MB 与 5/6 用户空间之间，再减去随机偏移 `rnd`。`rnd` 来自 `arch_rnd(mmap64_rnd_bits)`，随机熵位数（以页为单位）由 `CONFIG_ARCH_MMAP_RND_BITS` 决定，本书配置为 32，运行时可通过 `/proc/sys/vm/mmap_rnd_bits` 调整。设置 `vm.legacy_va_layout=1` 或 `ADDR_COMPAT_LAYOUT` personality 会切换回传统的自底向上布局（[`arch/x86/mm/mmap.c:62-68`](../../linux/arch/x86/mm/mmap.c#L62-L68)）。
 
-用户空间默认只使用低 47 位（128 TB，`DEFAULT_MAP_WINDOW`），即使 CPU 支持五级页表。程序必须显式传入高于 47 位的 `mmap()` 提示地址才会获得更高的地址，以兼容那些把指针高位挪作他用的旧程序（`arch/x86/kernel/sys_x86_64.c:227-228`）。
+用户空间默认只使用低 47 位（128 TB，`DEFAULT_MAP_WINDOW`），即使 CPU 支持五级页表。程序必须显式传入高于 47 位的 `mmap()` 提示地址才会获得更高的地址，以兼容那些把指针高位挪作他用的旧程序（[`arch/x86/kernel/sys_x86_64.c:227-228`](../../linux/arch/x86/kernel/sys_x86_64.c#L227-L228)）。
 
 ## mmap 系统调用
 
@@ -261,8 +265,9 @@ sys_mmap()                                       arch/x86/kernel/sys_x86_64.c:89
 
 ### `vm_mmap_pgoff()`：加锁
 
+[`mm/util.c:565-589`](../../linux/mm/util.c#L565-L589)（v6.18.60）
+
 ```c
-// mm/util.c:565-589（v6.18.60）
 unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	unsigned long len, unsigned long prot,
 	unsigned long flag, unsigned long pgoff)
@@ -296,8 +301,9 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 
 `do_mmap()` 的主要工作是把用户传入的 `prot`、`flags` 翻译成 `vm_flags`，并做各种合法性检查：
 
+[`mm/mmap.c:367-408`](../../linux/mm/mmap.c#L367-L408)（v6.18.60，节选）
+
 ```c
-// mm/mmap.c:367-408（v6.18.60，节选）
 	/* Careful about overflows.. */
 	len = PAGE_ALIGN(len);
 	if (!len)
@@ -324,8 +330,9 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 
 `sysctl_max_map_count`（`vm.max_map_count`，默认 65530）限制每个进程的 VMA 数量。对文件映射，还要检查文件的打开模式与映射权限是否相容：
 
+[`mm/mmap.c:445-465`](../../linux/mm/mmap.c#L445-L465)（v6.18.60，节选）
+
 ```c
-// mm/mmap.c:445-465（v6.18.60，节选）
 		case MAP_SHARED_VALIDATE:
 			if (flags & ~flags_mask)
 				return -EOPNOTSUPP;
@@ -344,14 +351,15 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 
 以只读方式打开的文件做 `MAP_SHARED` 映射时，`VM_MAYWRITE` 被清除，之后 `mprotect(PROT_WRITE)` 会失败——`VM_MAY*` 标志就是"权限上限"。
 
-对私有匿名映射，`pgoff` 被设为 `addr >> PAGE_SHIFT`（`mm/mmap.c:537`），这样同一 anon_vma 中的匿名页可以用"虚拟页号"作为 `folio->index`，便于反向映射时计算地址（4.9 节）。
+对私有匿名映射，`pgoff` 被设为 `addr >> PAGE_SHIFT`（[`mm/mmap.c:537`](../../linux/mm/mmap.c#L537)），这样同一 anon_vma 中的匿名页可以用"虚拟页号"作为 `folio->index`，便于反向映射时计算地址（4.9 节）。
 
 最后，`MAP_POPULATE` 或 `VM_LOCKED` 时设置 `*populate`，通知上层预先填充。
 
 ### 选择地址：`arch_get_unmapped_area_topdown()`
 
+[`arch/x86/kernel/sys_x86_64.c:174-232`](../../linux/arch/x86/kernel/sys_x86_64.c#L174-L232)（v6.18.60，节选）
+
 ```c
-// arch/x86/kernel/sys_x86_64.c:174-232（v6.18.60，节选）
 arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr0,
 			  unsigned long len, unsigned long pgoff,
 			  unsigned long flags, vm_flags_t vm_flags)
@@ -391,12 +399,13 @@ get_unmapped_area:
 	...
 ```
 
-`MAP_FIXED` 直接使用调用者给定的地址（已有映射将被替换）；带提示地址时，如果该处空闲（包括与下一个 VMA 之间的栈保护间隙 `vm_start_gap()`）就采用；否则调用 `vm_unmapped_area()`，在 `[low_limit, mmap_base)` 之间自顶向下找第一个足够大的空隙。上层的 `__get_unmapped_area()`（`mm/mmap.c:812`）还会对匿名映射尝试 THP 对齐：没有提示地址且长度为 2 MB 整数倍时，调用 `thp_get_unmapped_area_vmflags()` 选择 2 MB 对齐的地址（`mm/mmap.c:844-849`），使之后的缺页能够直接使用 PMD 大页（4.13 节）。
+`MAP_FIXED` 直接使用调用者给定的地址（已有映射将被替换）；带提示地址时，如果该处空闲（包括与下一个 VMA 之间的栈保护间隙 `vm_start_gap()`）就采用；否则调用 `vm_unmapped_area()`，在 `[low_limit, mmap_base)` 之间自顶向下找第一个足够大的空隙。上层的 `__get_unmapped_area()`（[`mm/mmap.c:812`](../../linux/mm/mmap.c#L812)）还会对匿名映射尝试 THP 对齐：没有提示地址且长度为 2 MB 整数倍时，调用 `thp_get_unmapped_area_vmflags()` 选择 2 MB 对齐的地址（[`mm/mmap.c:844-849`](../../linux/mm/mmap.c#L844-L849)），使之后的缺页能够直接使用 PMD 大页（4.13 节）。
 
 ### 创建 VMA：`__mmap_region()`
 
+[`mm/vma.c:2705-2750`](../../linux/mm/vma.c#L2705-L2750)（v6.18.60，节选）
+
 ```c
-// mm/vma.c:2705-2750（v6.18.60，节选）
 static unsigned long __mmap_region(struct file *file, unsigned long addr,
 		unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
 		struct list_head *uf)
@@ -445,8 +454,9 @@ v6.11 起，VMA 操作的核心代码从 `mm/mmap.c` 拆分到 `mm/vma.c`，并�
 
 **新建 VMA**：
 
+[`mm/vma.c:2518-2567`](../../linux/mm/vma.c#L2518-L2567)（v6.18.60，节选）
+
 ```c
-// mm/vma.c:2518-2567（v6.18.60，节选）
 static int __mmap_new_vma(struct mmap_state *map, struct vm_area_struct **vmap)
 {
 	...
@@ -491,8 +501,9 @@ static int __mmap_new_vma(struct mmap_state *map, struct vm_area_struct **vmap)
 
 `mmap()` 并不立即分配物理内存，那么内核如何防止进程"承诺"使用远超实际内存的空间？答案是**提交记账（Commit Accounting）**：只有可能需要新物理页或交换空间的映射才计入，即私有可写映射：
 
+[`mm/vma.c:2349-2359`](../../linux/mm/vma.c#L2349-L2359)（v6.18.60）
+
 ```c
-// mm/vma.c:2349-2359（v6.18.60）
 static bool accountable_mapping(struct file *file, vm_flags_t vm_flags)
 {
 	/*
@@ -508,8 +519,9 @@ static bool accountable_mapping(struct file *file, vm_flags_t vm_flags)
 
 共享文件映射的页可以写回文件，只读映射不会产生新页，因此不计入。计入的页数经 `security_vm_enough_memory_mm()` → `__vm_enough_memory()` 检查：
 
+[`mm/util.c:930-966`](../../linux/mm/util.c#L930-L966)（v6.18.60，节选）
+
 ```c
-// mm/util.c:930-966（v6.18.60，节选）
 int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin)
 {
 	long allowed;
@@ -552,8 +564,9 @@ int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin
 
 `brk()` 是 `malloc()` 在小分配时使用的传统接口。它本质上是一种特殊的匿名 mmap：
 
+[`mm/mmap.c:154-195`](../../linux/mm/mmap.c#L154-L195)（v6.18.60，节选）
+
 ```c
-// mm/mmap.c:154-195（v6.18.60，节选）
 	newbrk = PAGE_ALIGN(brk);
 	oldbrk = PAGE_ALIGN(mm->brk);
 	if (oldbrk == newbrk) {
@@ -610,8 +623,9 @@ v6.4 引入的 per-VMA 锁（`CONFIG_PER_VMA_LOCK=y`）让缺页处理可以只�
 - 写者：修改 VMA 的操作仍需持有 `mmap_lock` 写锁，并在修改前对涉及的 VMA 调用 `vma_start_write()`，把 `vma->vm_lock_seq` 设为当前的 `mm->mm_lock_seq`，同时等待已有的 VMA 读者退出。写锁释放时 `mm_lock_seq` 递增，所有被"写锁定"的 VMA 自动解锁——不需要逐个解锁。
 - 读者：缺页时在 RCU 保护下从 maple tree 查找 VMA，然后尝试 `vma_start_read()`：若 `vma->vm_lock_seq == mm->mm_lock_seq`（该 VMA 正被写），则失败；否则增加 `vm_refcnt` 获得读锁。
 
+[`mm/mmap_lock.c:224-269`](../../linux/mm/mmap_lock.c#L224-L269)（v6.18.60）
+
 ```c
-// mm/mmap_lock.c:224-269（v6.18.60）
 struct vm_area_struct *lock_vma_under_rcu(struct mm_struct *mm,
 					  unsigned long address)
 {

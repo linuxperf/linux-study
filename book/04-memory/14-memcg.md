@@ -1,6 +1,6 @@
 # 4.14 内存控制组（memcg）
 
-> **本节源码**：`include/linux/memcontrol.h`、`include/linux/page_counter.h`、`mm/memcontrol.c`、`mm/page_counter.c`、`mm/vmscan.c`、`mm/oom_kill.c`
+> **本节源码**：[`include/linux/memcontrol.h`](../../linux/include/linux/memcontrol.h)、[`include/linux/page_counter.h`](../../linux/include/linux/page_counter.h)、[`mm/memcontrol.c`](../../linux/mm/memcontrol.c)、[`mm/page_counter.c`](../../linux/mm/page_counter.c)、[`mm/vmscan.c`](../../linux/mm/vmscan.c)、[`mm/oom_kill.c`](../../linux/mm/oom_kill.c)
 > **关键函数**：`__mem_cgroup_charge()`、`charge_memcg()`、`try_charge_memcg()`、`consume_stock()`、`page_counter_try_charge()`、`commit_charge()`、`__mem_cgroup_handle_over_high()`、`mem_cgroup_oom()`、`mem_cgroup_calculate_protection()`、`effective_protection()`、`obj_cgroup_charge()`
 > **前置知识**：4.10 页面回收、4.12 OOM Killer；了解 cgroup v2 的基本概念
 
@@ -16,8 +16,9 @@ memcg 的工作可以分为四部分：**计费（Charge）**——每次分配�
 
 ### `struct mem_cgroup`
 
+[`include/linux/memcontrol.h:189-324`](../../linux/include/linux/memcontrol.h#L189-L324)（v6.18.60，节选）
+
 ```c
-// include/linux/memcontrol.h:189-324（v6.18.60，节选）
 struct mem_cgroup {
 	struct cgroup_subsys_state css;
 
@@ -90,8 +91,9 @@ struct mem_cgroup {
 
 ### `page_counter`：层级计数器
 
+[`include/linux/page_counter.h:10-44`](../../linux/include/linux/page_counter.h#L10-L44)（v6.18.60）
+
 ```c
-// include/linux/page_counter.h:10-44（v6.18.60）
 struct page_counter {
 	/*
 	 * Make sure 'usage' does not share cacheline with any other field in
@@ -133,8 +135,9 @@ struct page_counter {
 
 ### per-memcg per-node lruvec
 
+[`include/linux/memcontrol.h:87-122`](../../linux/include/linux/memcontrol.h#L87-L122)（v6.18.60，节选）
+
 ```c
-// include/linux/memcontrol.h:87-122（v6.18.60，节选）
 struct mem_cgroup_per_node {
 	/* Keep the read-only fields at the start */
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
@@ -161,8 +164,9 @@ struct mem_cgroup_per_node {
 
 用户页（匿名页、page cache、shmem）在分配后由调用者显式计费，例如匿名缺页中的 `alloc_anon_folio()` 和 THP 缺页中的 `vma_alloc_anon_folio_pmd()` 都调用 `mem_cgroup_charge()`（4.8、4.13 节）：
 
+[`mm/memcontrol.c:4731-4757`](../../linux/mm/memcontrol.c#L4731-L4757)（v6.18.60）
+
 ```c
-// mm/memcontrol.c:4731-4757（v6.18.60）
 static int charge_memcg(struct folio *folio, struct mem_cgroup *memcg,
 			gfp_t gfp)
 {
@@ -194,8 +198,9 @@ int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm, gfp_t gfp)
 
 `get_mem_cgroup_from_mm()` 找到 `mm->owner` 任务所在的 memcg（`CONFIG_MEMCG` 下 mm 记录一个 owner）。`commit_charge()` 把 memcg 指针写入 `folio->memcg_data`：
 
+[`mm/memcontrol.c:2517-2528`](../../linux/mm/memcontrol.c#L2517-L2528)（v6.18.60）
+
 ```c
-// mm/memcontrol.c:2517-2528（v6.18.60）
 static void commit_charge(struct folio *folio, struct mem_cgroup *memcg)
 {
 	VM_BUG_ON_FOLIO(folio_memcg_charged(folio), folio);
@@ -214,8 +219,9 @@ static void commit_charge(struct folio *folio, struct mem_cgroup *memcg)
 
 ### `try_charge_memcg()`
 
+[`mm/memcontrol.c:2300-2337`](../../linux/mm/memcontrol.c#L2300-L2337)（v6.18.60，节选）
+
 ```c
-// mm/memcontrol.c:2300-2337（v6.18.60，节选）
 static int try_charge_memcg(struct mem_cgroup *memcg, gfp_t gfp_mask,
 			    unsigned int nr_pages)
 {
@@ -242,10 +248,11 @@ retry:
 	}
 ```
 
-**per-CPU 预扣（stock）**：`page_counter` 是层级的原子计数器，每次计费都要从当前 cgroup 一路原子加到根，开销不小。因此计费总是一次向 `page_counter` 申请 `MEMCG_CHARGE_BATCH`（64 页，`include/linux/memcontrol.h:331`）的额度，多出的部分存入每 CPU 的 `memcg_stock`，下次同一 memcg 的计费直接从 stock 中扣减：
+**per-CPU 预扣（stock）**：`page_counter` 是层级的原子计数器，每次计费都要从当前 cgroup 一路原子加到根，开销不小。因此计费总是一次向 `page_counter` 申请 `MEMCG_CHARGE_BATCH`（64 页，[`include/linux/memcontrol.h:331`](../../linux/include/linux/memcontrol.h#L331)）的额度，多出的部分存入每 CPU 的 `memcg_stock`，下次同一 memcg 的计费直接从 stock 中扣减：
+
+[`mm/memcontrol.c:1797-1825`](../../linux/mm/memcontrol.c#L1797-L1825)（v6.18.60）
 
 ```c
-// mm/memcontrol.c:1797-1825（v6.18.60）
 static bool consume_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 {
 	struct memcg_stock_pcp *stock;
@@ -277,12 +284,13 @@ static bool consume_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 }
 ```
 
-每 CPU 的 stock 可以同时缓存 `NR_MEMCG_STOCK`（7）个 memcg 的额度（`mm/memcontrol.c:1748-1758`），适应一个 CPU 上交替运行多个 cgroup 任务的情况。代价是 memcg 的用量统计可能有每 CPU 最多 64 页的误差。
+每 CPU 的 stock 可以同时缓存 `NR_MEMCG_STOCK`（7）个 memcg 的额度（[`mm/memcontrol.c:1748-1758`](../../linux/mm/memcontrol.c#L1748-L1758)），适应一个 CPU 上交替运行多个 cgroup 任务的情况。代价是 memcg 的用量统计可能有每 CPU 最多 64 页的误差。
 
 `page_counter_try_charge()` 从当前计数器逐级向上原子增加，任一层超过 `max` 就回滚并返回失败的那一层：
 
+[`mm/page_counter.c:118-154`](../../linux/mm/page_counter.c#L118-L154)（v6.18.60，节选）
+
 ```c
-// mm/page_counter.c:118-154（v6.18.60，节选）
 bool page_counter_try_charge(struct page_counter *counter,
 			     unsigned long nr_pages,
 			     struct page_counter **fail)
@@ -307,8 +315,9 @@ bool page_counter_try_charge(struct page_counter *counter,
 
 计费失败时，`mem_over_limit` 指向超限的那一层祖先（可能不是当前 cgroup 本身）：
 
+[`mm/memcontrol.c:2346-2446`](../../linux/mm/memcontrol.c#L2346-L2446)（v6.18.60，节选）
+
 ```c
-// mm/memcontrol.c:2346-2446（v6.18.60，节选）
 	if (unlikely(current->flags & PF_MEMALLOC))
 		goto force;
 
@@ -379,7 +388,7 @@ force:
 2. 不能阻塞的分配直接失败（`GFP_ATOMIC` 带 `__GFP_HIGH` 时强制计费）；
 3. 记录 `max` 事件，调用 `try_to_free_mem_cgroup_pages()`（`mm/vmscan.c`）**只回收 `mem_over_limit` 子树**中的页；
 4. 回收后若有余量则重试；还会清空所有 CPU 上该 memcg 的 stock，归还预扣的额度；
-5. 最多重试 `MAX_RECLAIM_RETRIES`（16）次，仍失败则调用 `mem_cgroup_oom()`（`mm/memcontrol.c:1661`）→ `mem_cgroup_out_of_memory()`（`mm/memcontrol.c:1628`）→ `out_of_memory()`，在该 memcg 内选择牺牲者（4.12 节）。
+5. 最多重试 `MAX_RECLAIM_RETRIES`（16）次，仍失败则调用 `mem_cgroup_oom()`（[`mm/memcontrol.c:1661`](../../linux/mm/memcontrol.c#L1661)）→ `mem_cgroup_out_of_memory()`（[`mm/memcontrol.c:1628`](../../linux/mm/memcontrol.c#L1628)）→ `out_of_memory()`，在该 memcg 内选择牺牲者（4.12 节）。
 
 memcg OOM 只影响超限 cgroup 内部的进程，系统其余部分不受影响。这是容器内存隔离的核心保证。
 
@@ -387,8 +396,9 @@ memcg OOM 只影响超限 cgroup 内部的进程，系统其余部分不受影�
 
 `memory.max` 是硬限制，触及时会 OOM；`memory.high` 是**软限制**，超过时不会 OOM，而是让分配者自己承担回收工作并被**节流**（降速），给用户态的管理程序留出反应时间。计费成功后：
 
+[`mm/memcontrol.c:2448-2505`](../../linux/mm/memcontrol.c#L2448-L2505)（v6.18.60，节选）
+
 ```c
-// mm/memcontrol.c:2448-2505（v6.18.60，节选）
 done_restock:
 	if (batch > nr_pages)
 		refill_stock(memcg, batch - nr_pages);
@@ -427,8 +437,9 @@ done_restock:
 
 超过 high 时，计费本身仍然成功，但在任务上记录"超出量"并设置 `TIF_NOTIFY_RESUME`。任务**返回用户态前**调用 `mem_cgroup_handle_over_high()`——此时不持有任何内核锁，适合做回收和睡眠：
 
+[`mm/memcontrol.c:2210-2297`](../../linux/mm/memcontrol.c#L2210-L2297)（v6.18.60，节选）
+
 ```c
-// mm/memcontrol.c:2210-2297（v6.18.60，节选）
 void __mem_cgroup_handle_over_high(gfp_t gfp_mask)
 {
 	...
@@ -464,7 +475,7 @@ void __mem_cgroup_handle_over_high(gfp_t gfp_mask)
 	...
 ```
 
-先回收超出的部分；回收跟不上时，按超出比例的平方计算惩罚延迟（`calculate_high_delay()`，`mm/memcontrol.c:2173`），让任务睡眠，最长 2 秒（`MEMCG_MAX_HIGH_DELAY_JIFFIES`，`mm/memcontrol.c:2073`）。睡眠时间计入 PSI，因此 systemd-oomd 等工具可以观察到压力并采取行动。
+先回收超出的部分；回收跟不上时，按超出比例的平方计算惩罚延迟（`calculate_high_delay()`，[`mm/memcontrol.c:2173`](../../linux/mm/memcontrol.c#L2173)），让任务睡眠，最长 2 秒（`MEMCG_MAX_HIGH_DELAY_JIFFIES`，[`mm/memcontrol.c:2073`](../../linux/mm/memcontrol.c#L2073)）。睡眠时间计入 PSI，因此 systemd-oomd 等工具可以观察到压力并采取行动。
 
 ## 保护：`memory.min` 与 `memory.low`
 
@@ -477,10 +488,11 @@ void __mem_cgroup_handle_over_high(gfp_t gfp_mask)
 
 ### 有效保护值
 
-保护值是层级的，子 cgroup 不能比父 cgroup 获得更多保护；而且兄弟 cgroup 声明的保护总和可能超过父 cgroup 的保护（超额声明）。`mem_cgroup_calculate_protection()`（`mm/memcontrol.c:4716`）在每次回收开始时，自顶向下为每个 cgroup 计算有效值 `emin`/`elow`：
+保护值是层级的，子 cgroup 不能比父 cgroup 获得更多保护；而且兄弟 cgroup 声明的保护总和可能超过父 cgroup 的保护（超额声明）。`mem_cgroup_calculate_protection()`（[`mm/memcontrol.c:4716`](../../linux/mm/memcontrol.c#L4716)）在每次回收开始时，自顶向下为每个 cgroup 计算有效值 `emin`/`elow`：
+
+[`mm/page_counter.c:337-359`](../../linux/mm/page_counter.c#L337-L359)（v6.18.60，节选）
 
 ```c
-// mm/page_counter.c:337-359（v6.18.60，节选）
 static unsigned long effective_protection(unsigned long usage,
 					  unsigned long parent_usage,
 					  unsigned long setting,
@@ -507,7 +519,7 @@ static unsigned long effective_protection(unsigned long usage,
 	...
 ```
 
-规则（详见 `mm/page_counter.c:300-336` 的注释）：
+规则（详见 [`mm/page_counter.c:300-336`](../../linux/mm/page_counter.c#L300-L336) 的注释）：
 
 1. 第一层的有效保护等于其设置值；
 2. 下层的有效保护不超过父层的有效保护；
@@ -525,7 +537,7 @@ static unsigned long effective_protection(unsigned long usage,
 
 v5.9 引入的解决方案是 **obj_cgroup**：一个轻量的间接层对象，slab 对象（通过 `slab->obj_exts`，`CONFIG_SLAB_OBJ_EXT=y`）和内核页（`page->memcg_data` 低位标记为 objcg）引用的是 `obj_cgroup` 而不是 `mem_cgroup`。cgroup 被删除时，只需把它的 `objcg` **重新指向父 memcg**（reparenting），所有存量对象的计费就自动转移到父 cgroup，原 memcg 可以立即释放。
 
-`obj_cgroup_charge()`（`mm/memcontrol.c:3126`）以**字节**为单位计费，内部维护每 CPU 的字节级 stock（`consume_obj_stock()`，`mm/memcontrol.c:2936`）：不足一页的部分在 stock 中累计，凑满一页才向 `page_counter` 计费一次。整页的内核分配（`__GFP_ACCOUNT` 的 `alloc_pages()`）则在 4.3 节 `__alloc_frozen_pages_noprof()` 的末尾经 `__memcg_kmem_charge_page()`（`mm/memcontrol.c:2852`）计费。4.5 节 kmalloc 的 `KMALLOC_CGROUP` 缓存（`kmalloc-cg-*`）专门存放这类计费对象，避免与非计费对象混在同一 slab 中。
+`obj_cgroup_charge()`（[`mm/memcontrol.c:3126`](../../linux/mm/memcontrol.c#L3126)）以**字节**为单位计费，内部维护每 CPU 的字节级 stock（`consume_obj_stock()`，[`mm/memcontrol.c:2936`](../../linux/mm/memcontrol.c#L2936)）：不足一页的部分在 stock 中累计，凑满一页才向 `page_counter` 计费一次。整页的内核分配（`__GFP_ACCOUNT` 的 `alloc_pages()`）则在 4.3 节 `__alloc_frozen_pages_noprof()` 的末尾经 `__memcg_kmem_charge_page()`（[`mm/memcontrol.c:2852`](../../linux/mm/memcontrol.c#L2852)）计费。4.5 节 kmalloc 的 `KMALLOC_CGROUP` 缓存（`kmalloc-cg-*`）专门存放这类计费对象，避免与非计费对象混在同一 slab 中。
 
 ## 常用接口
 

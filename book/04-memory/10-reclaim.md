@@ -1,6 +1,6 @@
 # 4.10 页面回收：LRU、MGLRU 与 kswapd
 
-> **本节源码**：`mm/vmscan.c`、`include/linux/mmzone.h`、`include/linux/mm_inline.h`、`mm/workingset.c`、`mm/shrinker.c`、`include/linux/shrinker.h`
+> **本节源码**：[`mm/vmscan.c`](../../linux/mm/vmscan.c)、[`include/linux/mmzone.h`](../../linux/include/linux/mmzone.h)、[`include/linux/mm_inline.h`](../../linux/include/linux/mm_inline.h)、[`mm/workingset.c`](../../linux/mm/workingset.c)、[`mm/shrinker.c`](../../linux/mm/shrinker.c)、[`include/linux/shrinker.h`](../../linux/include/linux/shrinker.h)
 > **关键函数**：`kswapd()`、`balance_pgdat()`、`pgdat_balanced()`、`shrink_node()`、`lru_gen_shrink_node()`、`try_to_shrink_lruvec()`、`get_nr_to_scan()`、`try_to_inc_max_seq()`、`evict_folios()`、`sort_folio()`、`shrink_folio_list()`、`folio_check_references()`、`shrink_slab()`
 > **前置知识**：4.4 水位线与慢速路径、4.9 写时复制与反向映射
 
@@ -20,8 +20,9 @@ v6.1 引入了**多代 LRU（Multi-Gen LRU，MGLRU）**，本书配置启用了 
 
 LRU 链表组织在 `struct lruvec` 中。未启用 memcg 时每个节点一个（`pgdat->__lruvec`）；启用 memcg 时，每个 memcg 在每个节点上各有一个（4.14 节）：
 
+[`include/linux/mmzone.h:669-698`](../../linux/include/linux/mmzone.h#L669-L698)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:669-698（v6.18.60）
 struct lruvec {
 	struct list_head		lists[NR_LRU_LISTS];
 	/* per lruvec lru_lock for memcg */
@@ -58,8 +59,9 @@ struct lruvec {
 
 ### 传统 LRU：活跃与非活跃
 
+[`include/linux/mmzone.h:316-323`](../../linux/include/linux/mmzone.h#L316-L323)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:316-323（v6.18.60）
 enum lru_list {
 	LRU_INACTIVE_ANON = LRU_BASE,
 	LRU_ACTIVE_ANON = LRU_BASE + LRU_ACTIVE,
@@ -72,8 +74,9 @@ enum lru_list {
 
 传统 LRU 把可回收页按"匿名 / 文件"和"活跃 / 非活跃"分为四条链表，另有一条不可回收链表（mlock 的页、ramfs 页等）。新页通常加入非活跃链表头；回收从非活跃链表尾扫描，被访问过两次的页提升到活跃链表；非活跃链表过短时，从活跃链表尾部把页降级到非活跃链表。这一"二次机会"算法的关键判断在 `folio_check_references()`：
 
+[`mm/vmscan.c:937-962`](../../linux/mm/vmscan.c#L937-L962)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:937-962（v6.18.60，节选）
 	referenced_folio = folio_test_clear_referenced(folio);
 
 	if (referenced_ptes) {
@@ -109,7 +112,7 @@ enum lru_list {
 
 - **粒度太粗**：只有活跃/非活跃两级，无法区分"一分钟前访问"和"一小时前访问"；
 - **扫描代价高**：判断冷热需要对每个候选页做反向映射遍历，在大内存、多映射的场景下 CPU 开销很大；
-- **匿名与文件的平衡依赖启发式**：`get_scan_count()`（`mm/vmscan.c:2562`）根据 `swappiness`、回收代价和 refault 统计决定两类页的扫描比例，调优困难。
+- **匿名与文件的平衡依赖启发式**：`get_scan_count()`（[`mm/vmscan.c:2562`](../../linux/mm/vmscan.c#L2562)）根据 `swappiness`、回收代价和 refault 统计决定两类页的扫描比例，调优困难。
 
 ## 多代 LRU（MGLRU）
 
@@ -123,8 +126,9 @@ MGLRU 由 Yu Zhao 开发，v6.1 合入主线。它的核心改进有三点：
 
 ### 数据结构
 
+[`include/linux/mmzone.h:490-518`](../../linux/include/linux/mmzone.h#L490-L518)（v6.18.60）
+
 ```c
-// include/linux/mmzone.h:490-518（v6.18.60）
 struct lru_gen_folio {
 	/* the aging increments the youngest generation number */
 	unsigned long max_seq;
@@ -156,8 +160,9 @@ struct lru_gen_folio {
 };
 ```
 
+[`include/linux/mmzone.h:398-421`](../../linux/include/linux/mmzone.h#L398-L421)（v6.18.60，节选）
+
 ```c
-// include/linux/mmzone.h:398-421（v6.18.60，节选）
 #define MIN_NR_GENS		2U
 #define MAX_NR_GENS		4U
 ...
@@ -182,8 +187,9 @@ struct lru_gen_folio {
 
 ### 新页放在哪一代
 
+[`include/linux/mm_inline.h:220-252`](../../linux/include/linux/mm_inline.h#L220-L252)（v6.18.60，节选）
+
 ```c
-// include/linux/mm_inline.h:220-252（v6.18.60，节选）
 static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 					      const struct folio *folio,
 					      bool reclaiming)
@@ -220,8 +226,9 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 
 ### 回收入口
 
+[`mm/vmscan.c:6051-6061`](../../linux/mm/vmscan.c#L6051-L6061)（v6.18.60）
+
 ```c
-// mm/vmscan.c:6051-6061（v6.18.60）
 static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 {
 	unsigned long nr_reclaimed, nr_scanned, nr_node_reclaimed;
@@ -237,8 +244,9 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 
 全局回收（非 memcg 限额触发）在启用 MGLRU 时进入 `lru_gen_shrink_node()`：
 
+[`mm/vmscan.c:5043-5083`](../../linux/mm/vmscan.c#L5043-L5083)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:5043-5083（v6.18.60，节选）
 static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
 	...
@@ -264,10 +272,11 @@ done:
 }
 ```
 
-`shrink_many()`（`mm/vmscan.c:4952`）在启用 memcg 时按 memcg 的"代"轮流选择 memcg 进行回收（memcg 级别的 LRU，使长期不活跃的 memcg 优先被回收）。每个 memcg 的 lruvec 由 `shrink_one()` 处理：
+`shrink_many()`（[`mm/vmscan.c:4952`](../../linux/mm/vmscan.c#L4952)）在启用 memcg 时按 memcg 的"代"轮流选择 memcg 进行回收（memcg 级别的 LRU，使长期不活跃的 memcg 优先被回收）。每个 memcg 的 lruvec 由 `shrink_one()` 处理：
+
+[`mm/vmscan.c:4911-4934`](../../linux/mm/vmscan.c#L4911-L4934)（v6.18.60，节选）
 
 ```c
-// mm/vmscan.c:4911-4934（v6.18.60，节选）
 static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 {
 	...
@@ -293,8 +302,9 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 
 ### 驱逐与老化的协调
 
+[`mm/vmscan.c:4873-4909`](../../linux/mm/vmscan.c#L4873-L4909)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:4873-4909（v6.18.60，节选）
 static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	long nr_to_scan;
@@ -326,8 +336,9 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 
 `get_nr_to_scan()` 决定本轮扫描多少页，以及是否需要先老化：
 
+[`mm/vmscan.c:4782-4841`](../../linux/mm/vmscan.c#L4782-L4841)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:4782-4841（v6.18.60，节选）
 static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 			     int swappiness, unsigned long *nr_to_scan)
 {
@@ -360,8 +371,9 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, int s
 
 ### 老化：`try_to_inc_max_seq()`
 
+[`mm/vmscan.c:4055-4107`](../../linux/mm/vmscan.c#L4055-L4107)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:4055-4107（v6.18.60，节选）
 static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long seq,
 			       int swappiness, bool force_scan)
 {
@@ -394,7 +406,7 @@ done:
 }
 ```
 
-老化遍历该 lruvec 所属 memcg 下所有进程的 mm（`lru_gen_mm_list`），对每个 mm 调用 `walk_mm()`（`mm/vmscan.c:3810`）扫描其页表。遇到 Accessed 位为 1 的 PTE，就清除该位，并把对应 folio 的代号更新为 `max_seq`（即将成为新的次年轻代）。为降低开销：
+老化遍历该 lruvec 所属 memcg 下所有进程的 mm（`lru_gen_mm_list`），对每个 mm 调用 `walk_mm()`（[`mm/vmscan.c:3810`](../../linux/mm/vmscan.c#L3810)）扫描其页表。遇到 Accessed 位为 1 的 PTE，就清除该位，并把对应 folio 的代号更新为 `max_seq`（即将成为新的次年轻代）。为降低开销：
 
 - **布隆过滤器（Bloom Filter）**：记录上一轮中"包含足够多年轻 PTE 的 PMD"，本轮只扫描这些 PMD 下的 PTE 页表，跳过大片冷区域；
 - **PMD 层 Accessed 位**：x86 在 PMD 项中也会设置 Accessed 位（非叶 PMD 项，`CONFIG_ARCH_HAS_NONLEAF_PMD_YOUNG`），可以先检查 PMD 层再决定是否进入；
@@ -402,12 +414,13 @@ done:
 
 `inc_max_seq()` 最终把 `max_seq` 加 1，记录时间戳，使所有代"变老"一级。
 
-**look-around**：驱逐过程中，`folio_referenced()` 经反向映射找到一个年轻 PTE 时，`lru_gen_look_around()`（`mm/vmscan.c:4235`）会顺便检查同一 PTE 页表中相邻的若干 PTE，把其中年轻的也一并提升。这利用了空间局部性，用极小的代价获得额外的访问信息。
+**look-around**：驱逐过程中，`folio_referenced()` 经反向映射找到一个年轻 PTE 时，`lru_gen_look_around()`（[`mm/vmscan.c:4235`](../../linux/mm/vmscan.c#L4235)）会顺便检查同一 PTE 页表中相邻的若干 PTE，把其中年轻的也一并提升。这利用了空间局部性，用极小的代价获得额外的访问信息。
 
 ### 驱逐：`evict_folios()`
 
+[`mm/vmscan.c:4693-4778`](../../linux/mm/vmscan.c#L4693-L4778)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:4693-4778（v6.18.60，节选）
 static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			struct scan_control *sc, int swappiness)
 {
@@ -440,10 +453,11 @@ retry:
 }
 ```
 
-`isolate_folios()`（`mm/vmscan.c:4670`）根据 `swappiness` 与两类页各层的 refault 统计选择从匿名还是文件的最老代取页，再由 `scan_folios()` 遍历最老代链表，对每个 folio 调用 `sort_folio()` 做"延迟排序"：
+`isolate_folios()`（[`mm/vmscan.c:4670`](../../linux/mm/vmscan.c#L4670)）根据 `swappiness` 与两类页各层的 refault 统计选择从匿名还是文件的最老代取页，再由 `scan_folios()` 遍历最老代链表，对每个 folio 调用 `sort_folio()` 做"延迟排序"：
+
+[`mm/vmscan.c:4469-4516`](../../linux/mm/vmscan.c#L4469-L4516)（v6.18.60，节选）
 
 ```c
-// mm/vmscan.c:4469-4516（v6.18.60，节选）
 static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_control *sc,
 		       int tier_idx)
 {
@@ -487,7 +501,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 
 ## 共用的回收执行：`shrink_folio_list()`
 
-无论传统 LRU 还是 MGLRU，被选中的 folio 最终都交给 `shrink_folio_list()`（`mm/vmscan.c:1104`）逐个处理。这是一个长达数百行的函数，主要步骤如下：
+无论传统 LRU 还是 MGLRU，被选中的 folio 最终都交给 `shrink_folio_list()`（[`mm/vmscan.c:1104`](../../linux/mm/vmscan.c#L1104)）逐个处理。这是一个长达数百行的函数，主要步骤如下：
 
 ```
 shrink_folio_list() 对每个 folio:
@@ -508,8 +522,9 @@ shrink_folio_list() 对每个 folio:
 
 解除映射与写回的核心代码：
 
+[`mm/vmscan.c:1396-1403`](../../linux/mm/vmscan.c#L1396-L1403)（v6.18.60）
+
 ```c
-// mm/vmscan.c:1396-1403（v6.18.60）
 			try_to_unmap(folio, flags);
 			if (folio_mapped(folio)) {
 				stat->nr_unmap_fail += nr_pages;
@@ -520,8 +535,9 @@ shrink_folio_list() 对每个 folio:
 			}
 ```
 
+[`mm/vmscan.c:1417-1442`](../../linux/mm/vmscan.c#L1417-L1442)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:1417-1442（v6.18.60，节选）
 		if (folio_test_dirty(folio)) {
 			/*
 			 * Only kswapd can writeback filesystem folios
@@ -549,14 +565,15 @@ shrink_folio_list() 对每个 folio:
 
 **回收路径尽量不直接写回文件页**：直接回收可能发生在任意深的调用栈中，再进入文件系统写回有栈溢出风险；而且逐页的随机写 I/O 效率远低于 flusher 线程按文件顺序批量写回。因此只有 kswapd、且同一脏页第二次被扫描到、且节点被标记为"脏页过多"（`PGDAT_DIRTY`）时才会就地写回。其他情况只设置 `PG_reclaim`，让 flusher 写回完成时（`folio_end_writeback()` → `folio_rotate_reclaimable()`）把它移到 LRU 尾部，下次扫描即可直接回收。匿名页（写入交换区）不受此限制。
 
-`__remove_mapping()` 从 page cache（或交换缓存）中删除 folio 时，会调用 `workingset_eviction()`（`mm/workingset.c:381`）在原位置留下一个 **shadow 项**，记录驱逐时刻的"LRU 时钟"。以后若该页被重新读入（refault），`workingset_refault()`（`mm/workingset.c:534`）根据 shadow 计算"重新访问距离"：如果距离小于当前内存可容纳的工作集大小，说明该页属于工作集、不该被驱逐，于是新读入的 folio 被标记 `PG_workingset`，并直接放入较年轻的代。MGLRU 使用自己的 `lru_gen_eviction()` / `lru_gen_refault()`（`mm/workingset.c:232`、`:283`），把 refault 计入对应层的统计。
+`__remove_mapping()` 从 page cache（或交换缓存）中删除 folio 时，会调用 `workingset_eviction()`（[`mm/workingset.c:381`](../../linux/mm/workingset.c#L381)）在原位置留下一个 **shadow 项**，记录驱逐时刻的"LRU 时钟"。以后若该页被重新读入（refault），`workingset_refault()`（[`mm/workingset.c:534`](../../linux/mm/workingset.c#L534)）根据 shadow 计算"重新访问距离"：如果距离小于当前内存可容纳的工作集大小，说明该页属于工作集、不该被驱逐，于是新读入的 folio 被标记 `PG_workingset`，并直接放入较年轻的代。MGLRU 使用自己的 `lru_gen_eviction()` / `lru_gen_refault()`（[`mm/workingset.c:232`](../../linux/mm/workingset.c#L232)、`:283`），把 refault 计入对应层的统计。
 
 ## kswapd
 
 ### 主循环
 
+[`mm/vmscan.c:7304-7374`](../../linux/mm/vmscan.c#L7304-L7374)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:7304-7374（v6.18.60，节选）
 static int kswapd(void *p)
 {
 	unsigned int alloc_order, reclaim_order;
@@ -596,12 +613,13 @@ kswapd_try_sleep:
 	...
 ```
 
-kswapd 设置 `PF_MEMALLOC`，可以无视水位分配少量内存（4.4 节）。它在 `kswapd_try_to_sleep()`（`mm/vmscan.c:7207`）中睡眠，被 `wakeup_kswapd()` 唤醒后读取请求的阶与 zone 上限，调用 `balance_pgdat()`。睡眠前它会先"小睡" `HZ/10`（约 100 ms，`mm/vmscan.c:7240`），若期间没有再被唤醒且节点平衡，才进入长睡眠并唤醒 kcompactd 做后台规整。
+kswapd 设置 `PF_MEMALLOC`，可以无视水位分配少量内存（4.4 节）。它在 `kswapd_try_to_sleep()`（[`mm/vmscan.c:7207`](../../linux/mm/vmscan.c#L7207)）中睡眠，被 `wakeup_kswapd()` 唤醒后读取请求的阶与 zone 上限，调用 `balance_pgdat()`。睡眠前它会先"小睡" `HZ/10`（约 100 ms，[`mm/vmscan.c:7240`](../../linux/mm/vmscan.c#L7240)），若期间没有再被唤醒且节点平衡，才进入长睡眠并唤醒 kcompactd 做后台规整。
 
 ### `balance_pgdat()`
 
+[`mm/vmscan.c:6975-7151`](../../linux/mm/vmscan.c#L6975-L7151)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:6975-7151（v6.18.60，节选）
 static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
 {
 	...
@@ -653,10 +671,11 @@ restart:
 		atomic_inc(&pgdat->kswapd_failures);
 ```
 
-`balance_pgdat()` 以 priority 从 12 递减到 1 的循环逐步加大回收力度，每轮调用 `kswapd_shrink_node()`（`mm/vmscan.c:6902`），后者计算回收目标（每个 zone 达到 high 水位所需的页数）并调用 `shrink_node()`。循环在节点"平衡"时结束：
+`balance_pgdat()` 以 priority 从 12 递减到 1 的循环逐步加大回收力度，每轮调用 `kswapd_shrink_node()`（[`mm/vmscan.c:6902`](../../linux/mm/vmscan.c#L6902)），后者计算回收目标（每个 zone 达到 high 水位所需的页数）并调用 `shrink_node()`。循环在节点"平衡"时结束：
+
+[`mm/vmscan.c:6780-6798`](../../linux/mm/vmscan.c#L6780-L6798)（v6.18.60，节选）
 
 ```c
-// mm/vmscan.c:6780-6798（v6.18.60，节选）
 static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 {
 	...
@@ -678,8 +697,9 @@ static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 
 dentry、inode、文件系统元数据、GPU 驱动缓存等不在 LRU 上，它们通过注册 **shrinker** 参与回收：
 
+[`include/linux/shrinker.h:82-91`](../../linux/include/linux/shrinker.h#L82-L91)（v6.18.60）
+
 ```c
-// include/linux/shrinker.h:82-91（v6.18.60）
 struct shrinker {
 	unsigned long (*count_objects)(struct shrinker *,
 				       struct shrink_control *sc);
@@ -691,13 +711,13 @@ struct shrinker {
 	unsigned flags;
 ```
 
-`shrink_slab()`（`mm/shrinker.c:623`）在每次 LRU 回收后被调用，按照"本轮 LRU 扫描的比例"（与 priority 相关）乘以 `count_objects()` 返回的对象数，计算该 shrinker 应扫描的对象数，再分批调用 `scan_objects()`（`do_shrink_slab()`，`mm/shrinker.c:380`）。`seeks` 表示重建一个对象的代价（默认 `DEFAULT_SEEKS` = 2），代价越高，扫描比例越小。支持 memcg 的 shrinker（`SHRINKER_MEMCG_AWARE`）只回收目标 memcg 的对象，例如 dentry/inode 的 `list_lru`。
+`shrink_slab()`（[`mm/shrinker.c:623`](../../linux/mm/shrinker.c#L623)）在每次 LRU 回收后被调用，按照"本轮 LRU 扫描的比例"（与 priority 相关）乘以 `count_objects()` 返回的对象数，计算该 shrinker 应扫描的对象数，再分批调用 `scan_objects()`（`do_shrink_slab()`，[`mm/shrinker.c:380`](../../linux/mm/shrinker.c#L380)）。`seeks` 表示重建一个对象的代价（默认 `DEFAULT_SEEKS` = 2），代价越高，扫描比例越小。支持 memcg 的 shrinker（`SHRINKER_MEMCG_AWARE`）只回收目标 memcg 的对象，例如 dentry/inode 的 `list_lru`。
 
 ## 关键参数
 
 | 参数 | 默认值 | 作用 |
 |---|---|---|
-| `vm.swappiness` | 60（`mm/vmscan.c:202`） | 匿名页相对文件页的回收倾向，范围 0～200；0 表示尽量不换出匿名页，200 表示两者同等对待 |
+| `vm.swappiness` | 60（[`mm/vmscan.c:202`](../../linux/mm/vmscan.c#L202)） | 匿名页相对文件页的回收倾向，范围 0～200；0 表示尽量不换出匿名页，200 表示两者同等对待 |
 | `vm.vfs_cache_pressure` | 100 | dentry/inode 缓存相对 page cache 的回收倾向 |
 | `vm.watermark_scale_factor` | 10 | 影响 low/high 水位间距，即 kswapd 的启动时机和每次回收量（4.4 节） |
 | `/sys/kernel/mm/lru_gen/enabled` | 0x0007（`CONFIG_LRU_GEN_ENABLED=y` 时） | MGLRU 开关及特性位（基础、页表遍历、非叶 PMD Accessed 位） |

@@ -1,6 +1,6 @@
 # 5.8 中断向量分配与亲和性
 
-> **本节源码**：`kernel/irq/matrix.c`、`arch/x86/kernel/apic/vector.c`、`arch/x86/include/asm/hw_irq.h`、`kernel/irq/manage.c`、`kernel/irq/migration.c`、`kernel/irq/internals.h`、`kernel/irq/affinity.c`、`kernel/irq/msi.c`、`kernel/irq/cpuhotplug.c`、`kernel/irq/proc.c`、`arch/x86/kernel/irq.c`
+> **本节源码**：[`kernel/irq/matrix.c`](../../linux/kernel/irq/matrix.c)、[`arch/x86/kernel/apic/vector.c`](../../linux/arch/x86/kernel/apic/vector.c)、[`arch/x86/include/asm/hw_irq.h`](../../linux/arch/x86/include/asm/hw_irq.h)、[`kernel/irq/manage.c`](../../linux/kernel/irq/manage.c)、[`kernel/irq/migration.c`](../../linux/kernel/irq/migration.c)、[`kernel/irq/internals.h`](../../linux/kernel/irq/internals.h)、[`kernel/irq/affinity.c`](../../linux/kernel/irq/affinity.c)、[`kernel/irq/msi.c`](../../linux/kernel/irq/msi.c)、[`kernel/irq/cpuhotplug.c`](../../linux/kernel/irq/cpuhotplug.c)、[`kernel/irq/proc.c`](../../linux/kernel/irq/proc.c)、[`arch/x86/kernel/irq.c`](../../linux/arch/x86/kernel/irq.c)
 > **关键函数**：`irq_matrix_alloc()`、`x86_vector_alloc_irqs()`、`x86_vector_activate()`、`assign_vector_locked()`、`chip_data_update()`、`irq_set_affinity_locked()`、`irq_do_set_affinity()`、`apic_set_affinity()`、`irq_move_masked_irq()`、`irq_complete_move()`、`irq_create_affinity_masks()`、`migrate_one_irq()`、`fixup_irqs()`
 > **前置知识**：5.5 中断控制器、5.6 通用中断层、5.7 中断申请与线程化中断
 
@@ -16,8 +16,9 @@ x86 的每个 CPU 只有 203 个设备向量可用（5.1 节），而一台服�
 
 `irq_matrix`（v4.15 由 Thomas Gleixner 引入，`CONFIG_GENERIC_IRQ_MATRIX_ALLOCATOR=y`）是一个"CPU × 向量"的二维分配器：
 
+[`kernel/irq/matrix.c:11-35`](../../linux/kernel/irq/matrix.c#L11-L35)（v6.18.60）
+
 ```c
-// kernel/irq/matrix.c:11-35（v6.18.60）
 struct cpumap {
 	unsigned int		available;	// [注] 本 CPU 尚可分配的向量数
 	unsigned int		allocated;	// [注] 已分配的普通向量数
@@ -47,8 +48,9 @@ struct irq_matrix {
 
 它在 `arch_early_irq_init()` 中创建（5.6 节）：`irq_alloc_matrix(NR_VECTORS, FIRST_EXTERNAL_VECTOR, FIRST_SYSTEM_VECTOR)`。分配一个向量时先挑 CPU，再在该 CPU 的位图中找空位：
 
+[`kernel/irq/matrix.c:116-153`](../../linux/kernel/irq/matrix.c#L116-L153)（v6.18.60）
+
 ```c
-// kernel/irq/matrix.c:116-153（v6.18.60）
 static unsigned int matrix_alloc_area(struct irq_matrix *m, struct cpumap *cm,
 				      unsigned int num, bool managed)
 {
@@ -91,8 +93,9 @@ static unsigned int matrix_find_best_cpu(struct irq_matrix *m,
 
 选 CPU 的策略很简单：**在允许的 CPU 集合中选剩余向量最多的那个**。这让中断自然地分散到各个 CPU 上，即便用户没有手动设置亲和性。
 
+[`kernel/irq/matrix.c:383-414`](../../linux/kernel/irq/matrix.c#L383-L414)（v6.18.60）
+
 ```c
-// kernel/irq/matrix.c:383-414（v6.18.60）
 int irq_matrix_alloc(struct irq_matrix *m, const struct cpumask *msk,
 		     bool reserved, unsigned int *mapped_cpu)
 {
@@ -131,8 +134,9 @@ int irq_matrix_alloc(struct irq_matrix *m, const struct cpumask *msk,
 
 向量域为每个中断保存一个 `apic_chip_data`（即其 `irq_data->chip_data`）：
 
+[`arch/x86/kernel/apic/vector.c:26-38`](../../linux/arch/x86/kernel/apic/vector.c#L26-L38)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:26-38（v6.18.60）
 struct apic_chip_data {
 	struct irq_cfg		hw_irq_cfg;	// [注] 当前生效的 {dest_apicid, vector}
 	unsigned int		vector;		// [注] 当前向量
@@ -148,15 +152,16 @@ struct apic_chip_data {
 };
 ```
 
+[`arch/x86/include/asm/hw_irq.h:88-91`](../../linux/arch/x86/include/asm/hw_irq.h#L88-L91)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/hw_irq.h:88-91（v6.18.60）
 struct irq_cfg {
 	unsigned int		dest_apicid;
 	unsigned int		vector;
 };
 ```
 
-`irq_cfg` 是上层（I/O APIC、MSI）组合中断消息时读取的内容（5.5 节 `__irq_msi_compose_msg()`）。`irqd_cfg()`（`arch/x86/kernel/apic/vector.c:100-106`）沿 `parent_data` 走到最内层取出它，所以任何一层的 chip 都能拿到当前的向量和目标。
+`irq_cfg` 是上层（I/O APIC、MSI）组合中断消息时读取的内容（5.5 节 `__irq_msi_compose_msg()`）。`irqd_cfg()`（[`arch/x86/kernel/apic/vector.c:100-106`](../../linux/arch/x86/kernel/apic/vector.c#L100-L106)）沿 `parent_data` 走到最内层取出它，所以任何一层的 chip 都能拿到当前的向量和目标。
 
 ### 三个 cpumask
 
@@ -170,7 +175,7 @@ struct irq_cfg {
 
 *表 5-14：中断亲和性相关的 cpumask*
 
-x86 向量域设置了 `irqd_set_single_target()`（`arch/x86/kernel/apic/vector.c:582`）：**一个中断同一时刻只投递到一个 CPU**。虽然 LAPIC 的逻辑目的模式理论上支持"投递给一组 CPU 中优先级最低的那个"，但它在 x2APIC cluster 模式下只能覆盖一个 cluster，且每个 CPU 都要为该中断占用同一个向量号，浪费严重。v4.15 的向量管理重写后统一改为单目标。
+x86 向量域设置了 `irqd_set_single_target()`（[`arch/x86/kernel/apic/vector.c:582`](../../linux/arch/x86/kernel/apic/vector.c#L582)）：**一个中断同一时刻只投递到一个 CPU**。虽然 LAPIC 的逻辑目的模式理论上支持"投递给一组 CPU 中优先级最低的那个"，但它在 x2APIC cluster 模式下只能覆盖一个 cluster，且每个 CPU 都要为该中断占用同一个向量号，浪费严重。v4.15 的向量管理重写后统一改为单目标。
 
 ## 主流程分析
 
@@ -178,8 +183,9 @@ x86 向量域设置了 `irqd_set_single_target()`（`arch/x86/kernel/apic/vector
 
 5.6 节介绍了分层域的分配过程，向量域的 `alloc` 回调是 `x86_vector_alloc_irqs()`：
 
+[`arch/x86/kernel/apic/vector.c:567-612`](../../linux/arch/x86/kernel/apic/vector.c#L567-L612)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:567-612（v6.18.60）
 	for (i = 0; i < nr_irqs; i++) {
 		irqd = irq_domain_get_irq_data(domain, virq + i);
 		BUG_ON(!irqd);
@@ -230,8 +236,9 @@ x86 向量域设置了 `irqd_set_single_target()`（`arch/x86/kernel/apic/vector
 
 `assign_irq_vector_policy()` 决定分配时是否真正占用向量：
 
+[`arch/x86/kernel/apic/vector.c:315-327`](../../linux/arch/x86/kernel/apic/vector.c#L315-L327)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:315-327（v6.18.60）
 static int
 assign_irq_vector_policy(struct irq_data *irqd, struct irq_alloc_info *info)
 {
@@ -259,8 +266,9 @@ assign_irq_vector_policy(struct irq_data *irqd, struct irq_alloc_info *info)
 
 很多驱动在 probe 时一次申请大量 MSI-X 向量，但只有在接口打开（`ip link set up`）时才 `request_irq()`。若分配时就占用真实向量，未使用的网卡也会消耗大量向量。**保留模式**（reservation mode，`CONFIG_GENERIC_IRQ_RESERVATION_MODE=y`）把分配推迟到真正需要的时候：
 
+[`arch/x86/kernel/apic/vector.c:217-237`](../../linux/arch/x86/kernel/apic/vector.c#L217-L237)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:217-237（v6.18.60）
 static void reserve_irq_vector_locked(struct irq_data *irqd)
 {
 	struct apic_chip_data *apicd = apic_chip_data(irqd);
@@ -284,12 +292,13 @@ static int reserve_irq_vector(struct irq_data *irqd)
 }
 ```
 
-`vector_assign_managed_shutdown()`（`arch/x86/kernel/apic/vector.c:195-200`）把 `irq_cfg` 设为"第一个在线 CPU + `MANAGED_IRQ_SHUTDOWN_VECTOR`（`0xef`）"。这是一个所有 CPU 都设置为伪中断入口的系统向量（5.1 节 `spurious_entries_start`）。
+`vector_assign_managed_shutdown()`（[`arch/x86/kernel/apic/vector.c:195-200`](../../linux/arch/x86/kernel/apic/vector.c#L195-L200)）把 `irq_cfg` 设为"第一个在线 CPU + `MANAGED_IRQ_SHUTDOWN_VECTOR`（`0xef`）"。这是一个所有 CPU 都设置为伪中断入口的系统向量（5.1 节 `spurious_entries_start`）。
 
 但 PCI MSI 有个特殊要求：PCI 层在使能设备的 MSI 功能**之前**，必须先往设备里写入一条有效的消息，否则设备可能锁存一个随机的地址/数据对。`msi_init_virq()` 因此在分配时就以保留模式激活一次：
 
+[`kernel/irq/msi.c:1259-1272`](../../linux/kernel/irq/msi.c#L1259-L1272)（v6.18.60）
+
 ```c
-// kernel/irq/msi.c:1259-1272（v6.18.60）
 	if (!(vflags & VIRQ_ACTIVATE))
 		return 0;
 
@@ -310,8 +319,9 @@ static int reserve_irq_vector(struct irq_data *irqd)
 
 激活时的分派：
 
+[`arch/x86/kernel/apic/vector.c:461-482`](../../linux/arch/x86/kernel/apic/vector.c#L461-L482)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:461-482（v6.18.60）
 static int x86_vector_activate(struct irq_domain *dom, struct irq_data *irqd,
 			       bool reserve)
 {
@@ -336,16 +346,17 @@ static int x86_vector_activate(struct irq_domain *dom, struct irq_data *irqd,
 }
 ```
 
-`activate_reserved()`（`arch/x86/kernel/apic/vector.c:405-435`）调用 `assign_irq_vector_any_locked()`，按"NUMA 节点 ∩ 亲和性 → 亲和性 → 节点 → 所有在线 CPU"的顺序逐级放宽，尝试分配（`arch/x86/kernel/apic/vector.c:287-313`）。如果最终分到的 CPU 不在用户要求的亲和性内，打印 `Affinity broken due to vector space exhaustion`——宁可违背亲和性，也要让中断能工作。
+`activate_reserved()`（[`arch/x86/kernel/apic/vector.c:405-435`](../../linux/arch/x86/kernel/apic/vector.c#L405-L435)）调用 `assign_irq_vector_any_locked()`，按"NUMA 节点 ∩ 亲和性 → 亲和性 → 节点 → 所有在线 CPU"的顺序逐级放宽，尝试分配（[`arch/x86/kernel/apic/vector.c:287-313`](../../linux/arch/x86/kernel/apic/vector.c#L287-L313)）。如果最终分到的 CPU 不在用户要求的亲和性内，打印 `Affinity broken due to vector space exhaustion`——宁可违背亲和性，也要让中断能工作。
 
-`free_irq()` 时 `x86_vector_deactivate()`（`arch/x86/kernel/apic/vector.c:381-403`）释放真实向量，并重新回到保留状态。
+`free_irq()` 时 `x86_vector_deactivate()`（[`arch/x86/kernel/apic/vector.c:381-403`](../../linux/arch/x86/kernel/apic/vector.c#L381-L403)）释放真实向量，并重新回到保留状态。
 
 ### 真正分配一个向量
 
 无论哪种路径，最终都会调用 `assign_vector_locked()`：
 
+[`arch/x86/kernel/apic/vector.c:239-273`](../../linux/arch/x86/kernel/apic/vector.c#L239-L273)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:239-273（v6.18.60）
 static int
 assign_vector_locked(struct irq_data *irqd, const struct cpumask *dest)
 {
@@ -390,8 +401,9 @@ assign_vector_locked(struct irq_data *irqd, const struct cpumask *dest)
 
 `chip_data_update()` 完成登记：
 
+[`arch/x86/kernel/apic/vector.c:150-193`](../../linux/arch/x86/kernel/apic/vector.c#L150-L193)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:150-193（v6.18.60）
 static void chip_data_update(struct irq_data *irqd, unsigned int newvec, unsigned int newcpu)
 {
 	struct apic_chip_data *apicd = apic_chip_data(irqd);
@@ -442,10 +454,11 @@ setnew:
 
 ### 修改亲和性
 
-用户写 `/proc/irq/N/smp_affinity` 时，`write_irq_affinity()`（`kernel/irq/proc.c:134-174`）检查后调用 `irq_set_affinity()`，最终到达 `irq_set_affinity_locked()`：
+用户写 `/proc/irq/N/smp_affinity` 时，`write_irq_affinity()`（[`kernel/irq/proc.c:134-174`](../../linux/kernel/irq/proc.c#L134-L174)）检查后调用 `irq_set_affinity()`，最终到达 `irq_set_affinity_locked()`：
+
+[`kernel/irq/manage.c:365-391`](../../linux/kernel/irq/manage.c#L365-L391)（v6.18.60）
 
 ```c
-// kernel/irq/manage.c:365-391（v6.18.60）
 int irq_set_affinity_locked(struct irq_data *data, const struct cpumask *mask,
 			    bool force)
 {
@@ -478,18 +491,19 @@ int irq_set_affinity_locked(struct irq_data *data, const struct cpumask *mask,
 分为两种情况：
 
 - **可以在进程上下文中迁移**（`irq_can_move_pcntxt()` 为真）：直接调用 `irq_do_set_affinity()` → `chip->irq_set_affinity()`，沿域层级完成向量分配与硬件重编程。启用中断重映射时属于此类，因为改 IRT 表项是原子的。
-- **只能在中断上下文中迁移**：芯片设置了 `IRQCHIP_MOVE_DEFERRED`（`kernel/irq/internals.h:413-416`）。不启用中断重映射时，I/O APIC（`arch/x86/kernel/apic/io_apic.c:1864`）与直接挂在向量域下的 PCI MSI（`arch/x86/kernel/apic/msi.c:216-217`）都设置了这个标志。此时只把新亲和性存入 `pending_mask` 并置位 `IRQD_SETAFFINITY_PENDING`，等下一次中断到来时，在中断处理流程中迁移。
+- **只能在中断上下文中迁移**：芯片设置了 `IRQCHIP_MOVE_DEFERRED`（[`kernel/irq/internals.h:413-416`](../../linux/kernel/irq/internals.h#L413-L416)）。不启用中断重映射时，I/O APIC（[`arch/x86/kernel/apic/io_apic.c:1864`](../../linux/arch/x86/kernel/apic/io_apic.c#L1864)）与直接挂在向量域下的 PCI MSI（[`arch/x86/kernel/apic/msi.c:216-217`](../../linux/arch/x86/kernel/apic/msi.c#L216-L217)）都设置了这个标志。此时只把新亲和性存入 `pending_mask` 并置位 `IRQD_SETAFFINITY_PENDING`，等下一次中断到来时，在中断处理流程中迁移。
 
 为什么要延迟到中断上下文？回顾 5.5 节：不可屏蔽的 MSI 修改地址和数据不是原子的，`msi_set_affinity()` 的两步法要求"在当前目标 CPU 上、且关着中断"执行；I/O APIC 边沿中断在改写重定向表项时若恰好有中断到来，某些芯片会出错。在该中断自己的处理流程中迁移，天然满足"在当前目标 CPU、关中断、且没有同一中断正在投递"这些条件。
 
-`irq_do_set_affinity()`（`kernel/irq/manage.c:220-291`）还处理了 CPU 隔离：若内核以 `isolcpus=managed_irq,...` 启动，managed 中断的亲和性会优先排除隔离 CPU，避免从非隔离 CPU 提交的 I/O 在隔离 CPU 上产生中断。
+`irq_do_set_affinity()`（[`kernel/irq/manage.c:220-291`](../../linux/kernel/irq/manage.c#L220-L291)）还处理了 CPU 隔离：若内核以 `isolcpus=managed_irq,...` 启动，managed 中断的亲和性会优先排除隔离 CPU，避免从非隔离 CPU 提交的 I/O 在隔离 CPU 上产生中断。
 
 ### 延迟迁移：在下一次中断中完成
 
 延迟的迁移由流控处理函数中的应答回调触发。对 MSI，`handle_edge_irq()` 调用 `irq_ack`，经 `irq_chip_ack_parent` 到达向量域：
 
+[`arch/x86/kernel/apic/vector.c:1014-1024`](../../linux/arch/x86/kernel/apic/vector.c#L1014-L1024)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:1014-1024（v6.18.60）
 void apic_ack_irq(struct irq_data *irqd)
 {
 	irq_move_irq(irqd);
@@ -503,10 +517,11 @@ void apic_ack_edge(struct irq_data *irqd)
 }
 ```
 
-`irq_move_irq()`（`include/linux/irq.h:619-623`）在 `IRQD_SETAFFINITY_PENDING` 置位时调用 `__irq_move_irq()`，它先屏蔽中断，再调用 `irq_move_masked_irq()`：
+`irq_move_irq()`（[`include/linux/irq.h:619-623`](../../linux/include/linux/irq.h#L619-L623)）在 `IRQD_SETAFFINITY_PENDING` 置位时调用 `__irq_move_irq()`，它先屏蔽中断，再调用 `irq_move_masked_irq()`：
+
+[`kernel/irq/migration.c:48-102`](../../linux/kernel/irq/migration.c#L48-L102)（v6.18.60）
 
 ```c
-// kernel/irq/migration.c:48-102（v6.18.60）
 void irq_move_masked_irq(struct irq_data *idata)
 {
 	struct irq_desc *desc = irq_data_to_desc(idata);
@@ -570,8 +585,9 @@ void irq_move_masked_irq(struct irq_data *idata)
 
 迁移完成后，新旧两个向量同时有效：旧 CPU 的 `vector_irq[prev_vector]` 与新 CPU 的 `vector_irq[vector]` 都指向同一个描述符，在途的中断无论落到哪里都能被正确处理。什么时候可以安全地释放旧向量？**当新向量上收到第一个中断时**——这证明设备已经在使用新消息了：
 
+[`arch/x86/kernel/apic/vector.c:1137-1153`](../../linux/arch/x86/kernel/apic/vector.c#L1137-L1153)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:1137-1153（v6.18.60）
 void irq_complete_move(struct irq_cfg *cfg)
 {
 	struct apic_chip_data *apicd;
@@ -593,8 +609,9 @@ void irq_complete_move(struct irq_cfg *cfg)
 
 但旧向量必须在**旧 CPU 上**释放——要检查旧 CPU 的 IRR 中是否还挂着这个向量。`__vector_schedule_cleanup()` 把 `apicd` 挂到旧 CPU 的 per-CPU `vector_cleanup` 链表上，并在旧 CPU 上启动一个 1 jiffy 后到期的定时器：
 
+[`arch/x86/kernel/apic/vector.c:1092-1126`](../../linux/arch/x86/kernel/apic/vector.c#L1092-L1126)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:1092-1126（v6.18.60）
 static void __vector_schedule_cleanup(struct apic_chip_data *apicd)
 {
 	unsigned int cpu = apicd->prev_cpu;
@@ -634,8 +651,9 @@ static void __vector_schedule_cleanup(struct apic_chip_data *apicd)
 
 定时器回调在旧 CPU 上执行 `__vector_cleanup()`：
 
+[`arch/x86/kernel/apic/vector.c:1043-1080`](../../linux/arch/x86/kernel/apic/vector.c#L1043-L1080)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/vector.c:1043-1080（v6.18.60）
 static void __vector_cleanup(struct vector_cleanup *cl, bool check_irr)
 {
 	struct apic_chip_data *apicd;
@@ -676,7 +694,7 @@ static void __vector_cleanup(struct vector_cleanup *cl, bool check_irr)
 }
 ```
 
-若旧向量在旧 CPU 的 IRR 中仍有挂起，推迟 1 jiffy 再试，给旧 CPU 机会把它处理掉；否则 `free_moved_vector()`（`arch/x86/kernel/apic/vector.c:897-919`）把旧 CPU 的 `vector_irq[prev_vector]` 置为 `VECTOR_UNUSED`，在 `irq_matrix` 中释放，并清除 `move_in_progress`。
+若旧向量在旧 CPU 的 IRR 中仍有挂起，推迟 1 jiffy 再试，给旧 CPU 机会把它处理掉；否则 `free_moved_vector()`（[`arch/x86/kernel/apic/vector.c:897-919`](../../linux/arch/x86/kernel/apic/vector.c#L897-L919)）把旧 CPU 的 `vector_irq[prev_vector]` 置为 `VECTOR_UNUSED`，在 `irq_matrix` 中释放，并清除 `move_in_progress`。
 
 > **历史演进**：v6.6 之前，清理由一个专门的 IPI（`IRQ_MOVE_CLEANUP_VECTOR`，占用向量 `0x20`）触发：新 CPU 向旧 CPU 发送清理 IPI，旧 CPU 在 IPI 处理函数中释放向量。v6.6 起改为 per-CPU 定时器：它是唯一一个位于 `FIRST_SYSTEM_VECTOR` 之下的特殊向量，去掉它之后所有系统向量都集中在高端，FRED 分发时只需一次范围判断（5.2 节 `fred_extint()`）即可区分系统向量与设备向量。
 
@@ -705,8 +723,9 @@ sequenceDiagram
 
 驱动通过 `pci_alloc_irq_vectors_affinity(..., PCI_IRQ_AFFINITY, &affd)` 申请，PCI 层调用 `irq_create_affinity_masks()` 计算每个向量的亲和性：
 
+[`kernel/irq/affinity.c:63-101`](../../linux/kernel/irq/affinity.c#L63-L101)（v6.18.60）
+
 ```c
-// kernel/irq/affinity.c:63-101（v6.18.60）
 	/* Fill out vectors at the beginning that don't need affinity */
 	for (curvec = 0; curvec < affd->pre_vectors; curvec++)
 		cpumask_copy(&masks[curvec].mask, irq_default_affinity);
@@ -755,7 +774,7 @@ managed 中断与普通中断的区别：
 | 方面 | 普通中断 | managed 中断 |
 |---|---|---|
 | 亲和性来源 | 用户 / irqbalance / 驱动 hint | 内核按拓扑计算，固定不变 |
-| `/proc/irq/N/smp_affinity` | 可写 | 写入返回 `-EPERM`（`irq_can_set_affinity_usr()` 为假，`kernel/irq/manage.c:170-176`） |
+| `/proc/irq/N/smp_affinity` | 可写 | 写入返回 `-EPERM`（`irq_can_set_affinity_usr()` 为假，[`kernel/irq/manage.c:170-176`](../../linux/kernel/irq/manage.c#L170-L176)） |
 | 向量 | 保留模式，按需分配 | 在亲和性集合的每个 CPU 上预留一个（`irq_matrix_reserve_managed()`） |
 | 集合内 CPU 全部下线 | 迁移到任意在线 CPU（"打破亲和性"） | **关闭中断**，CPU 上线后再启动 |
 
@@ -767,8 +786,9 @@ managed 中断与普通中断的区别：
 
 CPU 下线时，在 stop_machine 的上下文中调用 `fixup_irqs()`：
 
+[`arch/x86/kernel/irq.c:505-549`](../../linux/arch/x86/kernel/irq.c#L505-L549)（v6.18.60）
+
 ```c
-// arch/x86/kernel/irq.c:505-549（v6.18.60）
 void fixup_irqs(void)
 {
 	unsigned int vector;
@@ -816,17 +836,17 @@ void fixup_irqs(void)
 }
 ```
 
-1. `irq_migrate_all_off_this_cpu()`（`kernel/irq/cpuhotplug.c:171-190`）遍历所有中断，对目标是本 CPU 的中断调用 `migrate_one_irq()`。此时可以**直接**迁移（即使芯片是 `MOVE_DEFERRED`，也会先屏蔽再改，`kernel/irq/cpuhotplug.c:109-111`），并先调用 `irq_force_complete_move()` 强制完成尚未结束的上一次迁移（`apic_force_complete_move()`，`arch/x86/kernel/apic/vector.c:924-995`）。
-2. 若中断的亲和性集合中已没有在线 CPU：managed 中断被关闭（`irqd_set_managed_shutdown()`），普通中断改为允许所有在线 CPU，即"打破亲和性"（`kernel/irq/cpuhotplug.c:113-125`）。
-3. 等待 1 ms 让在途中断落定，然后扫描本 CPU 的 IRR：仍挂着的中断用 `irq_retrigger`（向量域的 `apic_retrigger_irq()` 向新目标 CPU 发送新向量的 IPI，`arch/x86/kernel/apic/vector.c:1002-1012`）补发，保证不丢失。
+1. `irq_migrate_all_off_this_cpu()`（[`kernel/irq/cpuhotplug.c:171-190`](../../linux/kernel/irq/cpuhotplug.c#L171-L190)）遍历所有中断，对目标是本 CPU 的中断调用 `migrate_one_irq()`。此时可以**直接**迁移（即使芯片是 `MOVE_DEFERRED`，也会先屏蔽再改，[`kernel/irq/cpuhotplug.c:109-111`](../../linux/kernel/irq/cpuhotplug.c#L109-L111)），并先调用 `irq_force_complete_move()` 强制完成尚未结束的上一次迁移（`apic_force_complete_move()`，[`arch/x86/kernel/apic/vector.c:924-995`](../../linux/arch/x86/kernel/apic/vector.c#L924-L995)）。
+2. 若中断的亲和性集合中已没有在线 CPU：managed 中断被关闭（`irqd_set_managed_shutdown()`），普通中断改为允许所有在线 CPU，即"打破亲和性"（[`kernel/irq/cpuhotplug.c:113-125`](../../linux/kernel/irq/cpuhotplug.c#L113-L125)）。
+3. 等待 1 ms 让在途中断落定，然后扫描本 CPU 的 IRR：仍挂着的中断用 `irq_retrigger`（向量域的 `apic_retrigger_irq()` 向新目标 CPU 发送新向量的 IPI，[`arch/x86/kernel/apic/vector.c:1002-1012`](../../linux/arch/x86/kernel/apic/vector.c#L1002-L1012)）补发，保证不丢失。
 
-CPU 上线时，`irq_affinity_online_cpu()`（`kernel/irq/cpuhotplug.c:233-247`）对亲和性包含该 CPU 的 managed 中断重新启动，并在需要时把中断移回来。
+CPU 上线时，`irq_affinity_online_cpu()`（[`kernel/irq/cpuhotplug.c:233-247`](../../linux/kernel/irq/cpuhotplug.c#L233-L247)）对亲和性包含该 CPU 的 managed 中断重新启动，并在需要时把中断移回来。
 
 ## 关键细节 / 设计考量
 
 ### 向量耗尽
 
-大型服务器上向量耗尽并不罕见：若一个 CPU 的 203 个向量都已占满，`irq_matrix_alloc()` 会选择其他 CPU；所有允许的 CPU 都满了则逐级放宽到所有在线 CPU；最终仍失败则 `request_irq()` 返回 `-ENOSPC`。CPU 下线前，`lapic_can_unplug_cpu()`（`arch/x86/kernel/apic/vector.c:1160-1182`）检查其余 CPU 是否有足够的空闲向量容纳本 CPU 上的中断，不够则拒绝下线：`CPU N has X vectors, Y available. Cannot disable CPU`。
+大型服务器上向量耗尽并不罕见：若一个 CPU 的 203 个向量都已占满，`irq_matrix_alloc()` 会选择其他 CPU；所有允许的 CPU 都满了则逐级放宽到所有在线 CPU；最终仍失败则 `request_irq()` 返回 `-ENOSPC`。CPU 下线前，`lapic_can_unplug_cpu()`（[`arch/x86/kernel/apic/vector.c:1160-1182`](../../linux/arch/x86/kernel/apic/vector.c#L1160-L1182)）检查其余 CPU 是否有足够的空闲向量容纳本 CPU 上的中断，不够则拒绝下线：`CPU N has X vectors, Y available. Cannot disable CPU`。
 
 ### irqbalance 与内核的分工
 
@@ -834,7 +854,7 @@ CPU 上线时，`irq_affinity_online_cpu()`（`kernel/irq/cpuhotplug.c:233-247`�
 
 ### 中断线程随中断迁移
 
-线程化中断的线程会跟随中断亲和性：`irq_do_set_affinity()` 成功后调用 `irq_set_thread_affinity()`（`kernel/irq/manage.c:286`），给每个 action 的线程置位 `IRQTF_AFFINITY`，线程下次运行时把自己的 `cpus_allowed` 设为中断的 effective affinity（5.7 节 `irq_thread_check_affinity()`）。这样硬中断与线程在同一 CPU 上处理，缓存局部性最好。
+线程化中断的线程会跟随中断亲和性：`irq_do_set_affinity()` 成功后调用 `irq_set_thread_affinity()`（[`kernel/irq/manage.c:286`](../../linux/kernel/irq/manage.c#L286)），给每个 action 的线程置位 `IRQTF_AFFINITY`，线程下次运行时把自己的 `cpus_allowed` 设为中断的 effective affinity（5.7 节 `irq_thread_check_affinity()`）。这样硬中断与线程在同一 CPU 上处理，缓存局部性最好。
 
 ## 动手实验
 
@@ -852,7 +872,7 @@ sudo cat /sys/kernel/tracing/trace | tail -5
 cat /proc/irq/$IRQ/effective_affinity_list
 ```
 
-跟踪输出中可以看到 `vector_update: irq=.. vector=.. cpu=1 prev_vector=.. prev_cpu=..`，随后（约 1 jiffy 后）在旧 CPU 上出现 `vector_free_moved`。注意若虚拟网卡的中断是 managed 的，写 `smp_affinity_list` 会返回 `Operation not permitted`（`kernel/irq/proc.c:141-142`）。
+跟踪输出中可以看到 `vector_update: irq=.. vector=.. cpu=1 prev_vector=.. prev_cpu=..`，随后（约 1 jiffy 后）在旧 CPU 上出现 `vector_free_moved`。注意若虚拟网卡的中断是 managed 的，写 `smp_affinity_list` 会返回 `Operation not permitted`（[`kernel/irq/proc.c:141-142`](../../linux/kernel/irq/proc.c#L141-L142)）。
 
 ### 查看向量占用
 

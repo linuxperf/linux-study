@@ -1,6 +1,6 @@
 # 5.12 工作队列
 
-> **本节源码**：`include/linux/workqueue_types.h`、`include/linux/workqueue.h`、`kernel/workqueue.c`、`kernel/workqueue_internal.h`、`kernel/sched/core.c`
+> **本节源码**：[`include/linux/workqueue_types.h`](../../linux/include/linux/workqueue_types.h)、[`include/linux/workqueue.h`](../../linux/include/linux/workqueue.h)、[`kernel/workqueue.c`](../../linux/kernel/workqueue.c)、[`kernel/workqueue_internal.h`](../../linux/kernel/workqueue_internal.h)、[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)
 > **关键函数**：`alloc_workqueue()`、`queue_work_on()`、`__queue_work()`、`insert_work()`、`kick_pool()`、`worker_thread()`、`process_one_work()`、`wq_worker_sleeping()`、`wq_worker_running()`、`wq_worker_tick()`、`manage_workers()`、`rescuer_thread()`、`__queue_delayed_work()`、`flush_work()`、`cancel_work_sync()`
 > **前置知识**：5.9 软中断、5.10 tasklet 与 BH 工作队列、3.4 任务创建与唤醒
 
@@ -35,8 +35,9 @@
 
 ### work_struct
 
+[`include/linux/workqueue_types.h:16-23`](../../linux/include/linux/workqueue_types.h#L16-L23)（v6.18.60）
+
 ```c
-// include/linux/workqueue_types.h:16-23（v6.18.60）
 struct work_struct {
 	atomic_long_t data;	// [注] 标志位 + pwq 指针或 pool ID
 	struct list_head entry;	// [注] 挂在 pool->worklist 或 pwq->inactive_works 上
@@ -49,8 +50,9 @@ struct work_struct {
 
 `data` 字段身兼数职：
 
+[`include/linux/workqueue.h:40-57`](../../linux/include/linux/workqueue.h#L40-L57)（v6.18.60）
+
 ```c
-// include/linux/workqueue.h:40-57（v6.18.60）
 	/*
 	 * When WORK_STRUCT_PWQ is set, reserve 8 bits off of pwq pointer w/
 	 * debugobjects turned off. This makes pwqs aligned to 256 bytes (512
@@ -77,8 +79,9 @@ struct work_struct {
 
 ### worker_pool
 
+[`kernel/workqueue.c:187-236`](../../linux/kernel/workqueue.c#L187-L236)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:187-236（v6.18.60）
 struct worker_pool {
 	raw_spinlock_t		lock;		/* the pool lock */
 	int			cpu;		/* I: the associated cpu */
@@ -138,14 +141,15 @@ struct worker_pool {
 pool 有两类：
 
 - **per-CPU pool**：每个 CPU 两个（普通 nice 0 与高优先级 nice −20），另有两个 BH pool（5.10 节）。线程名为 `kworker/<cpu>:<id>`，高优先级加 `H` 后缀。
-- **unbound pool**：按属性（nice、cpumask、affinity scope）动态创建、共享，线程不绑定单个 CPU。线程名为 `kworker/u<pool_id>:<id>`（`format_worker_id()`，`kernel/workqueue.c:2780-2798`）。
+- **unbound pool**：按属性（nice、cpumask、affinity scope）动态创建、共享，线程不绑定单个 CPU。线程名为 `kworker/u<pool_id>:<id>`（`format_worker_id()`，[`kernel/workqueue.c:2780-2798`](../../linux/kernel/workqueue.c#L2780-L2798)）。
 
 ### pool_workqueue 与 workqueue_struct
 
 `pool_workqueue`（pwq）连接一个工作队列与一个 pool，记录该工作队列在这个 pool 上的活跃工作数：
 
+[`kernel/workqueue.c:261-288`](../../linux/kernel/workqueue.c#L261-L288)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:261-288（v6.18.60）
 struct pool_workqueue {
 	struct worker_pool	*pool;		/* I: the associated pool */
 	struct workqueue_struct *wq;		/* I: the owning workqueue */
@@ -171,12 +175,13 @@ struct pool_workqueue {
 
 `max_active` 限制一个工作队列在每个 pool 上同时活跃的工作项数，超出的进入 `inactive_works` 排队。`max_active = 1` 的有序工作队列（`alloc_ordered_workqueue()`）借此保证工作项按提交顺序串行执行。
 
-`workqueue_struct`（`kernel/workqueue.c:341-389`）保存工作队列的标志、`max_active`、救援线程、flush 状态，以及指向各 CPU pwq 的 `cpu_pwq` 指针数组。
+`workqueue_struct`（[`kernel/workqueue.c:341-389`](../../linux/kernel/workqueue.c#L341-L389)）保存工作队列的标志、`max_active`、救援线程、flush 状态，以及指向各 CPU pwq 的 `cpu_pwq` 指针数组。
 
 ### 系统工作队列
 
+[`kernel/workqueue.c:7953-7968`](../../linux/kernel/workqueue.c#L7953-L7968)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:7953-7968（v6.18.60）
 	system_wq = alloc_workqueue("events", WQ_PERCPU, 0);
 	system_percpu_wq = alloc_workqueue("events", WQ_PERCPU, 0);
 	system_highpri_wq = alloc_workqueue("events_highpri",
@@ -195,7 +200,7 @@ struct pool_workqueue {
 					       WQ_BH | WQ_HIGHPRI | WQ_PERCPU, 0);
 ```
 
-`schedule_work()` 提交到 `system_wq`。v6.18 中正在进行一次重命名过渡：新增的 `system_percpu_wq` 与 `system_dfl_wq` 分别与 `system_wq`、`system_unbound_wq` 等价，并新增了显式的 `WQ_PERCPU` 标志，社区计划在后续版本中把"不带 `WQ_UNBOUND` 即为 per-CPU"的默认行为反转为默认 unbound。本书配置开启了 `CONFIG_WQ_POWER_EFFICIENT_DEFAULT`，`WQ_POWER_EFFICIENT` 工作队列会被转为 unbound（`kernel/workqueue.c:5787`），让空闲 CPU 不必为执行工作项而被唤醒。
+`schedule_work()` 提交到 `system_wq`。v6.18 中正在进行一次重命名过渡：新增的 `system_percpu_wq` 与 `system_dfl_wq` 分别与 `system_wq`、`system_unbound_wq` 等价，并新增了显式的 `WQ_PERCPU` 标志，社区计划在后续版本中把"不带 `WQ_UNBOUND` 即为 per-CPU"的默认行为反转为默认 unbound。本书配置开启了 `CONFIG_WQ_POWER_EFFICIENT_DEFAULT`，`WQ_POWER_EFFICIENT` 工作队列会被转为 unbound（[`kernel/workqueue.c:5787`](../../linux/kernel/workqueue.c#L5787)），让空闲 CPU 不必为执行工作项而被唤醒。
 
 常用的分配标志：
 
@@ -214,8 +219,9 @@ struct pool_workqueue {
 
 ### 提交
 
+[`kernel/workqueue.c:2417-2433`](../../linux/kernel/workqueue.c#L2417-L2433)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:2417-2433（v6.18.60）
 bool queue_work_on(int cpu, struct workqueue_struct *wq,
 		   struct work_struct *work)
 {
@@ -237,8 +243,9 @@ bool queue_work_on(int cpu, struct workqueue_struct *wq,
 
 与 tasklet、irq_work 相同，用 `test_and_set_bit()` 抢 PENDING 位实现"已在队列中则不重复提交"。提交可以在任何上下文中进行（包括硬中断），因此全程关中断。`queue_work()` 等价于 `queue_work_on(WORK_CPU_UNBOUND, ...)`。
 
+[`kernel/workqueue.c:2296-2386`](../../linux/kernel/workqueue.c#L2296-L2386)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:2296-2386（v6.18.60）
 	rcu_read_lock();
 retry:
 	/* pwq which will be used unless @work is executing elsewhere */
@@ -315,15 +322,16 @@ out:
 ```
 
 1. **选择目标 pool**：per-CPU 工作队列默认用当前 CPU 的 pwq；unbound 工作队列由 `wq_select_unbound_cpu()` 选一个允许的 CPU，再找到它所在 pod 的 pwq。
-2. **保证不重入**：工作项上一次如果在另一个 pool 上执行、且此刻**仍在执行**，就把它排到那个 pool 上。这样同一工作项的两次执行总在同一个 pool 中，而同一 pool 内的 `assign_work()` 会检查 `busy_hash`，若工作项正被某个 worker 执行，就把它挂到那个 worker 的 `scheduled` 链表上，等其执行完再执行（`assign_work()`，`kernel/workqueue.c:1193-1227`）。结果是：**工作项函数不会在多个 CPU 上并发执行**，驱动无需为此加锁。
+2. **保证不重入**：工作项上一次如果在另一个 pool 上执行、且此刻**仍在执行**，就把它排到那个 pool 上。这样同一工作项的两次执行总在同一个 pool 中，而同一 pool 内的 `assign_work()` 会检查 `busy_hash`，若工作项正被某个 worker 执行，就把它挂到那个 worker 的 `scheduled` 链表上，等其执行完再执行（`assign_work()`，[`kernel/workqueue.c:1193-1227`](../../linux/kernel/workqueue.c#L1193-L1227)）。结果是：**工作项函数不会在多个 CPU 上并发执行**，驱动无需为此加锁。
 3. **`max_active` 控制**：未超过限制则进入 `pool->worklist` 并 `kick_pool()` 唤醒一个空闲 worker，否则进入 `pwq->inactive_works`。
 
-`insert_work()`（`kernel/workqueue.c:2215-2227`）用 `set_work_pwq()` 把 pwq 指针写入 `work->data`，挂入链表并增加 pwq 引用。
+`insert_work()`（[`kernel/workqueue.c:2215-2227`](../../linux/kernel/workqueue.c#L2215-L2227)）用 `set_work_pwq()` 把 pwq 指针写入 `work->data`，挂入链表并增加 pwq 引用。
 
 ### worker 线程主循环
 
+[`kernel/workqueue.c:3416-3488`](../../linux/kernel/workqueue.c#L3416-L3488)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:3416-3488（v6.18.60）
 static int worker_thread(void *__worker)
 {
 	struct worker *worker = __worker;
@@ -401,8 +409,9 @@ sleep:
 
 几个判断函数决定了 worker 的行为：
 
+[`kernel/workqueue.c:942-963`](../../linux/kernel/workqueue.c#L942-L963)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:942-963（v6.18.60）
 static bool need_more_worker(struct worker_pool *pool)
 {
 	return !list_empty(&pool->worklist) && !pool->nr_running;
@@ -439,8 +448,9 @@ CMWQ 的核心思想是：**每个 per-CPU pool 在任意时刻只保持一个�
 
 这需要调度器的配合。worker 线程设置了 `PF_WQ_WORKER` 标志，调度器在它睡眠前和唤醒后调用工作队列的钩子：
 
+[`kernel/sched/core.c:6980-6986`](../../linux/kernel/sched/core.c#L6980-L6986)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:6980-6986（v6.18.60）
 	task_flags = tsk->flags;
 	/*
 	 * If a worker goes to sleep, notify and ask workqueue whether it
@@ -450,8 +460,9 @@ CMWQ 的核心思想是：**每个 per-CPU pool 在任意时刻只保持一个�
 		wq_worker_sleeping(tsk);
 ```
 
+[`kernel/workqueue.c:1445-1482`](../../linux/kernel/workqueue.c#L1445-L1482)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:1445-1482（v6.18.60）
 void wq_worker_sleeping(struct task_struct *task)
 {
 	struct worker *worker = kthread_data(task);
@@ -492,7 +503,7 @@ void wq_worker_sleeping(struct task_struct *task)
 }
 ```
 
-worker 即将睡眠时，`nr_running` 减一；若减到 0 且 `worklist` 非空，`kick_pool()` 立即唤醒一个空闲 worker。当睡眠的 worker 被唤醒、重新运行时，`sched_update_worker()`（`kernel/sched/core.c:7006-7014`）调用 `wq_worker_running()`（`kernel/workqueue.c:1411-1436`）把 `nr_running` 加回来。此时可能有两个 worker 同时在运行，`keep_working()` 中的 `nr_running <= 1` 条件会让其中一个在处理完当前工作项后退出循环、回到空闲状态。
+worker 即将睡眠时，`nr_running` 减一；若减到 0 且 `worklist` 非空，`kick_pool()` 立即唤醒一个空闲 worker。当睡眠的 worker 被唤醒、重新运行时，`sched_update_worker()`（[`kernel/sched/core.c:7006-7014`](../../linux/kernel/sched/core.c#L7006-L7014)）调用 `wq_worker_running()`（[`kernel/workqueue.c:1411-1436`](../../linux/kernel/workqueue.c#L1411-L1436)）把 `nr_running` 加回来。此时可能有两个 worker 同时在运行，`keep_working()` 中的 `nr_running <= 1` 条件会让其中一个在处理完当前工作项后退出循环、回到空闲状态。
 
 ```mermaid
 sequenceDiagram
@@ -518,8 +529,9 @@ sequenceDiagram
 
 并发管理有一个前提：工作项要么很快完成，要么会睡眠。如果一个工作项长时间占用 CPU 却不睡眠，同一 pool 中的其他工作项就会一直等待（`nr_running` 始终为 1）。`WQ_CPU_INTENSIVE` 标志可以让工作队列退出并发管理，但驱动作者未必知道自己的工作项是 CPU 密集的。v6.5 起，内核在 tick 中自动检测：
 
+[`kernel/workqueue.c:1491-1532`](../../linux/kernel/workqueue.c#L1491-L1532)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:1491-1532（v6.18.60）
 void wq_worker_tick(struct task_struct *task)
 {
 	struct worker *worker = kthread_data(task);
@@ -559,12 +571,13 @@ void wq_worker_tick(struct task_struct *task)
 }
 ```
 
-`sched_tick()`（`kernel/sched/core.c:5641`）在当前任务是 worker 时调用它。一个工作项连续运行超过阈值（默认 10 ms，`kernel/workqueue.c:7988-8000` 的注释说明了取值依据，可通过模块参数 `workqueue.cpu_intensive_thresh_us` 修改），就被临时标记为 CPU 密集，退出 `nr_running` 计数，并唤醒另一个 worker 处理其余工作。本书配置开启了 `CONFIG_WQ_CPU_INTENSIVE_REPORT`，内核会在日志中报告频繁触发此机制的工作函数，提示开发者为其工作队列加上 `WQ_UNBOUND` 或 `WQ_CPU_INTENSIVE`。
+`sched_tick()`（[`kernel/sched/core.c:5641`](../../linux/kernel/sched/core.c#L5641)）在当前任务是 worker 时调用它。一个工作项连续运行超过阈值（默认 10 ms，[`kernel/workqueue.c:7988-8000`](../../linux/kernel/workqueue.c#L7988-L8000) 的注释说明了取值依据，可通过模块参数 `workqueue.cpu_intensive_thresh_us` 修改），就被临时标记为 CPU 密集，退出 `nr_running` 计数，并唤醒另一个 worker 处理其余工作。本书配置开启了 `CONFIG_WQ_CPU_INTENSIVE_REPORT`，内核会在日志中报告频繁触发此机制的工作函数，提示开发者为其工作队列加上 `WQ_UNBOUND` 或 `WQ_CPU_INTENSIVE`。
 
 ### 执行单个工作项
 
+[`kernel/workqueue.c:3231-3276`](../../linux/kernel/workqueue.c#L3231-L3276)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:3231-3276（v6.18.60）
 	/* claim and dequeue */
 	debug_work_deactivate(work);
 	hash_add(pool->busy_hash, &worker->hentry, (unsigned long)work);
@@ -613,10 +626,11 @@ void wq_worker_tick(struct task_struct *task)
 	raw_spin_unlock_irq(&pool->lock);
 ```
 
-`process_one_work()`（`kernel/workqueue.c:3206-3365`）在 `pool->lock` 下完成登记：加入 `busy_hash`、记录当前函数，然后**清除 PENDING** 并把 `work->data` 改为"最后在本 pool"。此后工作项可以被重新提交——若在执行期间被提交，`__queue_work()` 会发现它仍在本 pool 上执行，把它排到本 pool，保证不重入。释放锁后调用工作函数：
+`process_one_work()`（[`kernel/workqueue.c:3206-3365`](../../linux/kernel/workqueue.c#L3206-L3365)）在 `pool->lock` 下完成登记：加入 `busy_hash`、记录当前函数，然后**清除 PENDING** 并把 `work->data` 改为"最后在本 pool"。此后工作项可以被重新提交——若在执行期间被提交，`__queue_work()` 会发现它仍在本 pool 上执行，把它排到本 pool，保证不重入。释放锁后调用工作函数：
+
+[`kernel/workqueue.c:3305-3340`](../../linux/kernel/workqueue.c#L3305-L3340)（v6.18.60）
 
 ```c
-// kernel/workqueue.c:3305-3340（v6.18.60）
 	lockdep_invariant_state(true);
 	trace_workqueue_execute_start(work);
 	worker->current_func(work);
@@ -661,8 +675,9 @@ void wq_worker_tick(struct task_struct *task)
 
 当 worker 发现有工作要做但池中没有空闲 worker 了（`!may_start_working()`），它先成为**管理者**：
 
+[`kernel/workqueue.c:3174-3190`](../../linux/kernel/workqueue.c#L3174-L3190)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:3174-3190（v6.18.60）
 static bool manage_workers(struct worker *worker)
 {
 	struct worker_pool *pool = worker->pool;
@@ -682,16 +697,17 @@ static bool manage_workers(struct worker *worker)
 }
 ```
 
-`maybe_create_worker()`（`kernel/workqueue.c:3087-3116`）释放池锁后调用 `create_worker()`：分配 `struct worker`、用 `kthread_create_on_node()` 创建线程、绑定到池的 CPU。这需要 `GFP_KERNEL` 内存分配。同一时刻每个池最多一个管理者。空闲 worker 过多时，`idle_timer` 在 `IDLE_WORKER_TIMEOUT`（5 分钟，`kernel/workqueue.c:113`）后回收多余的线程。
+`maybe_create_worker()`（[`kernel/workqueue.c:3087-3116`](../../linux/kernel/workqueue.c#L3087-L3116)）释放池锁后调用 `create_worker()`：分配 `struct worker`、用 `kthread_create_on_node()` 创建线程、绑定到池的 CPU。这需要 `GFP_KERNEL` 内存分配。同一时刻每个池最多一个管理者。空闲 worker 过多时，`idle_timer` 在 `IDLE_WORKER_TIMEOUT`（5 分钟，[`kernel/workqueue.c:113`](../../linux/kernel/workqueue.c#L113)）后回收多余的线程。
 
 ### 救援线程
 
 `GFP_KERNEL` 分配可能触发内存回收，而回收可能要等待某些工作项完成（例如写回脏页的工作项）。如果这些工作项恰好排在一个创建不出新 worker 的池中，就形成死锁：创建 worker 需要内存 → 回收内存需要执行工作项 → 执行工作项需要 worker。
 
-`WQ_MEM_RECLAIM` 工作队列为此预先创建一个专属的**救援线程**（rescuer，`kworker/R-<wq名>`）。管理者开始创建 worker 时启动 `mayday_timer`（首次 10 ms，之后每 100 ms，`kernel/workqueue.c:115-118`）：
+`WQ_MEM_RECLAIM` 工作队列为此预先创建一个专属的**救援线程**（rescuer，`kworker/R-<wq名>`）。管理者开始创建 worker 时启动 `mayday_timer`（首次 10 ms，之后每 100 ms，[`kernel/workqueue.c:115-118`](../../linux/kernel/workqueue.c#L115-L118)）：
+
+[`kernel/workqueue.c:3044-3067`](../../linux/kernel/workqueue.c#L3044-L3067)（v6.18.60）
 
 ```c
-// kernel/workqueue.c:3044-3067（v6.18.60）
 static void pool_mayday_timeout(struct timer_list *t)
 {
 	struct worker_pool *pool = timer_container_of(pool, t, mayday_timer);
@@ -718,14 +734,15 @@ static void pool_mayday_timeout(struct timer_list *t)
 }
 ```
 
-若超时后仍没能创建出 worker，就向池中所有排队工作项所属工作队列的救援线程"呼救"（`send_mayday()`，`kernel/workqueue.c:3020-3042`）。救援线程（`rescuer_thread()`，`kernel/workqueue.c:3540` 起）临时加入该池，只处理**属于自己工作队列**的工作项，保证这些可能被回收路径等待的工作项总能前进。内核中所有可能在回收路径上被等待的工作队列（块层、文件系统写回、网络存储等）都必须设置 `WQ_MEM_RECLAIM`。
+若超时后仍没能创建出 worker，就向池中所有排队工作项所属工作队列的救援线程"呼救"（`send_mayday()`，[`kernel/workqueue.c:3020-3042`](../../linux/kernel/workqueue.c#L3020-L3042)）。救援线程（`rescuer_thread()`，[`kernel/workqueue.c:3540`](../../linux/kernel/workqueue.c#L3540) 起）临时加入该池，只处理**属于自己工作队列**的工作项，保证这些可能被回收路径等待的工作项总能前进。内核中所有可能在回收路径上被等待的工作队列（块层、文件系统写回、网络存储等）都必须设置 `WQ_MEM_RECLAIM`。
 
 ### 延迟工作
 
 `delayed_work` 是 `work_struct` 加一个定时器：
 
+[`kernel/workqueue.c:2526-2565`](../../linux/kernel/workqueue.c#L2526-L2565)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:2526-2565（v6.18.60）
 static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 				struct delayed_work *dwork, unsigned long delay)
 {
@@ -774,8 +791,9 @@ static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 
 `flush_work(work)` 等待某个工作项执行完毕。实现方法是在它后面插入一个**屏障工作项**（barrier）：
 
+[`kernel/workqueue.c:3885-3900`](../../linux/kernel/workqueue.c#L3885-L3900)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:3885-3900（v6.18.60）
 	/*
 	 * If @target is currently being executed, schedule the
 	 * barrier to the worker; otherwise, put it after @target.
@@ -794,15 +812,15 @@ static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 	}
 ```
 
-`insert_wq_barrier()`（`kernel/workqueue.c:3855` 起）在栈上构造一个 `wq_barrier`，其函数为 `wq_barrier_func()`，只做一件事——`complete()` 一个完成量。若目标工作项正在执行，屏障插到执行它的 worker 的 `scheduled` 链表头部；若还在队列中，插到它的正后方并设置 `LINKED` 标志，保证二者被同一个 worker 连续执行。调用者随后在完成量上睡眠等待。`start_flush_work()`（`kernel/workqueue.c:4237-4291`）还会让 lockdep 记录"flush 依赖"，在单线程或带救援线程的工作队列中从工作项内部 flush 自身时报告死锁。
+`insert_wq_barrier()`（[`kernel/workqueue.c:3855`](../../linux/kernel/workqueue.c#L3855) 起）在栈上构造一个 `wq_barrier`，其函数为 `wq_barrier_func()`，只做一件事——`complete()` 一个完成量。若目标工作项正在执行，屏障插到执行它的 worker 的 `scheduled` 链表头部；若还在队列中，插到它的正后方并设置 `LINKED` 标志，保证二者被同一个 worker 连续执行。调用者随后在完成量上睡眠等待。`start_flush_work()`（[`kernel/workqueue.c:4237-4291`](../../linux/kernel/workqueue.c#L4237-L4291)）还会让 lockdep 记录"flush 依赖"，在单线程或带救援线程的工作队列中从工作项内部 flush 自身时报告死锁。
 
-`cancel_work_sync(work)`（`kernel/workqueue.c:4494`）先尝试"偷走" PENDING 位，把还在队列中的工作项摘除；若工作项正在执行，则等待它完成。返回后可以保证工作项既不在队列中也不在执行，是驱动卸载时释放工作项所在结构之前的标准操作。`flush_workqueue(wq)` 用"颜色"机制等待整个工作队列中所有在提交时刻之前入队的工作项完成：每次 flush 推进一次颜色，等待旧颜色的 `nr_in_flight` 归零。
+`cancel_work_sync(work)`（[`kernel/workqueue.c:4494`](../../linux/kernel/workqueue.c#L4494)）先尝试"偷走" PENDING 位，把还在队列中的工作项摘除；若工作项正在执行，则等待它完成。返回后可以保证工作项既不在队列中也不在执行，是驱动卸载时释放工作项所在结构之前的标准操作。`flush_workqueue(wq)` 用"颜色"机制等待整个工作队列中所有在提交时刻之前入队的工作项完成：每次 flush 推进一次颜色，等待旧颜色的 `nr_in_flight` 归零。
 
 ## 关键细节 / 设计考量
 
 ### unbound 工作队列与亲和性范围
 
-unbound 工作队列的工作项不绑定 CPU，但完全不考虑拓扑会损失缓存局部性。v6.5 起引入了**亲和性范围**（affinity scope）：`cpu`、`smt`、`cache`、`numa`、`system`（`kernel/workqueue.c:408-414`），默认是 `cache`（`kernel/workqueue.c:441`）。每种范围把 CPU 划分为若干 pod（例如共享同一 LLC 的 CPU 为一个 pod），每个 pod 一个 pwq / pool，工作项优先在提交者所在 pod 内执行。可以通过 `/sys/devices/virtual/workqueue/<name>/affinity_scope` 为每个工作队列单独设置，或用启动参数 `workqueue.default_affinity_scope=` 全局设置。
+unbound 工作队列的工作项不绑定 CPU，但完全不考虑拓扑会损失缓存局部性。v6.5 起引入了**亲和性范围**（affinity scope）：`cpu`、`smt`、`cache`、`numa`、`system`（[`kernel/workqueue.c:408-414`](../../linux/kernel/workqueue.c#L408-L414)），默认是 `cache`（[`kernel/workqueue.c:441`](../../linux/kernel/workqueue.c#L441)）。每种范围把 CPU 划分为若干 pod（例如共享同一 LLC 的 CPU 为一个 pod），每个 pod 一个 pwq / pool，工作项优先在提交者所在 pod 内执行。可以通过 `/sys/devices/virtual/workqueue/<name>/affinity_scope` 为每个工作队列单独设置，或用启动参数 `workqueue.default_affinity_scope=` 全局设置。
 
 ### 选择 per-CPU 还是 unbound
 
@@ -819,7 +837,7 @@ unbound 工作队列的工作项不绑定 CPU，但完全不考虑拓扑会损�
 ### 工作队列的监控
 
 - `/sys/devices/virtual/workqueue/`：可调属性（`cpumask`、`nice`、`affinity_scope`、`max_active`），仅对设置了 `WQ_SYSFS` 的工作队列可见。
-- `tools/workqueue/wq_dump.py` 与 `tools/workqueue/wq_monitor.py`：基于 drgn，分别打印 pool / pwq 拓扑与实时统计（`PWQ_STAT_*`，`kernel/workqueue.c:242` 起）。
+- `tools/workqueue/wq_dump.py` 与 `tools/workqueue/wq_monitor.py`：基于 drgn，分别打印 pool / pwq 拓扑与实时统计（`PWQ_STAT_*`，[`kernel/workqueue.c:242`](../../linux/kernel/workqueue.c#L242) 起）。
 - `workqueue:*` 跟踪点：`workqueue_queue_work`、`workqueue_activate_work`、`workqueue_execute_start` / `_end`。
 - 本书配置未开启 `CONFIG_WQ_WATCHDOG`；开启后，某个 pool 超过 `workqueue.watchdog_thresh`（默认 30 秒）没有进展会打印 `BUG: workqueue lockup`。
 

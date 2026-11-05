@@ -1,6 +1,6 @@
 # 5.3 CPU 异常处理：陷阱、故障与异常修复
 
-> **本节源码**：`arch/x86/kernel/traps.c`、`arch/x86/include/asm/traps.h`、`arch/x86/include/asm/bug.h`、`arch/x86/include/asm/extable.h`、`arch/x86/include/asm/extable_fixup_types.h`、`arch/x86/include/asm/asm.h`、`arch/x86/include/asm/uaccess.h`、`arch/x86/mm/extable.c`、`kernel/extable.c`、`lib/extable.c`、`arch/x86/kernel/dumpstack.c`
+> **本节源码**：[`arch/x86/kernel/traps.c`](../../linux/arch/x86/kernel/traps.c)、[`arch/x86/include/asm/traps.h`](../../linux/arch/x86/include/asm/traps.h)、[`arch/x86/include/asm/bug.h`](../../linux/arch/x86/include/asm/bug.h)、[`arch/x86/include/asm/extable.h`](../../linux/arch/x86/include/asm/extable.h)、[`arch/x86/include/asm/extable_fixup_types.h`](../../linux/arch/x86/include/asm/extable_fixup_types.h)、[`arch/x86/include/asm/asm.h`](../../linux/arch/x86/include/asm/asm.h)、[`arch/x86/include/asm/uaccess.h`](../../linux/arch/x86/include/asm/uaccess.h)、[`arch/x86/mm/extable.c`](../../linux/arch/x86/mm/extable.c)、[`kernel/extable.c`](../../linux/kernel/extable.c)、[`lib/extable.c`](../../linux/lib/extable.c)、[`arch/x86/kernel/dumpstack.c`](../../linux/arch/x86/kernel/dumpstack.c)
 > **关键函数**：`do_error_trap()`、`do_trap()`、`exc_invalid_op()`、`handle_bug()`、`exc_general_protection()`、`exc_int3()`、`exc_double_fault()`、`fixup_exception()`、`search_exception_tables()`、`die()`、`notify_die()`
 > **前置知识**：5.1 x86_64 中断与异常体系、5.2 中断入口与出口、4.8 页表与缺页异常
 
@@ -19,8 +19,9 @@
 
 大多数"简单"异常——#DE、#OF、#BR、#UD、#TS、#NP、#SS、#AC——共用一套逻辑：
 
+[`arch/x86/kernel/traps.c:259-270`](../../linux/arch/x86/kernel/traps.c#L259-L270)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:259-270（v6.18.60）
 static void do_error_trap(struct pt_regs *regs, long error_code, char *str,
 	unsigned long trapnr, int signr, int sicode, void __user *addr)
 {
@@ -36,11 +37,12 @@ static void do_error_trap(struct pt_regs *regs, long error_code, char *str,
 ```
 
 1. 先调用 `notify_die()` 遍历 die 通知链（`die_chain`），kgdb、kprobes 等可以在此返回 `NOTIFY_STOP` 截获异常。
-2. `cond_local_irq_enable()`（`arch/x86/include/asm/traps.h:48-52`）：**如果被打断的上下文原本开着中断**，就重新打开中断。异常属于同步事件，处理它可能需要较长时间（发送信号要获取锁），没必要一直关中断；反过来，如果原上下文关着中断，处理函数也必须保持关闭，否则会破坏原上下文的假设。
+2. `cond_local_irq_enable()`（[`arch/x86/include/asm/traps.h:48-52`](../../linux/arch/x86/include/asm/traps.h#L48-L52)）：**如果被打断的上下文原本开着中断**，就重新打开中断。异常属于同步事件，处理它可能需要较长时间（发送信号要获取锁），没必要一直关中断；反过来，如果原上下文关着中断，处理函数也必须保持关闭，否则会破坏原上下文的假设。
 3. 调用 `do_trap()` 分发。
 
+[`arch/x86/kernel/traps.c:186-256`](../../linux/arch/x86/kernel/traps.c#L186-L256)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:186-256（v6.18.60）
 static nokprobe_inline int
 do_trap_no_signal(struct task_struct *tsk, int trapnr, const char *str,
 		  struct pt_regs *regs,	long error_code)
@@ -89,12 +91,13 @@ do_trap(int trapnr, int signr, char *str, struct pt_regs *regs,
 - **用户态**：先尝试 `fixup_vdso_exception()`——vDSO 中的 SGX `__vdso_sgx_enter_enclave()` 会在异常表中登记修复点，以便把 enclave 中的异常以返回值形式报告给用户态；否则准备发送信号。
 - **vm86 模式**：仅 32 位内核适用。
 
-`error_code` 与 `trap_nr` 被记入 `thread_struct`，信号处理时会通过 `sigcontext` 的 `err`、`trapno` 字段传给用户态。`show_signal()` 在 `show_unhandled_signals` 开启（默认值 1，见 `arch/x86/mm/fault.c:1046`，可通过 sysctl `debug.exception-trace` 修改）且进程没有处理该信号时，在内核日志中打印一行 `traps: xxx[pid] trap divide error ip:... sp:... error:...`。
+`error_code` 与 `trap_nr` 被记入 `thread_struct`，信号处理时会通过 `sigcontext` 的 `err`、`trapno` 字段传给用户态。`show_signal()` 在 `show_unhandled_signals` 开启（默认值 1，见 [`arch/x86/mm/fault.c:1046`](../../linux/arch/x86/mm/fault.c#L1046)，可通过 sysctl `debug.exception-trace` 修改）且进程没有处理该信号时，在内核日志中打印一行 `traps: xxx[pid] trap divide error ip:... sp:... error:...`。
 
 具体的异常入口只是带上不同参数调用 `do_error_trap()`：
 
+[`arch/x86/kernel/traps.c:287-296`](../../linux/arch/x86/kernel/traps.c#L287-L296)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:287-296（v6.18.60）
 DEFINE_IDTENTRY(exc_divide_error)
 {
 	do_error_trap(regs, 0, "divide error", X86_TRAP_DE, SIGFPE,
@@ -107,7 +110,7 @@ DEFINE_IDTENTRY(exc_overflow)
 }
 ```
 
-`error_get_trap_addr()` 返回出错指令的地址，填入 `siginfo.si_addr`。它考虑了 uprobe 的"离线单步"（XOL）：若异常发生在 uprobe 复制出来执行的指令副本上，需要映射回原指令地址（`arch/x86/kernel/traps.c:272-285` 的注释）。
+`error_get_trap_addr()` 返回出错指令的地址，填入 `siginfo.si_addr`。它考虑了 uprobe 的"离线单步"（XOL）：若异常发生在 uprobe 复制出来执行的指令副本上，需要映射回原指令地址（[`arch/x86/kernel/traps.c:272-285`](../../linux/arch/x86/kernel/traps.c#L272-L285) 的注释）。
 
 ### 异常到信号的映射
 
@@ -132,8 +135,9 @@ DEFINE_IDTENTRY(exc_overflow)
 
 x86 上的 `BUG()` 和 `WARN()` 并不调用函数，而是直接放一条 `ud2`（保证触发 #UD 的两字节指令），再在 `__bug_table` 段中记录这条指令的位置、所在文件与行号：
 
+[`arch/x86/include/asm/bug.h:45-106`](../../linux/arch/x86/include/asm/bug.h#L45-L106)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/bug.h:45-106（v6.18.60）
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 #define __BUG_ENTRY(file, line, flags)					\
 	"2:\t" __BUG_REL("1b") "\t# bug_entry::bug_addr\n"		\
@@ -170,8 +174,9 @@ do {								\
 
 #UD 入口在 `irqentry_enter()` **之前**就尝试识别这种情况：
 
+[`arch/x86/kernel/traps.c:383-400`](../../linux/arch/x86/kernel/traps.c#L383-L400)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:383-400（v6.18.60）
 DEFINE_IDTENTRY_RAW(exc_invalid_op)
 {
 	irqentry_state_t state;
@@ -194,8 +199,9 @@ DEFINE_IDTENTRY_RAW(exc_invalid_op)
 
 注释给出了原因：`WARN()` 可能出现在入口代码本身（例如 `irqentry_enter()` 中的断言），如果先调用 `irqentry_enter()`，就可能递归触发同一个 `WARN()`。这也是 #UD 使用 `DEFINE_IDTENTRY_RAW` 的原因。
 
+[`arch/x86/kernel/traps.c:308-381`](../../linux/arch/x86/kernel/traps.c#L308-L381)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:308-381（v6.18.60）
 static noinstr bool handle_bug(struct pt_regs *regs)
 {
 	unsigned long addr = regs->ip;
@@ -257,7 +263,7 @@ static noinstr bool handle_bug(struct pt_regs *regs)
 }
 ```
 
-- `decode_bug()`（`arch/x86/kernel/traps.c:96-183`）识别 `ud2`、`ud1`（Clang 的 UBSAN 陷阱）、`udb`（FineIBT 使用的 `0xd6`）等几种编码。
+- `decode_bug()`（[`arch/x86/kernel/traps.c:96-183`](../../linux/arch/x86/kernel/traps.c#L96-L183)）识别 `ud2`、`ud1`（Clang 的 UBSAN 陷阱）、`udb`（FineIBT 使用的 `0xd6`）等几种编码。
 - `report_bug()`（`lib/bug.c`）在 `__bug_table` 中按地址查找条目，打印 `WARNING: CPU: ... at file:line` 与调用栈。对 `WARN()` 返回 `BUG_TRAP_TYPE_WARN`，于是把 `regs->ip` 跳过 `ud2` 指令继续执行——效果就像调用了一个打印函数后返回。对 `BUG()` 返回 `BUG_TRAP_TYPE_BUG`，`handled` 保持为假，最终走到 `handle_invalid_op()` → `do_error_trap()` → `die()`。
 - 未知的 `ud` 编码同样当作普通 #UD 处理：用户态发送 `SIGILL`，内核态 Oops。
 
@@ -265,8 +271,9 @@ static noinstr bool handle_bug(struct pt_regs *regs)
 
 #GP 是"什么都可能"的异常：访问非规范地址（4.6 节）、加载非法段选择子、执行特权指令、`wrmsr` 写不存在的 MSR……
 
+[`arch/x86/kernel/traps.c:792-851`](../../linux/arch/x86/kernel/traps.c#L792-L851)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:792-851（v6.18.60）
 DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
 {
 	char desc[sizeof(GPFSTR) + 50 + 2*sizeof(unsigned long) + 1] = GPFSTR;
@@ -321,9 +328,9 @@ exit:
 - `fixup_umip_exception()`：启用 UMIP 后，用户态执行 `sgdt`/`sidt`/`smsw` 等会 #GP，内核为兼容旧程序模拟这些指令并返回伪造值（5.1 节实验）。
 - `fixup_iopl_exception()`：模拟 `iopl(3)` 下的 `cli`/`sti`（v5.5 起 `iopl()` 改为基于 I/O 位图模拟，不再真正修改 `RFLAGS.IOPL`）。
 
-其余情况发送 `SIGSEGV`。内核态的 #GP 先查异常表与 kprobes、die 通知链（`gp_try_fixup_and_notify()`，`arch/x86/kernel/traps.c:762-781`），仍未处理就 Oops。
+其余情况发送 `SIGSEGV`。内核态的 #GP 先查异常表与 kprobes、die 通知链（`gp_try_fixup_and_notify()`，[`arch/x86/kernel/traps.c:762-781`](../../linux/arch/x86/kernel/traps.c#L762-L781)），仍未处理就 Oops。
 
-#GP 不像 #PF 那样提供出错地址。为了让 Oops 信息更有用，`get_kernel_gp_address()`（`arch/x86/kernel/traps.c:646`）用指令解码器分析出错指令的内存操作数，若算出的地址是非规范地址，就在日志中提示 `probably for non-canonical address 0x...`。很多野指针 bug（例如访问 `LIST_POISON1` 这类故意设置的非规范地址）会表现为这种 #GP 而非 #PF。
+#GP 不像 #PF 那样提供出错地址。为了让 Oops 信息更有用，`get_kernel_gp_address()`（[`arch/x86/kernel/traps.c:646`](../../linux/arch/x86/kernel/traps.c#L646)）用指令解码器分析出错指令的内存操作数，若算出的地址是非规范地址，就在日志中提示 `probably for non-canonical address 0x...`。很多野指针 bug（例如访问 `LIST_POISON1` 这类故意设置的非规范地址）会表现为这种 #GP 而非 #PF。
 
 ### #BP：int3 的多重身份
 
@@ -333,8 +340,9 @@ exit:
 - **kprobes**：在探测点放置 `int3`；
 - **kgdb** 与用户态调试器（`SIGTRAP`）。
 
+[`arch/x86/kernel/traps.c:883-915`](../../linux/arch/x86/kernel/traps.c#L883-L915)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:883-915（v6.18.60）
 DEFINE_IDTENTRY_RAW(exc_int3)
 {
 	/*
@@ -375,14 +383,15 @@ DEFINE_IDTENTRY_RAW(exc_int3)
 - **text_poke 处理必须最先执行**。入口代码自身也用了 static key，如果某个 CPU 正在改写入口路径上的 static key，另一个 CPU 执行到那里就会陷入 `int3`；若此时先调用 `irqentry_enter()`，又会碰到同一个正在改写的位置，形成无限递归。
 - **内核态的 `int3` 按 NMI 处理**。kprobes 可以探测几乎任何函数，包括在 NMI 处理过程中调用的函数，所以内核态 `int3` 的"上下文"无法预知。`irqentry_nmi_enter()` 是唯一在任何上下文都安全的进入方式。5.2 节提到的 6 字的栈空隙也是为 `int3` 模拟 `call` 指令准备的（`int3_emulate_call()`）。
 
-`do_int3()`（`arch/x86/kernel/traps.c:853-870`）依次尝试 kgdb、`kprobe_int3_handler()` 和 die 通知链，都不认领时内核态 Oops，用户态发送 `SIGTRAP`。
+`do_int3()`（[`arch/x86/kernel/traps.c:853-870`](../../linux/arch/x86/kernel/traps.c#L853-L870)）依次尝试 kgdb、`kprobe_int3_handler()` 和 die 通知链，都不认领时内核态 Oops，用户态发送 `SIGTRAP`。
 
 ### #DB：调试异常
 
 #DB 由硬件断点（DR0～DR3）、单步（`RFLAGS.TF`）和 `int1` 触发。它使用 IST 栈，但入口宏 `idtentry_mce_db`（5.2 节表 5-3）会区分来源：来自用户态时切到任务栈调用 `noist_exc_debug()`，按普通异常处理（发 `SIGTRAP`、支持 ptrace 单步）；来自内核态时在 IST 栈上调用 `exc_debug()`，后者调用 `exc_debug_kernel()`：
 
+[`arch/x86/kernel/traps.c:1095-1115`](../../linux/arch/x86/kernel/traps.c#L1095-L1115)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:1095-1115（v6.18.60）
 static noinstr void exc_debug_kernel(struct pt_regs *regs, unsigned long dr6)
 {
 	/*
@@ -412,8 +421,9 @@ static noinstr void exc_debug_kernel(struct pt_regs *regs, unsigned long dr6)
 
 双重故障（Double Fault，#DF）发生在 CPU 投递一个异常的过程中又遇到另一个异常（例如投递 #PF 时压栈失败）。在 x86_64 Linux 上，它最常见的原因是**内核栈溢出**：开启 `CONFIG_VMAP_STACK` 后，任务栈两端是未映射的保护页，栈溢出时 CPU 投递 #PF 需要压栈，压栈本身又碰到保护页，于是升级为 #DF。#DF 使用 IST 栈，所以仍能运行：
 
+[`arch/x86/kernel/traps.c:564-618`](../../linux/arch/x86/kernel/traps.c#L564-L618)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:564-618（v6.18.60）
 	irqentry_nmi_enter(regs);
 	instrumentation_begin();
 	notify_die(DIE_TRAP, str, regs, error_code, X86_TRAP_DF, SIGSEGV);
@@ -443,9 +453,9 @@ static noinstr void exc_debug_kernel(struct pt_regs *regs, unsigned long dr6)
 }
 ```
 
-`address` 是函数开头读取的 CR2（`arch/x86/kernel/traps.c:505`）。若 CR2 落在某个栈的保护页内，`handle_stack_overflow()` 打印 `BUG: stack guard page was hit at ... (stack is ...)` 并 panic，比一个裸的 "double fault" 更易定位问题。#DF 处理函数总是以 panic 结束。
+`address` 是函数开头读取的 CR2（[`arch/x86/kernel/traps.c:505`](../../linux/arch/x86/kernel/traps.c#L505)）。若 CR2 落在某个栈的保护页内，`handle_stack_overflow()` 打印 `BUG: stack guard page was hit at ... (stack is ...)` 并 panic，比一个裸的 "double fault" 更易定位问题。#DF 处理函数总是以 panic 结束。
 
-函数前半部分（`arch/x86/kernel/traps.c:509-562`）还处理了一个特殊情况：返回 16 位栈段的用户程序时会经过 ESPFIX64 栈，如果那里的 `iretq` 失败，#GP 会被升级为 #DF。内核识别出这种情况后，伪造一个 #GP 帧并直接"返回"到 #GP 入口，让它按用户态 #GP 正常处理——这是少数可以从 #DF 恢复的情形。
+函数前半部分（[`arch/x86/kernel/traps.c:509-562`](../../linux/arch/x86/kernel/traps.c#L509-L562)）还处理了一个特殊情况：返回 16 位栈段的用户程序时会经过 ESPFIX64 栈，如果那里的 `iretq` 失败，#GP 会被升级为 #DF。内核识别出这种情况后，伪造一个 #GP 帧并直接"返回"到 #GP 入口，让它按用户态 #GP 正常处理——这是少数可以从 #DF 恢复的情形。
 
 ## 异常表：允许出错的内核指令
 
@@ -457,8 +467,9 @@ static noinstr void exc_debug_kernel(struct pt_regs *regs, unsigned long dr6)
 
 ### 表项格式
 
+[`arch/x86/include/asm/extable.h:7-28`](../../linux/arch/x86/include/asm/extable.h#L7-L28)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/extable.h:7-28（v6.18.60）
 /*
  * The exception table consists of two addresses relative to the
  * exception table entry itself and a type selector field.
@@ -486,8 +497,9 @@ struct pt_regs;
 - `insn`、`fixup` 都是**相对于字段自身地址的 32 位偏移**（`ARCH_HAS_RELATIVE_EXTABLE`），比存放 64 位绝对地址节省一半空间，也无需在 KASLR 重定位时修改。
 - `data` 编码了修复类型以及附加参数：
 
+[`arch/x86/include/asm/extable_fixup_types.h:10-21`](../../linux/arch/x86/include/asm/extable_fixup_types.h#L10-L21)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/extable_fixup_types.h:10-21（v6.18.60）
 #define EX_DATA_TYPE_MASK		((int)0x000000FF)
 #define EX_DATA_REG_MASK		((int)0x00000F00)
 #define EX_DATA_FLAG_MASK		((int)0x0000F000)
@@ -502,14 +514,15 @@ struct pt_regs;
 #define EX_DATA_IMM(imm)		((imm) << EX_DATA_IMM_SHIFT)
 ```
 
-低 8 位是类型，接着 4 位是寄存器编号，再 4 位是标志（如"出错时清零 `ax`"），高 16 位是有符号立即数。例如 `EX_TYPE_EFAULT_REG` 就是 `EX_TYPE_IMM_REG | EX_DATA_IMM(-EFAULT)`：出错时把指定寄存器设为 `-EFAULT`（`arch/x86/include/asm/extable_fixup_types.h:55-56`）。
+低 8 位是类型，接着 4 位是寄存器编号，再 4 位是标志（如"出错时清零 `ax`"），高 16 位是有符号立即数。例如 `EX_TYPE_EFAULT_REG` 就是 `EX_TYPE_IMM_REG | EX_DATA_IMM(-EFAULT)`：出错时把指定寄存器设为 `-EFAULT`（[`arch/x86/include/asm/extable_fixup_types.h:55-56`](../../linux/arch/x86/include/asm/extable_fixup_types.h#L55-L56)）。
 
 ### 登记表项
 
 汇编宏 `_ASM_EXTABLE_TYPE()` 把一个表项放进 `__ex_table` 段：
 
+[`arch/x86/include/asm/asm.h:179-185`](../../linux/arch/x86/include/asm/asm.h#L179-L185)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/asm.h:179-185（v6.18.60）
 # define _ASM_EXTABLE_TYPE(from, to, type)			\
 	" .pushsection \"__ex_table\",\"a\"\n"			\
 	" .balign 4\n"						\
@@ -521,8 +534,9 @@ struct pt_regs;
 
 以 `get_user()` 系列为例，本书配置（Clang，`CONFIG_CC_HAS_ASM_GOTO_OUTPUT=y`）下的实现使用 `asm goto`，修复地址直接是一个 C 标签：
 
+[`arch/x86/include/asm/uaccess.h:297-303`](../../linux/arch/x86/include/asm/uaccess.h#L297-L303)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/uaccess.h:297-303（v6.18.60）
 #define __get_user_asm(x, addr, itype, ltype, label)			\
 	asm_goto_output("\n"						\
 		     "1:	mov"itype" %[umem],%[output]\n"		\
@@ -538,8 +552,9 @@ struct pt_regs;
 
 链接时所有 `__ex_table` 段被合并，构建脚本 `scripts/sorttable` 在构建期按 `insn` 排序，运行时用二分查找：
 
+[`kernel/extable.c:53-64`](../../linux/kernel/extable.c#L53-L64)（v6.18.60）
+
 ```c
-// kernel/extable.c:53-64（v6.18.60）
 /* Given an address, look for it in the exception tables. */
 const struct exception_table_entry *search_exception_tables(unsigned long addr)
 {
@@ -558,8 +573,9 @@ const struct exception_table_entry *search_exception_tables(unsigned long addr)
 
 `fixup_exception()` 按类型分派处理：
 
+[`arch/x86/mm/extable.c:299-373`](../../linux/arch/x86/mm/extable.c#L299-L373)（v6.18.60）
+
 ```c
-// arch/x86/mm/extable.c:299-373（v6.18.60）
 int fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
 		    unsigned long fault_addr)
 {
@@ -605,8 +621,9 @@ int fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
 
 最基础的 `ex_handler_default()` 只做一件事——把 `regs->ip` 改成修复地址：
 
+[`arch/x86/mm/extable.c:27-43`](../../linux/arch/x86/mm/extable.c#L27-L43)（v6.18.60）
+
 ```c
-// arch/x86/mm/extable.c:27-43（v6.18.60）
 static inline unsigned long
 ex_fixup_addr(const struct exception_table_entry *x)
 {
@@ -651,8 +668,9 @@ static bool ex_handler_default(const struct exception_table_entry *e,
 
 当内核态异常无法修复时，调用 `die()`：
 
+[`arch/x86/kernel/dumpstack.c:449-461`](../../linux/arch/x86/kernel/dumpstack.c#L449-L461)（v6.18.60）
+
 ```c
-// arch/x86/kernel/dumpstack.c:449-461（v6.18.60）
 /*
  * This is gone through when something in the kernel has done something bad
  * and is about to be terminated:
@@ -668,10 +686,11 @@ void die(const char *str, struct pt_regs *regs, long err)
 }
 ```
 
-`oops_begin()`（`arch/x86/kernel/dumpstack.c:349-370`）关中断并获取全局的 `die_lock`，保证多个 CPU 同时 Oops 时输出不会交错；`console_verbose()` 提高控制台日志级别，`bust_spinlocks(1)` 让 `printk` 尽量绕过可能被持有的控制台锁。`__die()` 打印 `Oops: general protection fault: 0000 [#1] SMP PTI` 形式的头部、寄存器、调用栈与已加载模块，并给 `DIE_OOPS` 通知链一个机会。
+`oops_begin()`（[`arch/x86/kernel/dumpstack.c:349-370`](../../linux/arch/x86/kernel/dumpstack.c#L349-L370)）关中断并获取全局的 `die_lock`，保证多个 CPU 同时 Oops 时输出不会交错；`console_verbose()` 提高控制台日志级别，`bust_spinlocks(1)` 让 `printk` 尽量绕过可能被持有的控制台锁。`__die()` 打印 `Oops: general protection fault: 0000 [#1] SMP PTI` 形式的头部、寄存器、调用栈与已加载模块，并给 `DIE_OOPS` 通知链一个机会。
+
+[`arch/x86/kernel/dumpstack.c:375-409`](../../linux/arch/x86/kernel/dumpstack.c#L375-L409)（v6.18.60）
 
 ```c
-// arch/x86/kernel/dumpstack.c:375-409（v6.18.60）
 void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 {
 	if (regs && kexec_should_crash(current))
@@ -715,7 +734,7 @@ Oops 之后的去向：
 2. 内核被标记为 `TAINT_DIE`（`/proc/sys/kernel/tainted` 的 `D` 位）。
 3. **在中断上下文中 Oops 一律 panic**：中断"借用"了当前任务，杀死该任务无济于事，且中断处理函数可能持有关键锁。
 4. `panic_on_oops` 为真时 panic（本书配置 `CONFIG_PANIC_ON_OOPS` 未开启，可通过 `kernel.panic_on_oops` sysctl 设置）。
-5. 否则调用 `rewind_stack_and_make_dead()`（`arch/x86/entry/entry_64.S:1490-1500`）：把 RSP 重置到任务栈顶（当前可能在 IST 栈上或栈已接近耗尽），然后调用 `make_task_dead()` 终止当前任务。系统继续运行，但该任务持有的锁可能永远不会释放，后续可能出现死锁。
+5. 否则调用 `rewind_stack_and_make_dead()`（[`arch/x86/entry/entry_64.S:1490-1500`](../../linux/arch/x86/entry/entry_64.S#L1490-L1500)）：把 RSP 重置到任务栈顶（当前可能在 IST 栈上或栈已接近耗尽），然后调用 `make_task_dead()` 终止当前任务。系统继续运行，但该任务持有的锁可能永远不会释放，后续可能出现死锁。
 
 ## 关键细节 / 设计考量
 

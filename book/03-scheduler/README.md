@@ -48,4 +48,4 @@
 - [ ] 3.1～3.11 的"动手实验"尚未在 dev 虚拟机中实测，需补充真实输出示例（注明内核版本与配置）。
 - [ ] 3.11 的实验需要开启 `CONFIG_SCHED_CLASS_EXT`（依赖 `CONFIG_DEBUG_INFO_BTF`）的内核，本书默认配置无法直接运行。
 - [ ] 各节 Mermaid 图（图 3-3、3-5、3-7、3-8、3-10、3-12、3-16、3-17）需在目标渲染器中确认显示效果。
-- [ ] 3.7 引用的 `kernel/sched/deadline.c:1583-1782` dl_server 状态图注释中的 `dl_defer_idle` 字段在 v6.18.60 结构体中不存在，后续版本若同步修正需更新正文说明。
+- [ ] 3.7 引用的 [`kernel/sched/deadline.c:1583-1782`](../../linux/kernel/sched/deadline.c#L1583-L1782) dl_server 状态图注释中的 `dl_defer_idle` 字段在 v6.18.60 结构体中不存在，后续版本若同步修正需更新正文说明。

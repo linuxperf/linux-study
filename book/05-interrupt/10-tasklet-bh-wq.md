@@ -1,6 +1,6 @@
 # 5.10 tasklet 与 BH 工作队列
 
-> **本节源码**：`include/linux/interrupt.h`、`kernel/softirq.c`、`include/linux/workqueue.h`、`kernel/workqueue.c`
+> **本节源码**：[`include/linux/interrupt.h`](../../linux/include/linux/interrupt.h)、[`kernel/softirq.c`](../../linux/kernel/softirq.c)、[`include/linux/workqueue.h`](../../linux/include/linux/workqueue.h)、[`kernel/workqueue.c`](../../linux/kernel/workqueue.c)
 > **关键函数**：`tasklet_setup()`、`tasklet_schedule()`、`__tasklet_schedule_common()`、`tasklet_action_common()`、`tasklet_disable()`、`tasklet_kill()`、`workqueue_softirq_action()`、`bh_worker()`、`kick_bh_pool()`
 > **前置知识**：5.9 软中断
 
@@ -8,14 +8,15 @@
 
 软中断数量固定、同类型可以在多个 CPU 上并行，编写难度大。为了给驱动提供一个"像软中断一样快、但更容易使用"的下半部，Linux 在 v2.3 引入了 **tasklet**：它建立在 `TASKLET_SOFTIRQ` 和 `HI_SOFTIRQ` 两个软中断之上，可以动态创建任意多个，并保证**同一个 tasklet 在任一时刻最多只在一个 CPU 上运行**。
 
-二十多年后，tasklet 已被标记为废弃（`include/linux/interrupt.h:665-668`）：它的实现有若干长期存在的缺陷，在 PREEMPT_RT 下尤其麻烦。v6.9 起，工作队列增加了 `WQ_BH` 类型——**BH 工作队列**（BH workqueue），在软中断上下文中执行工作项，作为 tasklet 的替代品。有趣的是，在 v6.18 中 BH 工作队列本身就搭载在 tasklet 的两个软中断上运行。
+二十多年后，tasklet 已被标记为废弃（[`include/linux/interrupt.h:665-668`](../../linux/include/linux/interrupt.h#L665-L668)）：它的实现有若干长期存在的缺陷，在 PREEMPT_RT 下尤其麻烦。v6.9 起，工作队列增加了 `WQ_BH` 类型——**BH 工作队列**（BH workqueue），在软中断上下文中执行工作项，作为 tasklet 的替代品。有趣的是，在 v6.18 中 BH 工作队列本身就搭载在 tasklet 的两个软中断上运行。
 
 本节先分析 tasklet 的实现，再介绍 BH 工作队列以及从 tasklet 迁移的方法。
 
 ## 核心数据结构
 
+[`include/linux/interrupt.h:688-699`](../../linux/include/linux/interrupt.h#L688-L699)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:688-699（v6.18.60）
 struct tasklet_struct
 {
 	struct tasklet_struct *next;	// [注] per-CPU 链表中的下一个
@@ -30,8 +31,9 @@ struct tasklet_struct
 };
 ```
 
+[`include/linux/interrupt.h:730-734`](../../linux/include/linux/interrupt.h#L730-L734)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:730-734（v6.18.60）
 enum
 {
 	TASKLET_STATE_SCHED,	/* Tasklet is scheduled for execution */
@@ -48,8 +50,9 @@ enum
 
 每个 CPU 维护两条待执行链表：
 
+[`kernel/softirq.c:801-807`](../../linux/kernel/softirq.c#L801-L807)（v6.18.60）
+
 ```c
-// kernel/softirq.c:801-807（v6.18.60）
 struct tasklet_head {
 	struct tasklet_struct *head;
 	struct tasklet_struct **tail;
@@ -65,8 +68,9 @@ static DEFINE_PER_CPU(struct tasklet_head, tasklet_hi_vec);
 
 ### 调度
 
+[`include/linux/interrupt.h:753-767`](../../linux/include/linux/interrupt.h#L753-L767)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:753-767（v6.18.60）
 extern void __tasklet_schedule(struct tasklet_struct *t);
 
 static inline void tasklet_schedule(struct tasklet_struct *t)
@@ -86,8 +90,9 @@ static inline void tasklet_hi_schedule(struct tasklet_struct *t)
 
 `test_and_set_bit()` 是原子操作（7.2 节）：只有把 SCHED 位从 0 置为 1 的那一次调用才会真正入队。已经在队列中的 tasklet 再次被调度时什么都不做。
 
+[`kernel/softirq.c:809-837`](../../linux/kernel/softirq.c#L809-L837)（v6.18.60）
+
 ```c
-// kernel/softirq.c:809-837（v6.18.60）
 static void __tasklet_schedule_common(struct tasklet_struct *t,
 				      struct tasklet_head __percpu *headp,
 				      unsigned int softirq_nr)
@@ -123,8 +128,9 @@ tasklet 被挂到**调用 `tasklet_schedule()` 的那个 CPU** 的链表上，�
 
 ### 执行
 
+[`kernel/softirq.c:903-960`](../../linux/kernel/softirq.c#L903-L960)（v6.18.60）
+
 ```c
-// kernel/softirq.c:903-960（v6.18.60）
 static void tasklet_action_common(struct tasklet_head *tl_head,
 				  unsigned int softirq_nr)
 {
@@ -186,10 +192,10 @@ static __latent_entropy void tasklet_hi_action(void)
 ```
 
 1. **摘下整条链表**：关中断，把 per-CPU 链表整体取下并置空，开中断。此后新调度的 tasklet 进入新链表，不影响本次遍历。
-2. **尝试获取运行权**：`tasklet_trylock()`（`include/linux/interrupt.h:737-740`）用 `test_and_set_bit(TASKLET_STATE_RUN)` 尝试置位 RUN。失败说明该 tasklet 正在**另一个 CPU** 上运行——这可能发生在它运行期间被重新调度到本 CPU 时。
+2. **尝试获取运行权**：`tasklet_trylock()`（[`include/linux/interrupt.h:737-740`](../../linux/include/linux/interrupt.h#L737-L740)）用 `test_and_set_bit(TASKLET_STATE_RUN)` 尝试置位 RUN。失败说明该 tasklet 正在**另一个 CPU** 上运行——这可能发生在它运行期间被重新调度到本 CPU 时。
 3. **检查禁用计数**：`count` 非零说明被 `tasklet_disable()` 禁用。
-4. **清除 SCHED 并执行**：`tasklet_clear_sched()`（`kernel/softirq.c:839-849`）用 `test_and_clear_wake_up_bit()` 清除 SCHED 位并唤醒可能在 `tasklet_kill()` 中等待的任务，然后调用回调。**先清 SCHED 再执行**意味着回调执行期间可以再次被调度（包括在回调内部调度自己），新的调度会让它在执行完后再运行一次。
-5. **释放运行权**：`tasklet_unlock()` 清除 RUN 位并唤醒 `tasklet_unlock_wait()` 的等待者（`kernel/softirq.c:1022-1032`）。
+4. **清除 SCHED 并执行**：`tasklet_clear_sched()`（[`kernel/softirq.c:839-849`](../../linux/kernel/softirq.c#L839-L849)）用 `test_and_clear_wake_up_bit()` 清除 SCHED 位并唤醒可能在 `tasklet_kill()` 中等待的任务，然后调用回调。**先清 SCHED 再执行**意味着回调执行期间可以再次被调度（包括在回调内部调度自己），新的调度会让它在执行完后再运行一次。
+5. **释放运行权**：`tasklet_unlock()` 清除 RUN 位并唤醒 `tasklet_unlock_wait()` 的等待者（[`kernel/softirq.c:1022-1032`](../../linux/kernel/softirq.c#L1022-L1032)）。
 6. **无法执行则重新入队**：若第 2 或第 3 步失败，把 tasklet 放回本 CPU 的链表尾部并重新触发软中断，等下一轮再试。
 
 ```mermaid
@@ -208,8 +214,9 @@ stateDiagram-v2
 
 ### 禁用与销毁
 
+[`include/linux/interrupt.h:769-797`](../../linux/include/linux/interrupt.h#L769-L797)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:769-797（v6.18.60）
 static inline void tasklet_disable_nosync(struct tasklet_struct *t)
 {
 	atomic_inc(&t->count);
@@ -243,8 +250,9 @@ static inline void tasklet_enable(struct tasklet_struct *t)
 
 `tasklet_disable()` 增加计数后**等待**正在运行的实例结束（`wait_on_bit()` 睡眠等待 RUN 位清除），之后可以确定回调不会再执行，直到 `tasklet_enable()`。禁用期间被调度的 tasklet 会在软中断中不停地"取下—发现已禁用—重新入队—触发软中断"，这是 tasklet 的一个设计缺陷：被长时间禁用的 tasklet 会让软中断空转。
 
+[`kernel/softirq.c:1009-1018`](../../linux/kernel/softirq.c#L1009-L1018)（v6.18.60）
+
 ```c
-// kernel/softirq.c:1009-1018（v6.18.60）
 void tasklet_kill(struct tasklet_struct *t)
 {
 	if (in_interrupt())
@@ -261,8 +269,9 @@ void tasklet_kill(struct tasklet_struct *t)
 
 ### 在 CPU 下线时
 
+[`kernel/softirq.c:1071-1098`](../../linux/kernel/softirq.c#L1071-L1098)（v6.18.60）
+
 ```c
-// kernel/softirq.c:1071-1098（v6.18.60）
 #ifdef CONFIG_HOTPLUG_CPU
 static int takeover_tasklets(unsigned int cpu)
 {
@@ -293,7 +302,7 @@ static int takeover_tasklets(unsigned int cpu)
 }
 ```
 
-CPU 下线后（`CPUHP_SOFTIRQ_DEAD` 阶段，`kernel/softirq.c:1154-1155`），另一个 CPU 把死亡 CPU 上未执行的 tasklet 整条链表接到自己的链表后面。这正是 tail 指针设计的另一个好处。`workqueue_softirq_dead()` 对 BH 工作队列做类似的接管。
+CPU 下线后（`CPUHP_SOFTIRQ_DEAD` 阶段，[`kernel/softirq.c:1154-1155`](../../linux/kernel/softirq.c#L1154-L1155)），另一个 CPU 把死亡 CPU 上未执行的 tasklet 整条链表接到自己的链表后面。这正是 tail 指针设计的另一个好处。`workqueue_softirq_dead()` 对 BH 工作队列做类似的接管。
 
 ## tasklet 的问题
 
@@ -301,10 +310,10 @@ tasklet 被废弃的原因主要有以下几点：
 
 - **执行上下文不可控**。tasklet 在软中断中执行，借用被打断的任务或 ksoftirqd，优先级与调度都不可控。对需要低延迟的驱动，线程化中断（可设置实时优先级）是更好的选择；对可以容忍延迟的驱动，工作队列更合适。
 - **与调度 CPU 绑定**。tasklet 总在调度它的 CPU 上执行，不能指定 CPU，也无法做负载均衡。
-- **禁用语义的缺陷**。被禁用的 tasklet 会导致软中断反复空转；`tasklet_disable()` 在原子上下文中无法使用，旧代码中大量的 `tasklet_disable()` 在原子上下文中自旋等待，在 PREEMPT_RT 下会导致活锁（`kernel/softirq.c:851-901` 中 RT 专用的 `tasklet_sync_callback` 就是为此打的补丁）。
+- **禁用语义的缺陷**。被禁用的 tasklet 会导致软中断反复空转；`tasklet_disable()` 在原子上下文中无法使用，旧代码中大量的 `tasklet_disable()` 在原子上下文中自旋等待，在 PREEMPT_RT 下会导致活锁（[`kernel/softirq.c:851-901`](../../linux/kernel/softirq.c#L851-L901) 中 RT 专用的 `tasklet_sync_callback` 就是为此打的补丁）。
 - **与工作队列功能重叠**。内核中已有成熟的工作队列框架提供并发管理、CPU 亲和性、flush / cancel 等完整语义，tasklet 却是一套独立的、功能更弱的实现。
 
-2020 年起社区就倡议用线程化中断替代 tasklet（`include/linux/interrupt.h:667-668` 注释中的链接），但存量代码太多（v6.18 的 `drivers/`、`net/`、`sound/` 中仍有四百余处 `tasklet_setup()` / `tasklet_init()` 调用），需要一个语义上尽量接近、便于机械转换的替代品——这就是 BH 工作队列。
+2020 年起社区就倡议用线程化中断替代 tasklet（[`include/linux/interrupt.h:667-668`](../../linux/include/linux/interrupt.h#L667-L668) 注释中的链接），但存量代码太多（v6.18 的 `drivers/`、`net/`、`sound/` 中仍有四百余处 `tasklet_setup()` / `tasklet_init()` 调用），需要一个语义上尽量接近、便于机械转换的替代品——这就是 BH 工作队列。
 
 ## BH 工作队列
 
@@ -312,29 +321,32 @@ tasklet 被废弃的原因主要有以下几点：
 
 v6.9 中 Tejun Heo 为工作队列增加了 `WQ_BH` 标志：
 
+[`include/linux/workqueue.h:370-371`](../../linux/include/linux/workqueue.h#L370-L371)（v6.18.60）
+
 ```c
-// include/linux/workqueue.h:370-371（v6.18.60）
 enum wq_flags {
 	WQ_BH			= 1 << 0, /* execute in bottom half (softirq) context */
 ```
 
 BH 工作队列的工作项在**软中断上下文**中执行：不能睡眠，与 tasklet 相同；但接口、并发语义、flush / cancel / disable 都与普通工作队列一致（5.12 节）。内核预建了两个系统 BH 工作队列：
 
+[`kernel/workqueue.c:7966-7968`](../../linux/kernel/workqueue.c#L7966-L7968)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:7966-7968（v6.18.60）
 	system_bh_wq = alloc_workqueue("events_bh", WQ_BH | WQ_PERCPU, 0);
 	system_bh_highpri_wq = alloc_workqueue("events_bh_highpri",
 					       WQ_BH | WQ_HIGHPRI | WQ_PERCPU, 0);
 ```
 
-`system_bh_wq` 对应普通 tasklet，`system_bh_highpri_wq` 对应高优先级 tasklet。BH 工作队列只允许 `WQ_BH | WQ_HIGHPRI | WQ_PERCPU` 这几个标志（`include/linux/workqueue.h:412-413`）。
+`system_bh_wq` 对应普通 tasklet，`system_bh_highpri_wq` 对应高优先级 tasklet。BH 工作队列只允许 `WQ_BH | WQ_HIGHPRI | WQ_PERCPU` 这几个标志（[`include/linux/workqueue.h:412-413`](../../linux/include/linux/workqueue.h#L412-L413)）。
 
 ### 实现：借道 tasklet 软中断
 
-每个 CPU 有两个 BH worker pool（普通与高优先级），与普通工作队列的 per-CPU pool 并列初始化（`kernel/workqueue.c:7918-7933`）。BH pool 中只有一个"虚拟"worker，没有对应的内核线程。向 BH pool 提交工作项后，`kick_pool()` 不唤醒线程，而是触发软中断：
+每个 CPU 有两个 BH worker pool（普通与高优先级），与普通工作队列的 per-CPU pool 并列初始化（[`kernel/workqueue.c:7918-7933`](../../linux/kernel/workqueue.c#L7918-L7933)）。BH pool 中只有一个"虚拟"worker，没有对应的内核线程。向 BH pool 提交工作项后，`kick_pool()` 不唤醒线程，而是触发软中断：
+
+[`kernel/workqueue.c:1236-1250`](../../linux/kernel/workqueue.c#L1236-L1250)（v6.18.60）
 
 ```c
-// kernel/workqueue.c:1236-1250（v6.18.60）
 static void kick_bh_pool(struct worker_pool *pool)
 {
 #ifdef CONFIG_SMP
@@ -352,12 +364,13 @@ static void kick_bh_pool(struct worker_pool *pool)
 }
 ```
 
-普通 BH pool 触发 `TASKLET_SOFTIRQ`，高优先级 BH pool 触发 `HI_SOFTIRQ`。如果工作项被提交到另一个 CPU 的 BH pool（`queue_work_on()`），不能直接触发别的 CPU 的软中断，于是用 irq_work（5.11 节）给目标 CPU 发一个 IPI，在那里触发软中断（`bh_pool_kick_normal()` / `bh_pool_kick_highpri()`，`kernel/workqueue.c:7821-7829`）。
+普通 BH pool 触发 `TASKLET_SOFTIRQ`，高优先级 BH pool 触发 `HI_SOFTIRQ`。如果工作项被提交到另一个 CPU 的 BH pool（`queue_work_on()`），不能直接触发别的 CPU 的软中断，于是用 irq_work（5.11 节）给目标 CPU 发一个 IPI，在那里触发软中断（`bh_pool_kick_normal()` / `bh_pool_kick_highpri()`，[`kernel/workqueue.c:7821-7829`](../../linux/kernel/workqueue.c#L7821-L7829)）。
 
 前面已经看到，`tasklet_action()` 与 `tasklet_hi_action()` 在处理 tasklet 之前会先调用 `workqueue_softirq_action()`：
 
+[`kernel/workqueue.c:3685-3702`](../../linux/kernel/workqueue.c#L3685-L3702)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:3685-3702（v6.18.60）
 /*
  * TODO: Convert all tasklet users to workqueue and use softirq directly.
  *
@@ -380,8 +393,9 @@ void workqueue_softirq_action(bool highpri)
 
 注释说明这是过渡期的安排：等所有 tasklet 用户都迁移完，两个软中断将直接由工作队列接管。`bh_worker()` 模仿普通 worker 线程的主循环，但带有与软中断相同的时间与次数上限：
 
+[`kernel/workqueue.c:3647-3683`](../../linux/kernel/workqueue.c#L3647-L3683)（v6.18.60）
+
 ```c
-// kernel/workqueue.c:3647-3683（v6.18.60）
 static void bh_worker(struct worker *worker)
 {
 	struct worker_pool *pool = worker->pool;
@@ -421,7 +435,7 @@ done:
 }
 ```
 
-`BH_WORKER_JIFFIES` 为 2 ms、`BH_WORKER_RESTARTS` 为 10（`kernel/workqueue.c:139-140`），与 `handle_softirqs()` 的 `MAX_SOFTIRQ_TIME`、`MAX_SOFTIRQ_RESTART` 一致。超限时 `kick_pool()` 重新触发软中断，剩余工作由 `handle_softirqs()` 的重启逻辑或 ksoftirqd 继续处理。`assign_work()`（`kernel/workqueue.c:1193-1227`）检查该工作项是否正被同 pool 的其他 worker 执行——对 BH pool 只有一个 worker，这保证了**同一工作项不会并行执行**，与 tasklet 的串行语义一致。
+`BH_WORKER_JIFFIES` 为 2 ms、`BH_WORKER_RESTARTS` 为 10（[`kernel/workqueue.c:139-140`](../../linux/kernel/workqueue.c#L139-L140)），与 `handle_softirqs()` 的 `MAX_SOFTIRQ_TIME`、`MAX_SOFTIRQ_RESTART` 一致。超限时 `kick_pool()` 重新触发软中断，剩余工作由 `handle_softirqs()` 的重启逻辑或 ksoftirqd 继续处理。`assign_work()`（[`kernel/workqueue.c:1193-1227`](../../linux/kernel/workqueue.c#L1193-L1227)）检查该工作项是否正被同 pool 的其他 worker 执行——对 BH pool 只有一个 worker，这保证了**同一工作项不会并行执行**，与 tasklet 的串行语义一致。
 
 ### 从 tasklet 迁移
 
@@ -438,7 +452,7 @@ done:
 
 *表 5-19：tasklet 到 BH 工作队列的接口对应*
 
-`disable_work()` / `enable_work()`（`include/linux/workqueue.h:642-644`）是 v6.10 为配合迁移新增的接口：被禁用的工作项在提交时直接忽略，不会像 tasklet 那样在软中断中空转。
+`disable_work()` / `enable_work()`（[`include/linux/workqueue.h:642-644`](../../linux/include/linux/workqueue.h#L642-L644)）是 v6.10 为配合迁移新增的接口：被禁用的工作项在提交时直接忽略，不会像 tasklet 那样在软中断中空转。
 
 BH 工作队列与 tasklet 的一个语义差别：tasklet 总在调度它的 CPU 上执行，`queue_work(system_bh_wq, ...)` 在 `WQ_PERCPU` 工作队列上默认也提交到当前 CPU，二者一致；但工作队列还允许 `queue_work_on()` 指定 CPU。截至 v6.18，已有数十个子系统（如 `drivers/` 下的部分网卡、USB、加密驱动）完成了迁移。
 

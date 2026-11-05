@@ -1,6 +1,6 @@
 # 5.9 软中断
 
-> **本节源码**：`include/linux/interrupt.h`、`arch/x86/include/asm/hardirq.h`、`kernel/softirq.c`、`arch/x86/include/asm/irq_stack.h`、`include/linux/vtime.h`、`net/core/dev.c`
+> **本节源码**：[`include/linux/interrupt.h`](../../linux/include/linux/interrupt.h)、[`arch/x86/include/asm/hardirq.h`](../../linux/arch/x86/include/asm/hardirq.h)、[`kernel/softirq.c`](../../linux/kernel/softirq.c)、[`arch/x86/include/asm/irq_stack.h`](../../linux/arch/x86/include/asm/irq_stack.h)、[`include/linux/vtime.h`](../../linux/include/linux/vtime.h)、[`net/core/dev.c`](../../linux/net/core/dev.c)
 > **关键函数**：`open_softirq()`、`raise_softirq()`、`raise_softirq_irqoff()`、`__raise_softirq_irqoff()`、`irq_exit_rcu()`、`invoke_softirq()`、`do_softirq()`、`handle_softirqs()`、`wakeup_softirqd()`、`run_ksoftirqd()`
 > **前置知识**：5.2 中断入口与出口、7.1 并发来源与执行上下文
 
@@ -20,8 +20,9 @@
 
 ### 软中断类型
 
+[`include/linux/interrupt.h:541-561`](../../linux/include/linux/interrupt.h#L541-L561)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:541-561（v6.18.60）
 /* PLEASE, avoid to allocate new softirqs, if you need not _really_ high
    frequency threaded job scheduling. For almost all the purposes
    tasklets are more than enough. F.e. all serial device BHs et
@@ -47,16 +48,16 @@ enum
 
 | 编号 | 名称 | 处理函数 | 注册位置 | 用途 |
 |---|---|---|---|---|
-| 0 | `HI` | `tasklet_hi_action()` | `kernel/softirq.c:1047` | 高优先级 tasklet 与 BH 工作队列（5.10 节） |
-| 1 | `TIMER` | `run_timer_softirq()` | `kernel/time/timer.c:2579` | 定时器轮（timer wheel）回调（第 8 章） |
-| 2 | `NET_TX` | `net_tx_action()` | `net/core/dev.c:13269` | 网络发送完成、qdisc 调度 |
-| 3 | `NET_RX` | `net_rx_action()` | `net/core/dev.c:13270` | NAPI 收包轮询 |
-| 4 | `BLOCK` | `blk_done_softirq()` | `block/blk-mq.c:5288` | 块 I/O 完成回调 |
-| 5 | `IRQ_POLL` | `irq_poll_softirq()` | `lib/irq_poll.c:214` | 块设备驱动的类 NAPI 轮询 |
-| 6 | `TASKLET` | `tasklet_action()` | `kernel/softirq.c:1046` | 普通 tasklet 与 BH 工作队列 |
-| 7 | `SCHED` | `sched_balance_softirq()` | `kernel/sched/fair.c:14211` | 负载均衡（3.9 节） |
-| 8 | `HRTIMER` | `hrtimer_run_softirq()` | `kernel/time/hrtimer.c:2335` | `HRTIMER_MODE_SOFT` 高精度定时器 |
-| 9 | `RCU` | `rcu_core_si()` | `kernel/rcu/tree.c:4879` | RCU 回调处理（7.10 节） |
+| 0 | `HI` | `tasklet_hi_action()` | [`kernel/softirq.c:1047`](../../linux/kernel/softirq.c#L1047) | 高优先级 tasklet 与 BH 工作队列（5.10 节） |
+| 1 | `TIMER` | `run_timer_softirq()` | [`kernel/time/timer.c:2579`](../../linux/kernel/time/timer.c#L2579) | 定时器轮（timer wheel）回调（第 8 章） |
+| 2 | `NET_TX` | `net_tx_action()` | [`net/core/dev.c:13269`](../../linux/net/core/dev.c#L13269) | 网络发送完成、qdisc 调度 |
+| 3 | `NET_RX` | `net_rx_action()` | [`net/core/dev.c:13270`](../../linux/net/core/dev.c#L13270) | NAPI 收包轮询 |
+| 4 | `BLOCK` | `blk_done_softirq()` | [`block/blk-mq.c:5288`](../../linux/block/blk-mq.c#L5288) | 块 I/O 完成回调 |
+| 5 | `IRQ_POLL` | `irq_poll_softirq()` | [`lib/irq_poll.c:214`](../../linux/lib/irq_poll.c#L214) | 块设备驱动的类 NAPI 轮询 |
+| 6 | `TASKLET` | `tasklet_action()` | [`kernel/softirq.c:1046`](../../linux/kernel/softirq.c#L1046) | 普通 tasklet 与 BH 工作队列 |
+| 7 | `SCHED` | `sched_balance_softirq()` | [`kernel/sched/fair.c:14211`](../../linux/kernel/sched/fair.c#L14211) | 负载均衡（3.9 节） |
+| 8 | `HRTIMER` | `hrtimer_run_softirq()` | [`kernel/time/hrtimer.c:2335`](../../linux/kernel/time/hrtimer.c#L2335) | `HRTIMER_MODE_SOFT` 高精度定时器 |
+| 9 | `RCU` | `rcu_core_si()` | [`kernel/rcu/tree.c:4879`](../../linux/kernel/rcu/tree.c#L4879) | RCU 回调处理（7.10 节） |
 
 *表 5-17：Linux v6.18 的 10 种软中断*
 
@@ -64,16 +65,18 @@ enum
 
 软中断处理函数表极其简单：
 
+[`include/linux/interrupt.h:587-590`](../../linux/include/linux/interrupt.h#L587-L590)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:587-590（v6.18.60）
 struct softirq_action
 {
 	void	(*action)(void);
 };
 ```
 
+[`kernel/softirq.c:60-67`](../../linux/kernel/softirq.c#L60-L67)（v6.18.60）
+
 ```c
-// kernel/softirq.c:60-67（v6.18.60）
 static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
 
 DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
@@ -90,14 +93,16 @@ const char * const softirq_to_name[NR_SOFTIRQS] = {
 
 每个 CPU 有一个 16 位的挂起位图，第 *n* 位为 1 表示第 *n* 种软中断待执行：
 
+[`arch/x86/include/asm/hardirq.h:68-69`](../../linux/arch/x86/include/asm/hardirq.h#L68-L69)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/hardirq.h:68-69（v6.18.60）
 DECLARE_PER_CPU_CACHE_HOT(u16, __softirq_pending);
 #define local_softirq_pending_ref       __softirq_pending
 ```
 
+[`include/linux/interrupt.h:525-527`](../../linux/include/linux/interrupt.h#L525-L527)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:525-527（v6.18.60）
 #define local_softirq_pending()	(__this_cpu_read(local_softirq_pending_ref))
 #define set_softirq_pending(x)	(__this_cpu_write(local_softirq_pending_ref, (x)))
 #define or_softirq_pending(x)	(__this_cpu_or(local_softirq_pending_ref, (x)))
@@ -109,8 +114,9 @@ x86 把它放在"缓存热"（`CACHE_HOT`）的 per-CPU 区段中，与 `__preem
 
 ### 注册与触发
 
+[`kernel/softirq.c:757-796`](../../linux/kernel/softirq.c#L757-L796)（v6.18.60）
+
 ```c
-// kernel/softirq.c:757-796（v6.18.60）
 /*
  * This function must run with irqs disabled!
  */
@@ -159,7 +165,7 @@ void open_softirq(int nr, void (*action)(void))
 - `raise_softirq_irqoff()`：置位后，若当前**不在**中断上下文（硬中断、软中断处理中、或关闭了软中断），就唤醒 `ksoftirqd`。在进程上下文中触发软中断时，没有"即将到来的中断退出"可以依靠，必须让 ksoftirqd 来执行。
 - `raise_softirq()`：自带关中断，可在任何上下文调用。
 
-`in_interrupt()` 包含了"关闭软中断"的情况（`SOFTIRQ_MASK` 非零，7.1 节）——在 `local_bh_disable()` 区间内触发的软中断会在 `local_bh_enable()` 时执行，不需要唤醒 ksoftirqd。非 RT 内核中 `should_wake_ksoftirqd()` 恒为真（`kernel/softirq.c:482-485`）。
+`in_interrupt()` 包含了"关闭软中断"的情况（`SOFTIRQ_MASK` 非零，7.1 节）——在 `local_bh_disable()` 区间内触发的软中断会在 `local_bh_enable()` 时执行，不需要唤醒 ksoftirqd。非 RT 内核中 `should_wake_ksoftirqd()` 恒为真（[`kernel/softirq.c:482-485`](../../linux/kernel/softirq.c#L482-L485)）。
 
 ### 执行时机
 
@@ -186,8 +192,9 @@ ksoftirqd/N                          软中断过多或在进程上下文触发 
 
 5.2 节分析过 `__irq_exit_rcu()`：减去 `HARDIRQ_OFFSET` 后，如果 `!in_interrupt() && local_softirq_pending()`，调用 `invoke_softirq()`：
 
+[`kernel/softirq.c:487-508`](../../linux/kernel/softirq.c#L487-L508)（v6.18.60）
+
 ```c
-// kernel/softirq.c:487-508（v6.18.60）
 static inline void invoke_softirq(void)
 {
 	if (!force_irqthreads() || !__this_cpu_read(ksoftirqd)) {
@@ -220,8 +227,9 @@ x86_64 设置了 `CONFIG_HAVE_IRQ_EXIT_ON_IRQ_STACK`：`irq_exit_rcu()` 本身�
 
 7.1 节分析过 `__local_bh_enable_ip()`：软中断计数归零且有挂起的软中断时调用 `do_softirq()`：
 
+[`kernel/softirq.c:510-526`](../../linux/kernel/softirq.c#L510-L526)（v6.18.60）
+
 ```c
-// kernel/softirq.c:510-526（v6.18.60）
 asmlinkage __visible void do_softirq(void)
 {
 	__u32 pending;
@@ -243,8 +251,9 @@ asmlinkage __visible void do_softirq(void)
 
 这里调用方可能位于很深的任务栈上，因此用 `do_softirq_own_stack()` 切到硬中断栈执行（`CONFIG_SOFTIRQ_ON_OWN_STACK=y`）：
 
+[`arch/x86/include/asm/irq_stack.h:206-220`](../../linux/arch/x86/include/asm/irq_stack.h#L206-L220)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/irq_stack.h:206-220（v6.18.60）
 #ifdef CONFIG_SOFTIRQ_ON_OWN_STACK
 /*
  * Macro to invoke __do_softirq on the irq stack. This is only called from
@@ -266,8 +275,9 @@ asmlinkage __visible void do_softirq(void)
 
 三条路径最终都进入 `handle_softirqs()`：
 
+[`kernel/softirq.c:579-652`](../../linux/kernel/softirq.c#L579-L652)（v6.18.60）
+
 ```c
-// kernel/softirq.c:579-652（v6.18.60）
 static void handle_softirqs(bool ksirqd)
 {
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
@@ -347,7 +357,7 @@ restart:
 逐步分析：
 
 1. **借用当前任务**。软中断没有自己的任务结构，它在被打断的任务（或 ksoftirqd）的上下文中运行，`current` 指向那个任务。清除 `PF_MEMALLOC` 是为了不让软中断意外继承"可以动用紧急内存储备"的特权（4.4 节）。
-2. **进入软中断上下文**。`softirq_handle_begin()`（`kernel/softirq.c:461-464`）给 `preempt_count` 加 `SOFTIRQ_OFFSET`，此后 `in_serving_softirq()` 为真，抢占被禁止，`in_interrupt()` 也为真——后者保证处理期间到来的硬中断退出时不会递归执行软中断。
+2. **进入软中断上下文**。`softirq_handle_begin()`（[`kernel/softirq.c:461-464`](../../linux/kernel/softirq.c#L461-L464)）给 `preempt_count` 加 `SOFTIRQ_OFFSET`，此后 `in_serving_softirq()` 为真，抢占被禁止，`in_interrupt()` 也为真——后者保证处理期间到来的硬中断退出时不会递归执行软中断。
 3. **先清位、再开中断**。把挂起位图读到局部变量 `pending` 后清零，然后**打开中断**。软中断处理函数在开中断状态下运行，这正是下半部存在的意义：硬中断可以随时打断软中断处理，新到的软中断请求会重新置位 per-CPU 位图，而不会干扰本轮正在处理的 `pending` 副本。
 4. **按位依次执行**。`ffs()` 找到最低的置位，调用对应的处理函数。执行前后对比 `preempt_count`，若处理函数忘记释放锁或打开抢占，打印 `huh, entered softirq ...` 并强行恢复。
 5. **重新检查**。处理完一轮后关中断，若又有新的软中断挂起（处理期间到来的硬中断触发的），在满足三个条件时 `goto restart` 再处理一轮：
@@ -356,8 +366,9 @@ restart:
    - 重启次数未达 `MAX_SOFTIRQ_RESTART`（10 次）。
 6. **否则交给 ksoftirqd**。剩余的软中断留在位图中，唤醒 ksoftirqd 在进程上下文中慢慢处理。
 
+[`kernel/softirq.c:530-544`](../../linux/kernel/softirq.c#L530-L544)（v6.18.60）
+
 ```c
-// kernel/softirq.c:530-544（v6.18.60）
 /*
  * We restart softirq processing for at most MAX_SOFTIRQ_RESTART times,
  * but break the loop if need_resched() is set or after 2 ms.
@@ -400,8 +411,9 @@ flowchart TD
 
 每个 CPU 有一个 `ksoftirqd/N` 内核线程，由 smpboot 框架管理（随 CPU 上下线创建与停放）：
 
+[`kernel/softirq.c:1050-1069`](../../linux/kernel/softirq.c#L1050-L1069)（v6.18.60）
+
 ```c
-// kernel/softirq.c:1050-1069（v6.18.60）
 static int ksoftirqd_should_run(unsigned int cpu)
 {
 	return local_softirq_pending();
@@ -424,8 +436,9 @@ static void run_ksoftirqd(unsigned int cpu)
 }
 ```
 
+[`kernel/softirq.c:1103-1108`](../../linux/kernel/softirq.c#L1103-L1108)（v6.18.60）
+
 ```c
-// kernel/softirq.c:1103-1108（v6.18.60）
 static struct smp_hotplug_thread softirq_threads = {
 	.store			= &ksoftirqd,
 	.thread_should_run	= ksoftirqd_should_run,
@@ -436,10 +449,11 @@ static struct smp_hotplug_thread softirq_threads = {
 
 smpboot 线程主循环在 `thread_should_run()` 返回真时调用 `thread_fn()`，否则睡眠。`run_ksoftirqd()` 关中断后调用同一个 `handle_softirqs()`，处理完一轮就 `cond_resched()` 让出 CPU。
 
-ksoftirqd 是普通的 `SCHED_NORMAL` 任务（nice 0），与用户进程公平竞争 CPU。这意味着在软中断负载极高时（例如网络泛洪），软中断处理会受调度器节流，用户进程仍能获得 CPU 时间；代价是软中断延迟增大。`rcu_softirq_qs()` 在 ksoftirqd 处理完一轮后报告 RCU 静止状态（`kernel/softirq.c:634-635`）——ksoftirqd 可能长时间运行，若不报告，在不可抢占内核中会阻塞 RCU 宽限期（7.10 节）。
+ksoftirqd 是普通的 `SCHED_NORMAL` 任务（nice 0），与用户进程公平竞争 CPU。这意味着在软中断负载极高时（例如网络泛洪），软中断处理会受调度器节流，用户进程仍能获得 CPU 时间；代价是软中断延迟增大。`rcu_softirq_qs()` 在 ksoftirqd 处理完一轮后报告 RCU 静止状态（[`kernel/softirq.c:634-635`](../../linux/kernel/softirq.c#L634-L635)）——ksoftirqd 可能长时间运行，若不报告，在不可抢占内核中会阻塞 RCU 宽限期（7.10 节）。
+
+[`kernel/softirq.c:69-82`](../../linux/kernel/softirq.c#L69-L82)（v6.18.60）
 
 ```c
-// kernel/softirq.c:69-82（v6.18.60）
 /*
  * we cannot loop indefinitely here to avoid userspace starvation,
  * but we also don't want to introduce a worst case 1/HZ latency
@@ -460,8 +474,9 @@ static void wakeup_softirqd(void)
 
 软中断最典型的使用者是网络收包。网卡驱动在硬中断中关闭网卡的接收中断，调用 `napi_schedule()` 把自己的 `napi_struct` 挂到本 CPU 的 `softnet_data.poll_list` 上并触发 `NET_RX_SOFTIRQ`；软中断中 `net_rx_action()` 逐个轮询：
 
+[`net/core/dev.c:7834-7885`](../../linux/net/core/dev.c#L7834-L7885)（v6.18.60）
+
 ```c
-// net/core/dev.c:7834-7885（v6.18.60）
 static __latent_entropy void net_rx_action(void)
 {
 	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
@@ -516,7 +531,7 @@ start:
 	}
 ```
 
-这里体现了软中断处理函数的典型写法：**自己也有预算**。`netdev_budget`（默认 300 个包，sysctl `net.core.netdev_budget`）与 `netdev_budget_usecs`（默认 2 个 jiffy，本书配置下为 2000 µs，`net/core/hotdata.c:16`）任一耗尽就退出，未处理完的 NAPI 实例重新触发 `NET_RX_SOFTIRQ`，交给 `handle_softirqs()` 的重启逻辑或 ksoftirqd。`/proc/net/softnet_stat` 第三列 `time_squeeze` 统计了预算耗尽的次数，是判断收包软中断是否过载的重要指标。
+这里体现了软中断处理函数的典型写法：**自己也有预算**。`netdev_budget`（默认 300 个包，sysctl `net.core.netdev_budget`）与 `netdev_budget_usecs`（默认 2 个 jiffy，本书配置下为 2000 µs，[`net/core/hotdata.c:16`](../../linux/net/core/hotdata.c#L16)）任一耗尽就退出，未处理完的 NAPI 实例重新触发 `NET_RX_SOFTIRQ`，交给 `handle_softirqs()` 的重启逻辑或 ksoftirqd。`/proc/net/softnet_stat` 第三列 `time_squeeze` 统计了预算耗尽的次数，是判断收包软中断是否过载的重要指标。
 
 硬中断（关网卡中断、挂 NAPI）+ 软中断（批量轮询，预算控制）的组合，使得高负载下网卡不必为每个包产生一次中断，中断频率自动降低，处理逐渐转为轮询——这就是 NAPI（New API）的核心思想。
 
@@ -542,11 +557,11 @@ start:
 
 ### 软中断时间的统计
 
-`account_softirq_enter()` / `account_softirq_exit()`（`include/linux/vtime.h:139-148`）在软中断前后进行时间记账。本书配置开启了 `CONFIG_VIRT_CPU_ACCOUNTING_GEN`、未开启 `CONFIG_IRQ_TIME_ACCOUNTING`：在 nohz_full CPU 上，软中断时间会通过 vtime 精确计入 `/proc/stat` 的 `softirq` 列；在普通 CPU 上仍按 tick 采样统计。被打断任务的 CPU 时间中可能"包含"了软中断的执行时间，这是 `top` 中 `si` 与进程 CPU 占用率之间常见的误差来源。
+`account_softirq_enter()` / `account_softirq_exit()`（[`include/linux/vtime.h:139-148`](../../linux/include/linux/vtime.h#L139-L148)）在软中断前后进行时间记账。本书配置开启了 `CONFIG_VIRT_CPU_ACCOUNTING_GEN`、未开启 `CONFIG_IRQ_TIME_ACCOUNTING`：在 nohz_full CPU 上，软中断时间会通过 vtime 精确计入 `/proc/stat` 的 `softirq` 列；在普通 CPU 上仍按 tick 采样统计。被打断任务的 CPU 时间中可能"包含"了软中断的执行时间，这是 `top` 中 `si` 与进程 CPU 占用率之间常见的误差来源。
 
 ### PREEMPT_RT 下的软中断
 
-PREEMPT_RT 中（`kernel/softirq.c:106-308`），软中断不再在硬中断退出时执行，而是：在触发它的线程化中断处理结束时、在 `local_bh_enable()` 时、或由 ksoftirqd 执行；`local_bh_disable()` 变为获取一个 per-CPU 的 `local_lock`，使关软中断的区间可以被抢占。本书配置未开启 `CONFIG_PREEMPT_RT`。
+PREEMPT_RT 中（[`kernel/softirq.c:106-308`](../../linux/kernel/softirq.c#L106-L308)），软中断不再在硬中断退出时执行，而是：在触发它的线程化中断处理结束时、在 `local_bh_enable()` 时、或由 ksoftirqd 执行；`local_bh_disable()` 变为获取一个 per-CPU 的 `local_lock`，使关软中断的区间可以被抢占。本书配置未开启 `CONFIG_PREEMPT_RT`。
 
 ## 动手实验
 

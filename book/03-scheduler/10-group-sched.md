@@ -1,6 +1,6 @@
 # 3.10 组调度与 CPU 带宽控制
 
-> **本节源码**：`kernel/sched/fair.c`、`kernel/sched/core.c`、`kernel/sched/sched.h`、`kernel/sched/autogroup.c`、`kernel/sched/autogroup.h`
+> **本节源码**：[`kernel/sched/fair.c`](../../linux/kernel/sched/fair.c)、[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`kernel/sched/autogroup.c`](../../linux/kernel/sched/autogroup.c)、[`kernel/sched/autogroup.h`](../../linux/kernel/sched/autogroup.h)
 > **关键函数**：`calc_group_shares()`、`update_cfs_group()`、`sched_group_set_shares()`、`account_cfs_rq_runtime()`、`assign_cfs_rq_runtime()`、`check_cfs_rq_runtime()`、`throttle_cfs_rq()`、`throttle_cfs_rq_work()`、`tg_unthrottle_up()`、`do_sched_cfs_period_timer()`、`autogroup_task_group()`
 > **前置知识**：3.3 EEVDF（层级选取 `pick_task_fair()`）、3.8 PELT 负载跟踪
 
@@ -18,8 +18,9 @@
 
 ### task_group
 
+[`kernel/sched/sched.h:472-514`](../../linux/kernel/sched/sched.h#L472-L514)（v6.18.60，节选）
+
 ```c
-// kernel/sched/sched.h:472-514（v6.18.60，节选）
 struct task_group {
 	struct cgroup_subsys_state css;
 
@@ -61,7 +62,7 @@ struct task_group {
 - `se[cpu]` / `cfs_rq[cpu]`：组在每个 CPU 上的调度实体与运行队列，是 per-CPU 数组。`se[cpu]->my_q == cfs_rq[cpu]`，`se[cpu]->cfs_rq` 指向父组在该 CPU 上的 `cfs_rq`（3.1 节 `struct sched_entity` 中 `CONFIG_FAIR_GROUP_SCHED` 字段）。
 - `shares`：组的权重（用户态 `cpu.weight` 换算后的值），对应于单个任务的 `load.weight`。
 - `load_avg`：组在所有 CPU 上 `cfs_rq->avg.load_avg` 之和的近似值，用于在各 CPU 间分配 `shares`。
-- 根组 `root_task_group` 比较特殊：它的任务直接挂在 `rq->cfs` 上，没有组实体（`sched_init()` 中 `init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL)` 及其前的注释，`core.c:8722-8741`）。
+- 根组 `root_task_group` 比较特殊：它的任务直接挂在 `rq->cfs` 上，没有组实体（`sched_init()` 中 `init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL)` 及其前的注释，[`kernel/sched/core.c:8722-8741`](../../linux/kernel/sched/core.c#L8722-L8741)）。
 
 ### 层级关系
 
@@ -97,12 +98,13 @@ struct task_group {
                        Σ(所有 CPU) grq->load.weight
 ```
 
-但跨 CPU 求和代价太高。源码注释（`fair.c:4021-4093`）详细推导了内核采用的近似：用 PELT 的 `load_avg` 代替瞬时权重，并用 `tg->load_avg` 作为全局和的缓存。
+但跨 CPU 求和代价太高。源码注释（[`kernel/sched/fair.c:4021-4093`](../../linux/kernel/sched/fair.c#L4021-L4093)）详细推导了内核采用的近似：用 PELT 的 `load_avg` 代替瞬时权重，并用 `tg->load_avg` 作为全局和的缓存。
 
 ### calc_group_shares()
 
+[`kernel/sched/fair.c:4094-4126`](../../linux/kernel/sched/fair.c#L4094-L4126)（v6.18.60，节选）
+
 ```c
-// kernel/sched/fair.c:4094-4126（v6.18.60，节选）
 static long calc_group_shares(struct cfs_rq *cfs_rq)
 {
 	long tg_weight, tg_shares, load, shares;
@@ -130,32 +132,34 @@ static long calc_group_shares(struct cfs_rq *cfs_rq)
 - 全局和用 `tg->load_avg`，但把本 CPU 的旧贡献 `tg_load_avg_contrib` 替换成当前值，保证分母不小于分子。
 - 结果限制在 `[MIN_SHARES, tg_shares]`。注释坦言这个近似"始终略微高估"，各 CPU 上组实体权重之和会不小于 `tg->shares`。
 
-`update_cfs_group()`（`fair.c:4132-4147`）调用它并在权重变化时 `reweight_entity()`（3.3 节"调整权重时保持 lag"）。3.3 节 `enqueue_entity()`、`dequeue_entity()`、`entity_tick()` 中的 `update_cfs_group(se)` 调用即是为此。`tg->load_avg` 本身由 3.8 节 `update_load_avg()` 中的 `update_tg_load_avg()` 维护，为减少原子操作争用，只有距上次更新至少 1 ms、且本 CPU 贡献变化超过 1/64 时才更新（`fair.c:4285-4294`）。
+`update_cfs_group()`（[`kernel/sched/fair.c:4132-4147`](../../linux/kernel/sched/fair.c#L4132-L4147)）调用它并在权重变化时 `reweight_entity()`（3.3 节"调整权重时保持 lag"）。3.3 节 `enqueue_entity()`、`dequeue_entity()`、`entity_tick()` 中的 `update_cfs_group(se)` 调用即是为此。`tg->load_avg` 本身由 3.8 节 `update_load_avg()` 中的 `update_tg_load_avg()` 维护，为减少原子操作争用，只有距上次更新至少 1 ms、且本 CPU 贡献变化超过 1/64 时才更新（[`kernel/sched/fair.c:4285-4294`](../../linux/kernel/sched/fair.c#L4285-L4294)）。
 
 ### 用户接口
 
 cgroup v2 的 `cpu.weight` 取值 1～10000，默认 100，换算为内核权重：
 
+[`kernel/sched/sched.h:259-262`](../../linux/kernel/sched/sched.h#L259-L262)（v6.18.60）
+
 ```c
-// kernel/sched/sched.h:259-262（v6.18.60）
 static inline unsigned long sched_weight_from_cgroup(unsigned long cgrp_weight)
 {
 	return DIV_ROUND_CLOSEST_ULL(cgrp_weight * 1024, CGROUP_WEIGHT_DFL);
 }
 ```
 
-即 `cpu.weight = 100` 对应 1024（一个 nice 0 任务的权重）。`cpu_weight_write_u64()`（`core.c:10117` 起）再经 `sched_group_set_shares()` 写入 `tg->shares`。此外还有 `cpu.weight.nice`（按 nice 值设置）和 `cpu.idle`（把整个组当作 `SCHED_IDLE` 对待，`tg->idle`），见 `core.c:10229-10248` 的 `cpu_files[]`。
+即 `cpu.weight = 100` 对应 1024（一个 nice 0 任务的权重）。`cpu_weight_write_u64()`（[`kernel/sched/core.c:10117`](../../linux/kernel/sched/core.c#L10117) 起）再经 `sched_group_set_shares()` 写入 `tg->shares`。此外还有 `cpu.weight.nice`（按 nice 值设置）和 `cpu.idle`（把整个组当作 `SCHED_IDLE` 对待，`tg->idle`），见 [`kernel/sched/core.c:10229-10248`](../../linux/kernel/sched/core.c#L10229-L10248) 的 `cpu_files[]`。
 
 ### 组实体的时间片
 
-组实体本身也参与 EEVDF 竞争，它的 `slice` 取其子队列中最小的时间片（`enqueue_task_fair()` 中设置，`fair.c:7134` 起），以保证组内短时间片任务的延迟需求能"传递"到上层。
+组实体本身也参与 EEVDF 竞争，它的 `slice` 取其子队列中最小的时间片（`enqueue_task_fair()` 中设置，[`kernel/sched/fair.c:7134`](../../linux/kernel/sched/fair.c#L7134) 起），以保证组内短时间片任务的延迟需求能"传递"到上层。
 
 ## autogroup
 
-桌面环境中，用户通常不会手动配置 cgroup。`CONFIG_SCHED_AUTOGROUP` 提供了一个自动方案：**每个会话（session）自动成为一个任务组**。`setsid()` 创建新会话时调用 `sched_autogroup_create_attach()`（`kernel/sys.c:1298`），fork 时由 `sched_cgroup_fork()` 通过 `autogroup_task_group()` 选组（3.4 节）：
+桌面环境中，用户通常不会手动配置 cgroup。`CONFIG_SCHED_AUTOGROUP` 提供了一个自动方案：**每个会话（session）自动成为一个任务组**。`setsid()` 创建新会话时调用 `sched_autogroup_create_attach()`（[`kernel/sys.c:1298`](../../linux/kernel/sys.c#L1298)），fork 时由 `sched_cgroup_fork()` 通过 `autogroup_task_group()` 选组（3.4 节）：
+
+[`kernel/sched/autogroup.h:32-42`](../../linux/kernel/sched/autogroup.h#L32-L42)（v6.18.60）
 
 ```c
-// kernel/sched/autogroup.h:32-42（v6.18.60）
 static inline struct task_group *
 autogroup_task_group(struct task_struct *p, struct task_group *tg)
 {
@@ -169,16 +173,17 @@ autogroup_task_group(struct task_struct *p, struct task_group *tg)
 }
 ```
 
-`task_wants_autogroup()`（`autogroup.c:131-147`）只在任务位于根 cgroup 时返回真——一旦任务被放入显式配置的 cgroup，autogroup 就不再生效。效果是：在一个终端里 `make -j64`，另一个终端里的交互程序仍能获得约一半 CPU。可以通过 `/proc/sys/kernel/sched_autogroup_enabled` 关闭，或通过 `/proc/<pid>/autogroup` 调整组的 nice 值（`proc_sched_autogroup_set_nice()`，`autogroup.c:233`）。
+`task_wants_autogroup()`（[`kernel/sched/autogroup.c:131-147`](../../linux/kernel/sched/autogroup.c#L131-L147)）只在任务位于根 cgroup 时返回真——一旦任务被放入显式配置的 cgroup，autogroup 就不再生效。效果是：在一个终端里 `make -j64`，另一个终端里的交互程序仍能获得约一半 CPU。可以通过 `/proc/sys/kernel/sched_autogroup_enabled` 关闭，或通过 `/proc/<pid>/autogroup` 调整组的 nice 值（`proc_sched_autogroup_set_nice()`，[`kernel/sched/autogroup.c:233`](../../linux/kernel/sched/autogroup.c#L233)）。
 
 ## CPU 带宽控制
 
 ### 模型
 
-带宽控制为任务组设置**配额**（quota）与**周期**（period）：每个周期内组中所有任务在所有 CPU 上的运行时间之和不超过配额。cgroup v2 接口为 `cpu.max`，格式 `"$QUOTA $PERIOD"`，默认 `max 100000`（无限制，周期 100 ms，`default_bw_period_us()`，`sched.h:439-442`）。周期允许范围为 1 ms～1 s（`core.c:9778-9779`）。`cpu.max.burst` 允许把前几个周期未用完的配额积攒起来，在突发时使用。
+带宽控制为任务组设置**配额**（quota）与**周期**（period）：每个周期内组中所有任务在所有 CPU 上的运行时间之和不超过配额。cgroup v2 接口为 `cpu.max`，格式 `"$QUOTA $PERIOD"`，默认 `max 100000`（无限制，周期 100 ms，`default_bw_period_us()`，[`kernel/sched/sched.h:439-442`](../../linux/kernel/sched/sched.h#L439-L442)）。周期允许范围为 1 ms～1 s（[`kernel/sched/core.c:9778-9779`](../../linux/kernel/sched/core.c#L9778-L9779)）。`cpu.max.burst` 允许把前几个周期未用完的配额积攒起来，在突发时使用。
+
+[`kernel/sched/sched.h:445-469`](../../linux/kernel/sched/sched.h#L445-L469)（v6.18.60）
 
 ```c
-// kernel/sched/sched.h:445-469（v6.18.60）
 struct cfs_bandwidth {
 #ifdef CONFIG_CFS_BANDWIDTH
 	raw_spinlock_t		lock;
@@ -211,10 +216,11 @@ struct cfs_bandwidth {
 配额是全局的，而任务在各个 CPU 上运行。如果每次记账都去全局池扣减，`cfs_b->lock` 会成为热点。内核采用两级结构：
 
 - **全局池** `cfs_b->runtime`：每个周期由 `period_timer` 补充到 `quota`（加上 burst）；
-- **本地池** `cfs_rq->runtime_remaining`：每个 CPU 上的组队列一次从全局池"批发"一个**切片**（`sched_cfs_bandwidth_slice()`，默认 5 ms，`fair.c:125`，可通过 `/proc/sys/kernel/sched_cfs_bandwidth_slice_us` 调整），在本地扣减。
+- **本地池** `cfs_rq->runtime_remaining`：每个 CPU 上的组队列一次从全局池"批发"一个**切片**（`sched_cfs_bandwidth_slice()`，默认 5 ms，[`kernel/sched/fair.c:125`](../../linux/kernel/sched/fair.c#L125)，可通过 `/proc/sys/kernel/sched_cfs_bandwidth_slice_us` 调整），在本地扣减。
+
+[`kernel/sched/fair.c:5867-5883`](../../linux/kernel/sched/fair.c#L5867-L5883)（v6.18.60）
 
 ```c
-// kernel/sched/fair.c:5867-5883（v6.18.60）
 static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 {
 	/* dock delta_exec before expiring quota (as it could span periods) */
@@ -234,12 +240,13 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 }
 ```
 
-3.3 节 `update_curr()` 中的 `account_cfs_rq_runtime()` 就是这个函数的入口。本地池耗尽时向全局池申请（`__assign_cfs_rq_runtime()`，`fair.c:5827-5852`）；申请不到就 `resched_curr()`，让 `__schedule()` 在选取时完成节流。
+3.3 节 `update_curr()` 中的 `account_cfs_rq_runtime()` 就是这个函数的入口。本地池耗尽时向全局池申请（`__assign_cfs_rq_runtime()`，[`kernel/sched/fair.c:5827-5852`](../../linux/kernel/sched/fair.c#L5827-L5852)）；申请不到就 `resched_curr()`，让 `__schedule()` 在选取时完成节流。
 
 ### 节流：标记组，任务在返回用户态时离开
 
+[`kernel/sched/fair.c:6620-6636`](../../linux/kernel/sched/fair.c#L6620-L6636)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:6620-6636（v6.18.60）
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	if (!cfs_bandwidth_used())
@@ -259,12 +266,13 @@ static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 }
 ```
 
-3.3 节 `pick_task_fair()` 与 `put_prev_entity()` 在每一层调用 `check_cfs_rq_runtime()`。`throttle_cfs_rq()`（`fair.c:6149-6188`）最后一次尝试申请 1 ns 运行时，失败则把 `cfs_rq` 挂到 `cfs_b->throttled_cfs_rq`，并用 `walk_tg_tree_from()` 对整棵子树执行 `tg_throttle_down()`：递增各层的 `throttle_count`，冻结 PELT 时钟。
+3.3 节 `pick_task_fair()` 与 `put_prev_entity()` 在每一层调用 `check_cfs_rq_runtime()`。`throttle_cfs_rq()`（[`kernel/sched/fair.c:6149-6188`](../../linux/kernel/sched/fair.c#L6149-L6188)）最后一次尝试申请 1 ns 运行时，失败则把 `cfs_rq` 挂到 `cfs_b->throttled_cfs_rq`，并用 `walk_tg_tree_from()` 对整棵子树执行 `tg_throttle_down()`：递增各层的 `throttle_count`，冻结 PELT 时钟。
 
 **关键变化在于：v6.18.60 中 `throttle_cfs_rq()` 不再把组实体从父队列中摘下**。组仍留在树中，选取可以照常进入；`pick_task_fair()` 在路径上遇到过节流的层级时，对选中的任务调用 `task_throttle_setup_work()`：
 
+[`kernel/sched/fair.c:6100-6113`](../../linux/kernel/sched/fair.c#L6100-L6113)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:6100-6113（v6.18.60）
 static inline void task_throttle_setup_work(struct task_struct *p)
 {
 	if (task_has_throttle_work(p))
@@ -283,8 +291,9 @@ static inline void task_throttle_setup_work(struct task_struct *p)
 
 任务继续运行，直到**返回用户态**时执行 task work `throttle_cfs_rq_work()`：
 
+[`kernel/sched/fair.c:5938-5963`](../../linux/kernel/sched/fair.c#L5938-L5963)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:5938-5963（v6.18.60）
 	scoped_guard(task_rq_lock, p) {
 		se = &p->se;
 		cfs_rq = cfs_rq_of(se);
@@ -315,12 +324,13 @@ static inline void task_throttle_setup_work(struct task_struct *p)
 
 任务被出队并放入所在 `cfs_rq` 的 `throttled_limbo_list`，设置 `p->throttled`，然后让出 CPU。`DEQUEUE_THROTTLE` 使它不走延迟出队（3.3 节 `dequeue_entity()` 中 `DEQUEUE_SPECIAL | DEQUEUE_THROTTLE` 的判断）。
 
-**为什么要等到返回用户态**？旧方案（如 v6.6）在节流时立即把整个组实体出队，组内正在内核态执行、可能持有锁的任务也随之停下，直到下一个周期——这会导致其他组的任务在锁上长时间等待，甚至在 PREEMPT_RT 下造成严重的优先级反转。新方案让任务在内核态继续运行，直到安全点（返回用户态，此时不持有内核锁）才停下。`task_struct` 中为此新增了 `sched_throttle_work`、`throttle_node`、`throttled` 三个字段（`include/linux/sched.h:883-887`，依赖 `CONFIG_CFS_BANDWIDTH`）。
+**为什么要等到返回用户态**？旧方案（如 v6.6）在节流时立即把整个组实体出队，组内正在内核态执行、可能持有锁的任务也随之停下，直到下一个周期——这会导致其他组的任务在锁上长时间等待，甚至在 PREEMPT_RT 下造成严重的优先级反转。新方案让任务在内核态继续运行，直到安全点（返回用户态，此时不持有内核锁）才停下。`task_struct` 中为此新增了 `sched_throttle_work`、`throttle_node`、`throttled` 三个字段（[`include/linux/sched.h:883-887`](../../linux/include/linux/sched.h#L883-L887)，依赖 `CONFIG_CFS_BANDWIDTH`）。
 
 ### 补充与解除节流
 
+[`kernel/sched/fair.c:6401-6439`](../../linux/kernel/sched/fair.c#L6401-L6439)（v6.18.60，节选）
+
 ```c
-// kernel/sched/fair.c:6401-6439（v6.18.60，节选）
 static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, unsigned long flags)
 {
 	int throttled;
@@ -349,10 +359,11 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun, u
 	}
 ```
 
-每个周期到期时，`__refill_cfs_bandwidth_runtime()`（`fair.c:5803-5819`）把全局池补充 `quota`，并以 `quota + burst` 为上限；然后 `distribute_cfs_runtime()` 把运行时分给被节流的 `cfs_rq`，对它们调用 `unthrottle_cfs_rq()`。后者通过 `tg_unthrottle_up()` 自下而上递减 `throttle_count`，并把 limbo 链表上的任务重新入队：
+每个周期到期时，`__refill_cfs_bandwidth_runtime()`（[`kernel/sched/fair.c:5803-5819`](../../linux/kernel/sched/fair.c#L5803-L5819)）把全局池补充 `quota`，并以 `quota + burst` 为上限；然后 `distribute_cfs_runtime()` 把运行时分给被节流的 `cfs_rq`，对它们调用 `unthrottle_cfs_rq()`。后者通过 `tg_unthrottle_up()` 自下而上递减 `throttle_count`，并把 limbo 链表上的任务重新入队：
+
+[`kernel/sched/fair.c:6081-6086`](../../linux/kernel/sched/fair.c#L6081-L6086)（v6.18.60）
 
 ```c
-// kernel/sched/fair.c:6081-6086（v6.18.60）
 	/* Re-enqueue the tasks that have been throttled at this level. */
 	list_for_each_entry_safe(p, tmp, &cfs_rq->throttled_limbo_list, throttle_node) {
 		list_del_init(&p->throttle_node);
@@ -386,7 +397,7 @@ sequenceDiagram
 
 ## 关键细节 / 设计考量
 
-- **权重只在同层比较**。组的 `cpu.weight` 决定它与**兄弟**（同一父组下的其他组和任务）之间的比例，组内任务再分这一份。例如根组下有 10 个 nice 0 任务和两个权重 100 的子组，每个子组得到 `1024 / (10×1024 + 2×1024) ≈ 8.3%`——这正是 `sched_init()` 注释（`core.c:8723-8736`）中的例子。
+- **权重只在同层比较**。组的 `cpu.weight` 决定它与**兄弟**（同一父组下的其他组和任务）之间的比例，组内任务再分这一份。例如根组下有 10 个 nice 0 任务和两个权重 100 的子组，每个子组得到 `1024 / (10×1024 + 2×1024) ≈ 8.3%`——这正是 `sched_init()` 注释（[`kernel/sched/core.c:8723-8736`](../../linux/kernel/sched/core.c#L8723-L8736)）中的例子。
 - **带宽与权重的关系**。权重是"软"的比例保证，只在争用时生效；带宽是"硬"上限，即使系统空闲也会节流。容器平台常用后者实现 CPU 限额（如 Kubernetes 的 CPU limit），但配额过小、周期过长会导致明显的尾延迟，`cpu.max.burst` 正是为缓解这一问题而引入。
 - **NO_HZ_FULL 与带宽**。CPU 上只有一个受带宽限制的任务时不能停 tick（3.5 节 `sched_can_stop_tick()` 中的 `__need_bw_check()`），否则无法及时扣减配额。
 - **负载均衡与节流**。3.9 节的 `can_migrate_task()` 不会把任务迁到目标 CPU 上处于节流层级的组中（`lb_throttled_hierarchy()`）。
@@ -442,4 +453,4 @@ sequenceDiagram
 - `linux/Documentation/scheduler/sched-bwc.rst`：CFS 带宽控制的说明（含 burst）。
 - `linux/Documentation/admin-guide/cgroup-v2.rst`："CPU" 一节，`cpu.weight`、`cpu.max`、`cpu.stat` 等接口。
 - `linux/Documentation/scheduler/sched-design-CFS.rst`："Group scheduler extensions to CFS" 一节。
-- `linux/kernel/sched/fair.c:4021-4093`：组权重近似公式的推导注释。
+- [`kernel/sched/fair.c:4021-4093`](../../linux/kernel/sched/fair.c#L4021-L4093)：组权重近似公式的推导注释。

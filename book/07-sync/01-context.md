@@ -1,6 +1,6 @@
 # 7.1 并发来源与执行上下文
 
-> **本节源码**：`include/linux/preempt.h`、`arch/x86/include/asm/preempt.h`、`arch/x86/include/asm/irqflags.h`、`include/linux/bottom_half.h`、`kernel/softirq.c`、`include/linux/kernel.h`、`arch/x86/include/asm/percpu.h`、`include/linux/local_lock_internal.h`
+> **本节源码**：[`include/linux/preempt.h`](../../linux/include/linux/preempt.h)、[`arch/x86/include/asm/preempt.h`](../../linux/arch/x86/include/asm/preempt.h)、[`arch/x86/include/asm/irqflags.h`](../../linux/arch/x86/include/asm/irqflags.h)、[`include/linux/bottom_half.h`](../../linux/include/linux/bottom_half.h)、[`kernel/softirq.c`](../../linux/kernel/softirq.c)、[`include/linux/kernel.h`](../../linux/include/linux/kernel.h)、[`arch/x86/include/asm/percpu.h`](../../linux/arch/x86/include/asm/percpu.h)、[`include/linux/local_lock_internal.h`](../../linux/include/linux/local_lock_internal.h)
 > **关键函数**：`preempt_disable()`、`preempt_enable()`、`local_irq_save()`、`local_bh_disable()`、`__local_bh_enable_ip()`、`might_sleep()`、`this_cpu_add()`、`local_lock()`
 > **前置知识**：3.2 主调度函数与上下文切换、3.5 调度时钟与抢占模型
 
@@ -32,8 +32,9 @@
 
 `preempt_count` 被划分为几个计数域：
 
+[`include/linux/preempt.h:14-55`](../../linux/include/linux/preempt.h#L14-L55)（v6.18.60）
+
 ```c
-// include/linux/preempt.h:14-55（v6.18.60）
 /*
  * We put the hardirq and softirq counter into the preemption
  * counter. The bitmask has the following meaning:
@@ -78,10 +79,11 @@
 #define SOFTIRQ_DISABLE_OFFSET	(2 * SOFTIRQ_OFFSET)
 ```
 
-x86_64 上 `preempt_count` 不在 `thread_info` 里，而是一个 per-CPU 变量 `__preempt_count`（定义在 `arch/x86/kernel/cpu/common.c:2206`），读取时屏蔽掉最高位的 `PREEMPT_NEED_RESCHED`：
+x86_64 上 `preempt_count` 不在 `thread_info` 里，而是一个 per-CPU 变量 `__preempt_count`（定义在 [`arch/x86/kernel/cpu/common.c:2206`](../../linux/arch/x86/kernel/cpu/common.c#L2206)），读取时屏蔽掉最高位的 `PREEMPT_NEED_RESCHED`：
+
+[`arch/x86/include/asm/preempt.h:10-28`](../../linux/arch/x86/include/asm/preempt.h#L10-L28)（v6.18.60）
 
 ```c
-// arch/x86/include/asm/preempt.h:10-28（v6.18.60）
 DECLARE_PER_CPU_CACHE_HOT(int, __preempt_count);
 
 /* We use the MSB mostly because its available */
@@ -118,15 +120,16 @@ static __always_inline int preempt_count(void)
 几个值得注意的设计：
 
 - **软中断域用了两种步长**。`SOFTIRQ_OFFSET`（`1 << 8`）表示"正在执行软中断处理函数"，`SOFTIRQ_DISABLE_OFFSET`（`2 << 8`）表示"禁用了软中断"。这样只需检查第 8 位就能区分"在软中断里"和"只是关了软中断"——这正是 `in_serving_softirq()` 与 `in_softirq()` 的区别。
-- **抢占计数为 per-CPU 而非 per-task**。上下文切换时并不保存 / 恢复它，而是依赖一个不变式：任何任务在切换点上的 `preempt_count` 都等于 `2 * PREEMPT_DISABLE_OFFSET`（`schedule()` 自身关一次抢占，持有的 `rq->lock` 再关一次），见 `include/linux/preempt.h:67-76` 的 `FORK_PREEMPT_COUNT` 注释。新任务从 `finish_task_switch()` 开始执行时会把它恢复为 0（3.2 节）。
+- **抢占计数为 per-CPU 而非 per-task**。上下文切换时并不保存 / 恢复它，而是依赖一个不变式：任何任务在切换点上的 `preempt_count` 都等于 `2 * PREEMPT_DISABLE_OFFSET`（`schedule()` 自身关一次抢占，持有的 `rq->lock` 再关一次），见 [`include/linux/preempt.h:67-76`](../../linux/include/linux/preempt.h#L67-L76) 的 `FORK_PREEMPT_COUNT` 注释。新任务从 `finish_task_switch()` 开始执行时会把它恢复为 0（3.2 节）。
 - **NEED_RESCHED 折叠进最高位**，让 `preempt_enable()` 只需一条 `decl` 指令就能同时判断"计数归零"和"需要调度"（3.2 节"x86 上的 preempt_count 小技巧"）。
 
 ### 上下文判断宏
 
 基于这些域，内核定义了一组判断当前上下文的宏：
 
+[`include/linux/preempt.h:108-133`](../../linux/include/linux/preempt.h#L108-L133)（v6.18.60）
+
 ```c
-// include/linux/preempt.h:108-133（v6.18.60）
 #define nmi_count()	(preempt_count() & NMI_MASK)
 #define hardirq_count()	(preempt_count() & HARDIRQ_MASK)
 #ifdef CONFIG_PREEMPT_RT
@@ -165,7 +168,7 @@ static __always_inline int preempt_count(void)
 | `in_task()` | 不在 NMI、硬中断、软中断处理中——即进程上下文 |
 | `in_atomic()` | `preempt_count() != 0` |
 
-`in_atomic()`（`include/linux/preempt.h:186`）的注释特意警告：它**不能**用来判断能否睡眠。在 `CONFIG_PREEMPT_COUNT=n` 的内核上，自旋锁不会修改 `preempt_count`，`in_atomic()` 会给出错误答案；即使在本书配置下，它也看不到"关中断但未关抢占"的状态。驱动代码不应依赖它。
+`in_atomic()`（[`include/linux/preempt.h:186`](../../linux/include/linux/preempt.h#L186)）的注释特意警告：它**不能**用来判断能否睡眠。在 `CONFIG_PREEMPT_COUNT=n` 的内核上，自旋锁不会修改 `preempt_count`，`in_atomic()` 会给出错误答案；即使在本书配置下，它也看不到"关中断但未关抢占"的状态。驱动代码不应依赖它。
 
 ## 主流程分析
 
@@ -173,8 +176,9 @@ static __always_inline int preempt_count(void)
 
 在 `CONFIG_PREEMPT_COUNT=y` 且 `CONFIG_PREEMPTION=y`（本书配置）下：
 
+[`include/linux/preempt.h:211-235`](../../linux/include/linux/preempt.h#L211-L235)（v6.18.60）
+
 ```c
-// include/linux/preempt.h:211-235（v6.18.60）
 #ifdef CONFIG_PREEMPT_COUNT
 
 #define preempt_disable() \
@@ -202,13 +206,14 @@ do { \
 } while (0)
 ```
 
-- `preempt_disable()` 在加一**之后**放一个 `barrier()`；`preempt_enable()` 在减一**之前**放一个 `barrier()`。`barrier()` 是编译器屏障（`include/linux/compiler.h:85`，`asm volatile("" ::: "memory")`），防止编译器把临界区内的内存访问挪到计数修改之外。关抢占只影响本 CPU，因此不需要 CPU 内存屏障。
-- `preempt_enable()` 在计数归零且有重调度请求时调用 `__preempt_schedule()`，这是内核抢占的主要触发点之一。`preempt_enable_no_resched()` 则跳过这一检查，只在调度器内部等明确知道马上会调度的场合使用；它对模块不可见（`include/linux/preempt.h:299-307` 用 `#undef` 屏蔽）。
+- `preempt_disable()` 在加一**之后**放一个 `barrier()`；`preempt_enable()` 在减一**之前**放一个 `barrier()`。`barrier()` 是编译器屏障（[`include/linux/compiler.h:85`](../../linux/include/linux/compiler.h#L85)，`asm volatile("" ::: "memory")`），防止编译器把临界区内的内存访问挪到计数修改之外。关抢占只影响本 CPU，因此不需要 CPU 内存屏障。
+- `preempt_enable()` 在计数归零且有重调度请求时调用 `__preempt_schedule()`，这是内核抢占的主要触发点之一。`preempt_enable_no_resched()` 则跳过这一检查，只在调度器内部等明确知道马上会调度的场合使用；它对模块不可见（[`include/linux/preempt.h:299-307`](../../linux/include/linux/preempt.h#L299-L307) 用 `#undef` 屏蔽）。
 
 x86 上的加减直接编译为一条带 `%gs` 段前缀的内存指令：
 
+[`arch/x86/include/asm/preempt.h:78-98`](../../linux/arch/x86/include/asm/preempt.h#L78-L98)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/preempt.h:78-98（v6.18.60）
 static __always_inline void __preempt_count_add(int val)
 {
 	raw_cpu_add_4(__preempt_count, val);
@@ -240,8 +245,9 @@ static __always_inline bool __preempt_count_dec_and_test(void)
 
 关中断用于保护与中断处理函数共享的数据。通用层的 `local_irq_save(flags)` 最终调用 `arch_local_irq_save()`。不考虑半虚拟化时，x86 的实现非常直接：
 
+[`arch/x86/include/asm/irqflags.h:17-75`](../../linux/arch/x86/include/asm/irqflags.h#L17-L75)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/irqflags.h:17-75（v6.18.60）
 extern __always_inline unsigned long native_save_fl(void)
 {
 	unsigned long flags;
@@ -305,10 +311,11 @@ static __always_inline void native_local_irq_restore(unsigned long flags)
 
 `save` 用 `pushf; pop` 读出 `RFLAGS`，再执行 `cli`；`restore` 只在原先 `IF` 位为 1 时才执行 `sti`。保存 / 恢复而不是简单的"关 / 开"，使得关中断可以安全嵌套：内层恢复时不会意外打开外层关掉的中断。
 
-本书配置开启了 `CONFIG_PARAVIRT_XXL`，因此实际使用的是 `arch/x86/include/asm/paravirt.h:658-681` 中的版本：
+本书配置开启了 `CONFIG_PARAVIRT_XXL`，因此实际使用的是 [`arch/x86/include/asm/paravirt.h:658-681`](../../linux/arch/x86/include/asm/paravirt.h#L658-L681) 中的版本：
+
+[`arch/x86/include/asm/paravirt.h:658-681`](../../linux/arch/x86/include/asm/paravirt.h#L658-L681)（v6.18.60）
 
 ```c
-// arch/x86/include/asm/paravirt.h:658-681（v6.18.60）
 static __always_inline unsigned long arch_local_save_flags(void)
 {
 	return PVOP_ALT_CALLEE0(unsigned long, irq.save_fl, "pushf; pop %%rax;",
@@ -337,14 +344,15 @@ static __always_inline unsigned long arch_local_irq_save(void)
 
 `PVOP_ALT_*` 在启动时由 alternatives 机制打补丁：裸机和 KVM 客户机上被替换为内联的 `pushf; pop %rax` 与 `cli`，只有 Xen PV 客户机才保留对超级调用的间接调用。所以开启 PARAVIRT 不会给常见场景带来额外开销。
 
-注意 `cli` 只屏蔽**本 CPU** 的可屏蔽中断，NMI 和其他 CPU 不受影响。关中断期间也不会发生抢占（抢占需要中断或显式调度点触发），但 `preempt_count` 并不反映这一状态，判断是否可抢占需看 `preemptible()`（`include/linux/preempt.h:227`），它同时检查 `irqs_disabled()`。
+注意 `cli` 只屏蔽**本 CPU** 的可屏蔽中断，NMI 和其他 CPU 不受影响。关中断期间也不会发生抢占（抢占需要中断或显式调度点触发），但 `preempt_count` 并不反映这一状态，判断是否可抢占需看 `preemptible()`（[`include/linux/preempt.h:227`](../../linux/include/linux/preempt.h#L227)），它同时检查 `irqs_disabled()`。
 
 ### 关软中断：local_bh_disable / local_bh_enable
 
 "bottom half"（BH）是软中断在 API 中的旧称。关软中断不需要碰硬件，只需增加 `preempt_count` 的软中断域：
 
+[`include/linux/bottom_half.h:8-34`](../../linux/include/linux/bottom_half.h#L8-L34)（v6.18.60）
+
 ```c
-// include/linux/bottom_half.h:8-34（v6.18.60）
 #if defined(CONFIG_PREEMPT_RT) || defined(CONFIG_TRACE_IRQFLAGS)
 extern void __local_bh_disable_ip(unsigned long ip, unsigned int cnt);
 #else
@@ -378,8 +386,9 @@ static inline void local_bh_enable(void)
 
 重新打开软中断要复杂一些，因为在关闭期间可能有软中断被挂起，必须在打开时补执行：
 
+[`kernel/softirq.c:427-458`](../../linux/kernel/softirq.c#L427-L458)（v6.18.60）
+
 ```c
-// kernel/softirq.c:427-458（v6.18.60）
 void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
 {
 	WARN_ON_ONCE(in_hardirq());
@@ -416,7 +425,7 @@ void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
 
 这里先减去 `cnt - 1` 而非 `cnt`，让 `preempt_count` 保持至少为 1（抢占仍关闭），再检查是否有挂起的软中断并调用 `do_softirq()` 在软中断栈上执行它们，最后才把剩下的 1 减掉并检查重调度。如果在 `do_softirq()` 之前就允许抢占，任务可能被换走，挂起的软中断就要等到下一次中断退出才能执行。
 
-> **PREEMPT_RT 下的差异**：`kernel/softirq.c:156` 起的另一套实现中，软中断禁用计数改记在 `current->softirq_disable_cnt`，并以一个 per-CPU 的 `local_lock` 串行化，`local_bh_disable()` 不再关抢占。本书配置未开启 `CONFIG_PREEMPT_RT`。
+> **PREEMPT_RT 下的差异**：[`kernel/softirq.c:156`](../../linux/kernel/softirq.c#L156) 起的另一套实现中，软中断禁用计数改记在 `current->softirq_disable_cnt`，并以一个 per-CPU 的 `local_lock` 串行化，`local_bh_disable()` 不再关抢占。本书配置未开启 `CONFIG_PREEMPT_RT`。
 
 ### 不能睡眠的上下文：might_sleep
 
@@ -424,8 +433,9 @@ void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
 
 可能睡眠的函数开头通常会写一句 `might_sleep()`：
 
+[`include/linux/kernel.h:75-101`](../../linux/include/linux/kernel.h#L75-L101)（v6.18.60）
+
 ```c
-// include/linux/kernel.h:75-101（v6.18.60）
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 extern void __might_resched(const char *file, int line, unsigned int offsets);
 extern void __might_sleep(const char *file, int line);
@@ -455,7 +465,7 @@ extern void __cant_migrate(const char *file, int line);
 	do { __cant_sleep(__FILE__, __LINE__, 0); } while (0)
 ```
 
-只有开启 `CONFIG_DEBUG_ATOMIC_SLEEP` 时 `__might_sleep()` 才会检查 `preempt_count()` 与 `irqs_disabled()` 并打印 "BUG: sleeping function called from invalid context"。本书配置未开启该选项，此时 `might_sleep()` 退化为 `might_resched()`（`include/linux/kernel.h:136`）——在 `PREEMPT_DYNAMIC` 下它是一个 static call，按当前抢占模型决定是否调用 `__cond_resched()`。换言之，在默认配置下错误的睡眠不会被提前报告，开发调试时应打开 `CONFIG_DEBUG_ATOMIC_SLEEP`。
+只有开启 `CONFIG_DEBUG_ATOMIC_SLEEP` 时 `__might_sleep()` 才会检查 `preempt_count()` 与 `irqs_disabled()` 并打印 "BUG: sleeping function called from invalid context"。本书配置未开启该选项，此时 `might_sleep()` 退化为 `might_resched()`（[`include/linux/kernel.h:136`](../../linux/include/linux/kernel.h#L136)）——在 `PREEMPT_DYNAMIC` 下它是一个 static call，按当前抢占模型决定是否调用 `__cond_resched()`。换言之，在默认配置下错误的睡眠不会被提前报告，开发调试时应打开 `CONFIG_DEBUG_ATOMIC_SLEEP`。
 
 ## per-CPU 数据：用"不共享"代替"加锁"
 
@@ -465,8 +475,9 @@ extern void __cant_migrate(const char *file, int line);
 
 访问 per-CPU 变量需要先拿到"当前 CPU"，再读改写对应的副本。如果这两步之间发生抢占和迁移，就会改到别的 CPU 的副本上。传统写法是 `get_cpu_var()` / `put_cpu_var()`，即先关抢占再访问。x86 提供了更好的办法：利用 `%gs` 段寄存器指向当前 CPU 的 per-CPU 区域，把"定位 + 读改写"合并为一条指令：
 
+[`arch/x86/include/asm/percpu.h:218-240`](../../linux/arch/x86/include/asm/percpu.h#L218-L240)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/percpu.h:218-240（v6.18.60）
 /*
  * Generate a per-CPU add to memory instruction and optimize code
  * if one is added or subtracted.
@@ -492,7 +503,7 @@ do {									\
 } while (0)
 ```
 
-`this_cpu_add(pcp, val)` 最终展开为 `percpu_add_op(..., volatile, ...)`（`arch/x86/include/asm/percpu.h:540`），生成一条 `add`/`inc`/`dec` 加 `%gs:` 前缀的指令。由于是单条指令，它对本 CPU 的抢占和中断天然原子，**无需关抢占、无需 `lock` 前缀**。这类操作族包括 `this_cpu_read/write/add/inc/xchg/cmpxchg`，SLUB 快速路径用的 `this_cpu_try_cmpxchg128()` 也属于此类（4.5 节）。
+`this_cpu_add(pcp, val)` 最终展开为 `percpu_add_op(..., volatile, ...)`（[`arch/x86/include/asm/percpu.h:540`](../../linux/arch/x86/include/asm/percpu.h#L540)），生成一条 `add`/`inc`/`dec` 加 `%gs:` 前缀的指令。由于是单条指令，它对本 CPU 的抢占和中断天然原子，**无需关抢占、无需 `lock` 前缀**。这类操作族包括 `this_cpu_read/write/add/inc/xchg/cmpxchg`，SLUB 快速路径用的 `this_cpu_try_cmpxchg128()` 也属于此类（4.5 节）。
 
 与之相对，`raw_cpu_*()` / `__this_cpu_*()` 不保证对抢占安全，调用者须自行关抢占；在 x86 上它们与 `this_cpu_*()` 生成的指令几乎相同，区别只在 `volatile` 限定和调试检查。
 
@@ -500,8 +511,9 @@ do {									\
 
 当 per-CPU 数据的更新涉及多个字段、无法用单条指令完成时，就需要关抢占或关中断。但直接写 `preempt_disable()` 有两个问题：lockdep 无法知道它保护的是哪份数据；在 PREEMPT_RT 下关抢占区间不能包含会睡眠的锁。`local_lock_t`（v5.8 引入）为这类"per-CPU 临界区"提供了带名字的锁对象：
 
+[`include/linux/local_lock_internal.h:9-16`](../../linux/include/linux/local_lock_internal.h#L9-L16)（v6.18.60）
+
 ```c
-// include/linux/local_lock_internal.h:9-16（v6.18.60）
 #ifndef CONFIG_PREEMPT_RT
 
 typedef struct {
@@ -514,8 +526,9 @@ typedef struct {
 
 非 RT 内核且未开启 `CONFIG_DEBUG_LOCK_ALLOC` 时，`local_lock_t` 是一个空结构体，加锁操作就是关抢占或关中断：
 
+[`include/linux/local_lock_internal.h:116-132`](../../linux/include/linux/local_lock_internal.h#L116-L132)（v6.18.60）
+
 ```c
-// include/linux/local_lock_internal.h:116-132（v6.18.60）
 #define __local_lock(lock)					\
 	do {							\
 		preempt_disable();				\
@@ -535,7 +548,7 @@ typedef struct {
 	} while (0)
 ```
 
-所以在本书配置下 `local_lock()` 与 `preempt_disable()` 的生成代码完全相同，它的价值在于语义：一方面开启 lockdep 后能检查 per-CPU 锁的使用顺序；另一方面 PREEMPT_RT 内核会把它替换为真正的 per-CPU `spinlock_t`（基于 rt_mutex，可睡眠），只禁止迁移而不关抢占。`mm/swap.c:55` 的 folio 批处理（`cpu_fbatches`）、`mm/memcontrol.c` 的 per-CPU 计费缓存、`mm/slub.c` 的 per-CPU 结构（`mm/slub.c:433`）都使用了 `local_lock` 或 `local_trylock`。
+所以在本书配置下 `local_lock()` 与 `preempt_disable()` 的生成代码完全相同，它的价值在于语义：一方面开启 lockdep 后能检查 per-CPU 锁的使用顺序；另一方面 PREEMPT_RT 内核会把它替换为真正的 per-CPU `spinlock_t`（基于 rt_mutex，可睡眠），只禁止迁移而不关抢占。[`mm/swap.c:55`](../../linux/mm/swap.c#L55) 的 folio 批处理（`cpu_fbatches`）、`mm/memcontrol.c` 的 per-CPU 计费缓存、`mm/slub.c` 的 per-CPU 结构（[`mm/slub.c:433`](../../linux/mm/slub.c#L433)）都使用了 `local_lock` 或 `local_trylock`。
 
 ## 关键细节 / 设计考量
 
@@ -556,7 +569,7 @@ typedef struct {
 
 ### 为什么要区分 hardirq 与 softirq 计数
 
-如果只有一个"中断嵌套"计数，`local_bh_disable()` 之后 `in_interrupt()` 会为真，许多"在中断中则走原子路径"的代码会做出错误判断。`preempt_count` 把禁用软中断与执行软中断分开（步长 2 与步长 1），再把硬中断、NMI 各放一个域，使得 `in_serving_softirq()`、`in_hardirq()`、`in_nmi()` 都能精确回答。软中断处理入口 `softirq_handle_begin()`（`kernel/softirq.c:461-464`）只加 `SOFTIRQ_OFFSET`，与禁用操作互不干扰。
+如果只有一个"中断嵌套"计数，`local_bh_disable()` 之后 `in_interrupt()` 会为真，许多"在中断中则走原子路径"的代码会做出错误判断。`preempt_count` 把禁用软中断与执行软中断分开（步长 2 与步长 1），再把硬中断、NMI 各放一个域，使得 `in_serving_softirq()`、`in_hardirq()`、`in_nmi()` 都能精确回答。软中断处理入口 `softirq_handle_begin()`（[`kernel/softirq.c:461-464`](../../linux/kernel/softirq.c#L461-L464)）只加 `SOFTIRQ_OFFSET`，与禁用操作互不干扰。
 
 ### NMI 中能做什么
 

@@ -1,6 +1,6 @@
 # 4.9 写时复制与反向映射
 
-> **本节源码**：`kernel/fork.c`、`mm/mmap.c`、`mm/memory.c`、`mm/rmap.c`、`mm/internal.h`、`include/linux/rmap.h`
+> **本节源码**：[`kernel/fork.c`](../../linux/kernel/fork.c)、[`mm/mmap.c`](../../linux/mm/mmap.c)、[`mm/memory.c`](../../linux/mm/memory.c)、[`mm/rmap.c`](../../linux/mm/rmap.c)、[`mm/internal.h`](../../linux/mm/internal.h)、[`include/linux/rmap.h`](../../linux/include/linux/rmap.h)
 > **关键函数**：`dup_mmap()`、`copy_page_range()`、`copy_present_ptes()`、`__copy_present_ptes()`、`do_wp_page()`、`wp_can_reuse_anon_folio()`、`wp_page_copy()`、`__anon_vma_prepare()`、`anon_vma_fork()`、`__folio_set_anon()`、`rmap_walk()`、`vma_address()`
 > **前置知识**：4.7 进程地址空间、4.8 页表与缺页异常
 
@@ -38,8 +38,9 @@ copy_process()                                   kernel/fork.c
 
 ### `dup_mmap()`
 
+[`mm/mmap.c:1745-1797`](../../linux/mm/mmap.c#L1745-L1797)（v6.18.60，节选）
+
 ```c
-// mm/mmap.c:1745-1797（v6.18.60，节选）
 	retval = __mt_dup(&oldmm->mm_mt, &mm->mm_mt, GFP_KERNEL);
 	...
 	for_each_vma(vmi, mpnt) {
@@ -74,12 +75,13 @@ copy_process()                                   kernel/fork.c
 
 父进程的 `mmap_lock` 写锁在整个复制期间持有。`__mt_dup()` 一次性复制整棵 maple tree 的结构（v6.8 引入的优化），之后逐个替换其中的 VMA 指针，无需再为每次插入分配树节点。`MADV_DONTFORK` 设置的 `VM_DONTCOPY` 区域不会出现在子进程中；`MADV_WIPEONFORK` 设置的区域在子进程中变为全新的零页映射。
 
-每个 VMA 复制完成后调用 `copy_page_range()`（`mm/mmap.c:1834`）。
+每个 VMA 复制完成后调用 `copy_page_range()`（[`mm/mmap.c:1834`](../../linux/mm/mmap.c#L1834)）。
 
 ### 哪些 VMA 需要复制页表
 
+[`mm/memory.c:1479-1502`](../../linux/mm/memory.c#L1479-L1502)（v6.18.60）
+
 ```c
-// mm/memory.c:1479-1502（v6.18.60）
 static bool
 vma_needs_copy(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 {
@@ -110,8 +112,9 @@ vma_needs_copy(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 
 ### 复制存在的 PTE
 
+[`mm/memory.c:1097-1117`](../../linux/mm/memory.c#L1097-L1117)（v6.18.60）
+
 ```c
-// mm/memory.c:1097-1117（v6.18.60）
 static __always_inline void __copy_present_ptes(struct vm_area_struct *dst_vma,
 		struct vm_area_struct *src_vma, pte_t *dst_pte, pte_t *src_pte,
 		pte_t pte, unsigned long addr, int nr)
@@ -140,8 +143,9 @@ static __always_inline void __copy_present_ptes(struct vm_area_struct *dst_vma,
 
 修改父进程 PTE 后需要刷新 TLB，这在 `dup_mmap()` 结束时对整个父 mm 执行一次 `flush_tlb_mm()`。
 
+[`mm/memory.c:1173-1198`](../../linux/mm/memory.c#L1173-L1198)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:1173-1198（v6.18.60，节选）
 	folio_get(folio);
 	if (folio_test_anon(folio)) {
 		/*
@@ -170,14 +174,15 @@ copy_pte:
 
 每复制一个 PTE，folio 的引用计数和映射计数（`_mapcount`）各加一。对匿名页，`folio_try_dup_anon_rmap_pte()` 还会清除 `PageAnonExclusive` 标志（表示该页不再被单一进程独占）。但有一个例外：如果页可能被**长期固定**（GUP pin，常见于 RDMA、VFIO 等 DMA 场景），共享它会导致父进程日后 COW 时换到新页，而设备仍在向旧页 DMA，造成数据"消失"。因此对可能被固定的页，fork 时立即为子进程复制一份（`copy_present_page()`）。这一修正（"COW 与 GUP 一致性"）由 David Hildenbrand 在 v5.19 前后完成。
 
-对于大 folio，`copy_present_ptes()` 会用 `folio_pte_batch_flags()` 一次批量处理映射同一 folio 的连续多个 PTE（`mm/memory.c:1146-1171`）。
+对于大 folio，`copy_present_ptes()` 会用 `folio_pte_batch_flags()` 一次批量处理映射同一 folio 的连续多个 PTE（[`mm/memory.c:1146-1171`](../../linux/mm/memory.c#L1146-L1171)）。
 
 ## COW 缺页：`do_wp_page()`
 
 当进程写入一个只读 PTE，而 VMA 允许写时，`handle_pte_fault()` 调用 `do_wp_page()`（4.8 节）：
 
+[`mm/memory.c:4063-4156`](../../linux/mm/memory.c#L4063-L4156)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:4063-4156（v6.18.60，节选）
 static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	__releases(vmf->ptl)
 {
@@ -248,8 +253,9 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 
 `PageAnonExclusive` 标志记录"该匿名页确定只被一个进程映射"：新分配的匿名页带此标志（`RMAP_EXCLUSIVE`），fork 共享时被清除。带此标志的页直接复用。没有此标志时，`wp_can_reuse_anon_folio()` 通过引用计数判断：
 
+[`mm/memory.c:4000-4039`](../../linux/mm/memory.c#L4000-L4039)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:4000-4039（v6.18.60，节选）
 static bool wp_can_reuse_anon_folio(struct folio *folio,
 				    struct vm_area_struct *vma)
 {
@@ -291,8 +297,9 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
 
 ### 复制：`wp_page_copy()`
 
+[`mm/memory.c:3672-3795`](../../linux/mm/memory.c#L3672-L3795)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:3672-3795（v6.18.60，节选）
 static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 {
 	...
@@ -387,8 +394,9 @@ sequenceDiagram
 
 Linux 采用**基于对象的反向映射（Object-based Reverse Mapping）**：folio 只记录它属于哪个"对象"（`folio->mapping`）以及在对象中的偏移（`folio->index`）；对象记录所有映射它的 VMA；对每个 VMA，用偏移算出虚拟地址，再查页表找到 PTE。
 
+[`mm/internal.h:1078-1096`](../../linux/mm/internal.h#L1078-L1096)（v6.18.60）
+
 ```c
-// mm/internal.h:1078-1096（v6.18.60）
 static inline unsigned long vma_address(const struct vm_area_struct *vma,
 		pgoff_t pgoff, unsigned long nr_pages)
 {
@@ -416,8 +424,9 @@ static inline unsigned long vma_address(const struct vm_area_struct *vma,
 
 文件页的 `folio->mapping` 指向文件的 `address_space`，`folio->index` 是页在文件中的偏移。每个映射该文件的 VMA 通过 `vma->shared.rb` 挂在 `mapping->i_mmap` 这棵**区间树（Interval Tree）** 上，键为 VMA 覆盖的文件页偏移范围 `[vm_pgoff, vm_pgoff + vma_pages)`。查找"哪些 VMA 映射了第 N 页"就是一次区间树的重叠查询：
 
+[`mm/rmap.c:2935-2950`](../../linux/mm/rmap.c#L2935-L2950)（v6.18.60）
+
 ```c
-// mm/rmap.c:2935-2950（v6.18.60）
 lookup:
 	vma_interval_tree_foreach(vma, &mapping->i_mmap,
 			pgoff_start, pgoff_end) {
@@ -442,8 +451,9 @@ lookup:
 
 匿名页没有文件，`folio->mapping` 指向一个 `anon_vma` 结构，并把最低位设为 1（`FOLIO_MAPPING_ANON`）以区别于 `address_space`：
 
+[`mm/rmap.c:1366-1388`](../../linux/mm/rmap.c#L1366-L1388)（v6.18.60）
+
 ```c
-// mm/rmap.c:1366-1388（v6.18.60）
 static void __folio_set_anon(struct folio *folio, struct vm_area_struct *vma,
 			     unsigned long address, bool exclusive)
 {
@@ -476,8 +486,9 @@ static void __folio_set_anon(struct folio *folio, struct vm_area_struct *vma,
 
 v2.6.34 引入的方案是**为每个进程的每个 VMA 都创建自己的 anon_vma，并用 `anon_vma_chain`（AVC）把 VMA 与它可能涉及的所有 anon_vma 连接起来**：
 
+[`include/linux/rmap.h:32-92`](../../linux/include/linux/rmap.h#L32-L92)（v6.18.60，节选，删去部分注释）
+
 ```c
-// include/linux/rmap.h:32-92（v6.18.60，节选，删去部分注释）
 struct anon_vma {
 	struct anon_vma *root;		/* Root of this anon_vma tree */
 	struct rw_semaphore rwsem;	/* W: modification, R: walking the list */
@@ -515,8 +526,9 @@ struct anon_vma_chain {
 
 第一次写缺页时，`vmf_anon_prepare()` → `__anon_vma_prepare()` 为 VMA 分配 anon_vma：
 
+[`mm/rmap.c:184-223`](../../linux/mm/rmap.c#L184-L223)（v6.18.60，节选）
+
 ```c
-// mm/rmap.c:184-223（v6.18.60，节选）
 int __anon_vma_prepare(struct vm_area_struct *vma)
 {
 	...
@@ -558,8 +570,9 @@ int __anon_vma_prepare(struct vm_area_struct *vma)
 
 ### fork 时的 anon_vma
 
+[`mm/rmap.c:338-393`](../../linux/mm/rmap.c#L338-L393)（v6.18.60，节选）
+
 ```c
-// mm/rmap.c:338-393（v6.18.60，节选）
 int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 {
 	...
@@ -607,7 +620,7 @@ int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 1. **`anon_vma_clone()`**：为子 VMA 复制父 VMA 的所有 AVC，即把子 VMA 加入父 VMA 关联的每个 anon_vma 的区间树。这样，父进程的旧页（`mapping` 指向父 anon_vma）在反向映射时能找到子 VMA。
 2. **新建子进程自己的 anon_vma**：作为父 anon_vma 的子节点，子进程 COW 产生的新页挂在这里。由于子 VMA 之外没有任何 VMA 关联到它，对这些新页做反向映射时只需扫描子 VMA 本身。
 
-`anon_vma_clone()` 还有一个优化：若发现某个已有的 anon_vma 既没有活跃 VMA（`num_active_vmas == 0`）又只有不超过一个子节点（`num_children < 2`，`mm/rmap.c:312-313`），就直接复用它，而不分配新的。这防止了反复 fork 的进程（如 shell 循环）造成 anon_vma 链无限增长。
+`anon_vma_clone()` 还有一个优化：若发现某个已有的 anon_vma 既没有活跃 VMA（`num_active_vmas == 0`）又只有不超过一个子节点（`num_children < 2`，[`mm/rmap.c:312-313`](../../linux/mm/rmap.c#L312-L313)），就直接复用它，而不分配新的。这防止了反复 fork 的进程（如 shell 循环）造成 anon_vma 链无限增长。
 
 以进程 P fork 出 C1、C2 为例：
 
@@ -632,8 +645,9 @@ P 的旧页（fork 前分配，`mapping` → anon_vma(P)）反向映射时扫描
 
 ### 遍历：`rmap_walk()`
 
+[`mm/rmap.c:2983-2991`](../../linux/mm/rmap.c#L2983-L2991)（v6.18.60）
+
 ```c
-// mm/rmap.c:2983-2991（v6.18.60）
 void rmap_walk(struct folio *folio, struct rmap_walk_control *rwc)
 {
 	if (unlikely(folio_test_ksm(folio)))
@@ -645,8 +659,9 @@ void rmap_walk(struct folio *folio, struct rmap_walk_control *rwc)
 }
 ```
 
+[`mm/rmap.c:2852-2890`](../../linux/mm/rmap.c#L2852-L2890)（v6.18.60，节选）
+
 ```c
-// mm/rmap.c:2852-2890（v6.18.60，节选）
 static void rmap_walk_anon(struct folio *folio,
 		struct rmap_walk_control *rwc, bool locked)
 {
@@ -682,8 +697,8 @@ static void rmap_walk_anon(struct folio *folio,
 
 | 调用者 | `rmap_one` | 作用 |
 |---|---|---|
-| `folio_referenced()`（`mm/rmap.c:975`） | `folio_referenced_one()` | 检查并清除各 PTE 的 Accessed 位，统计近期访问次数（4.10 节） |
-| `try_to_unmap()`（`mm/rmap.c:2293`） | `try_to_unmap_one()` | 解除所有映射；匿名页替换为交换项（4.11 节） |
+| `folio_referenced()`（[`mm/rmap.c:975`](../../linux/mm/rmap.c#L975)） | `folio_referenced_one()` | 检查并清除各 PTE 的 Accessed 位，统计近期访问次数（4.10 节） |
+| `try_to_unmap()`（[`mm/rmap.c:2293`](../../linux/mm/rmap.c#L2293)） | `try_to_unmap_one()` | 解除所有映射；匿名页替换为交换项（4.11 节） |
 | `try_to_migrate()` | `try_to_migrate_one()` | 替换为迁移项 |
 | `remove_migration_ptes()` | `remove_migration_pte()` | 迁移完成后把迁移项恢复为新页的 PTE |
 | `folio_mkclean()` | `page_mkclean_one()` | 写回前把所有映射设为只读、干净 |

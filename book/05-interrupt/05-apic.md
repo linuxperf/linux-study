@@ -1,6 +1,6 @@
 # 5.5 中断控制器：Local APIC、I/O APIC 与 MSI
 
-> **本节源码**：`arch/x86/include/asm/apic.h`、`arch/x86/include/asm/apicdef.h`、`arch/x86/kernel/apic/apic.c`、`arch/x86/kernel/apic/x2apic_phys.c`、`arch/x86/kernel/apic/vector.c`、`arch/x86/include/asm/io_apic.h`、`arch/x86/kernel/apic/io_apic.c`、`arch/x86/include/asm/msi.h`、`arch/x86/kernel/apic/msi.c`、`arch/x86/kernel/kvm.c`
+> **本节源码**：[`arch/x86/include/asm/apic.h`](../../linux/arch/x86/include/asm/apic.h)、[`arch/x86/include/asm/apicdef.h`](../../linux/arch/x86/include/asm/apicdef.h)、[`arch/x86/kernel/apic/apic.c`](../../linux/arch/x86/kernel/apic/apic.c)、[`arch/x86/kernel/apic/x2apic_phys.c`](../../linux/arch/x86/kernel/apic/x2apic_phys.c)、[`arch/x86/kernel/apic/vector.c`](../../linux/arch/x86/kernel/apic/vector.c)、[`arch/x86/include/asm/io_apic.h`](../../linux/arch/x86/include/asm/io_apic.h)、[`arch/x86/kernel/apic/io_apic.c`](../../linux/arch/x86/kernel/apic/io_apic.c)、[`arch/x86/include/asm/msi.h`](../../linux/arch/x86/include/asm/msi.h)、[`arch/x86/kernel/apic/msi.c`](../../linux/arch/x86/kernel/apic/msi.c)、[`arch/x86/kernel/kvm.c`](../../linux/arch/x86/kernel/kvm.c)
 > **关键函数**：`setup_local_APIC()`、`apic_eoi()`、`x2apic_send_IPI()`、`local_apic_timer_interrupt()`、`ioapic_ack_level()`、`__eoi_ioapic_pin()`、`ioapic_set_affinity()`、`__irq_msi_compose_msg()`、`msi_set_affinity()`
 > **前置知识**：5.1 x86_64 中断与异常体系、5.2 中断入口与出口
 
@@ -51,12 +51,13 @@ Linux 在 x86 上用 `struct apic` 抽象不同模式的 LAPIC，用分层的 `i
 LAPIC 有两种编程接口：
 
 - **xAPIC**：寄存器映射在物理地址 `0xFEE00000` 开始的 4 KB MMIO 区域，APIC ID 为 8 位，最多寻址 255 个 CPU。
-- **x2APIC**：寄存器通过 MSR `0x800` 起的一段地址访问（`APIC_BASE_MSR`，`arch/x86/include/asm/apicdef.h:152`），APIC ID 扩展为 32 位；ICR（中断命令寄存器）合并为一个 64 位 MSR，发送 IPI 只需一次 `wrmsr`。
+- **x2APIC**：寄存器通过 MSR `0x800` 起的一段地址访问（`APIC_BASE_MSR`，[`arch/x86/include/asm/apicdef.h:152`](../../linux/arch/x86/include/asm/apicdef.h#L152)），APIC ID 扩展为 32 位；ICR（中断命令寄存器）合并为一个 64 位 MSR，发送 IPI 只需一次 `wrmsr`。
 
 本书配置开启了 `CONFIG_X86_X2APIC`。KVM 等现代虚拟化平台普遍向客户机提供 x2APIC，因为 MSR 访问比 MMIO 更容易高效地虚拟化。x2APIC 寄存器的 MSR 地址就是 xAPIC 偏移右移 4 位后加上 `0x800`：
 
+[`arch/x86/include/asm/apic.h:206-218`](../../linux/arch/x86/include/asm/apic.h#L206-L218)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/apic.h:206-218（v6.18.60）
 static inline void native_apic_msr_write(u32 reg, u32 v)
 {
 	if (reg == APIC_DFR || reg == APIC_ID || reg == APIC_LDR ||
@@ -76,8 +77,9 @@ static inline void native_apic_msr_eoi(void)
 
 平台上可能有多种 LAPIC 工作模式（xAPIC flat、xAPIC physflat、x2APIC physical、x2APIC cluster、SGI UV、AMD Secure AVIC……），内核在启动时探测并选定一种，以 `struct apic` 描述：
 
+[`arch/x86/include/asm/apic.h:274-325`](../../linux/arch/x86/include/asm/apic.h#L274-L325)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/apic.h:274-325（v6.18.60）
 struct apic {
 	/* Hotpath functions first */
 	void	(*eoi)(void);
@@ -134,8 +136,9 @@ struct apic {
 
 以物理 x2APIC 为例：
 
+[`arch/x86/kernel/apic/x2apic_phys.c:132-165`](../../linux/arch/x86/kernel/apic/x2apic_phys.c#L132-L165)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/x2apic_phys.c:132-165（v6.18.60）
 static struct apic apic_x2apic_phys __ro_after_init = {
 
 	.name				= "physical x2apic",
@@ -174,8 +177,9 @@ apic_driver(apic_x2apic_phys);
 
 `apic_driver()` 把它放进 `.apicdrivers` 段，启动时按顺序调用各驱动的 `probe()` 选定一个。热路径上的操作并不通过 `apic->eoi` 间接调用，而是用 static call：
 
+[`arch/x86/include/asm/apic.h:402-415`](../../linux/arch/x86/include/asm/apic.h#L402-L415)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/apic.h:402-415（v6.18.60）
 static __always_inline u32 apic_read(u32 reg)
 {
 	return static_call(apic_call_read)(reg);
@@ -192,10 +196,11 @@ static __always_inline void apic_eoi(void)
 }
 ```
 
-选定驱动后 `apic_setup_apic_calls()` 把这些 static call 修补为直接调用，避免间接跳转的开销以及 retpoline 的代价。在 KVM 客户机中，`kvm_guest_init()` 还会用 `apic_update_callback(eoi, kvm_guest_apic_eoi_write)`（`arch/x86/kernel/kvm.c:861`）替换 EOI 实现：
+选定驱动后 `apic_setup_apic_calls()` 把这些 static call 修补为直接调用，避免间接跳转的开销以及 retpoline 的代价。在 KVM 客户机中，`kvm_guest_init()` 还会用 `apic_update_callback(eoi, kvm_guest_apic_eoi_write)`（[`arch/x86/kernel/kvm.c:861`](../../linux/arch/x86/kernel/kvm.c#L861)）替换 EOI 实现：
+
+[`arch/x86/kernel/kvm.c:363-375`](../../linux/arch/x86/kernel/kvm.c#L363-L375)（v6.18.60）
 
 ```c
-// arch/x86/kernel/kvm.c:363-375（v6.18.60）
 static notrace __maybe_unused void kvm_guest_apic_eoi_write(void)
 {
 	/**
@@ -217,8 +222,9 @@ static notrace __maybe_unused void kvm_guest_apic_eoi_write(void)
 
 每个 CPU 在启动时调用 `setup_local_APIC()`（BSP 在 `apic_intr_mode_init()` 中，AP 在 `apic_ap_setup()` 中）。其中与中断投递直接相关的几步：
 
+[`arch/x86/kernel/apic/apic.c:1539-1594`](../../linux/arch/x86/kernel/apic/apic.c#L1539-L1594)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/apic.c:1539-1594（v6.18.60）
 	/*
 	 * Set Task Priority to 'accept all except vectors 0-31'.  An APIC
 	 * vector in the 16-31 range could be delivered if TPR == 0, but we
@@ -267,14 +273,15 @@ static notrace __maybe_unused void kvm_guest_apic_eoi_write(void)
 
 *表 5-8：LAPIC 局部向量表*
 
-偏移取自 `arch/x86/include/asm/apicdef.h`。LINT0/LINT1 的配置见 `arch/x86/kernel/apic/apic.c:1598-1631`：只有 BSP 在需要时把 LINT0 设为 ExtINT（兼容 8259 PIC 的"虚拟线模式"），LINT1 默认只在 BSP 上以 NMI 模式打开（可用 `apic_extnmi=` 启动参数修改）。
+偏移取自 `arch/x86/include/asm/apicdef.h`。LINT0/LINT1 的配置见 [`arch/x86/kernel/apic/apic.c:1598-1631`](../../linux/arch/x86/kernel/apic/apic.c#L1598-L1631)：只有 BSP 在需要时把 LINT0 设为 ExtINT（兼容 8259 PIC 的"虚拟线模式"），LINT1 默认只在 BSP 上以 NMI 模式打开（可用 `apic_extnmi=` 启动参数修改）。
 
 ### LAPIC 定时器
 
 LAPIC 定时器是每个 CPU 私有的时钟事件设备（clock event device），是 x86 上 tick 与高精度定时器的主要硬件来源（第 8 章）。它有两种编程方式：
 
+[`arch/x86/kernel/apic/apic.c:410-431`](../../linux/arch/x86/kernel/apic/apic.c#L410-L431)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/apic.c:410-431（v6.18.60）
 /*
  * Program the next event, relative to now
  */
@@ -300,12 +307,13 @@ static int lapic_next_deadline(unsigned long delta,
 ```
 
 - **计数模式**：向初始计数寄存器 `APIC_TMICT` 写入一个值，LAPIC 按总线频率（经分频）递减，到 0 时触发中断。总线频率需要在启动时校准（`calibrate_APIC_clock()`）。
-- **TSC-deadline 模式**：向 `MSR_IA32_TSC_DEADLINE` 写入一个 TSC 绝对值，TSC 到达时触发中断。无需校准，精度更高，是现代 CPU 的首选（`deadline_match[]` 列出了需要特定微码版本才能可靠使用该模式的 CPU，`arch/x86/kernel/apic/apic.c:512`）。
+- **TSC-deadline 模式**：向 `MSR_IA32_TSC_DEADLINE` 写入一个 TSC 绝对值，TSC 到达时触发中断。无需校准，精度更高，是现代 CPU 的首选（`deadline_match[]` 列出了需要特定微码版本才能可靠使用该模式的 CPU，[`arch/x86/kernel/apic/apic.c:512`](../../linux/arch/x86/kernel/apic/apic.c#L512)）。
 
 定时器中断经 `sysvec_apic_timer_interrupt()`（5.2 节）调用 `local_apic_timer_interrupt()`：
 
+[`arch/x86/kernel/apic/apic.c:1013-1042`](../../linux/arch/x86/kernel/apic/apic.c#L1013-L1042)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/apic.c:1013-1042（v6.18.60）
 static void local_apic_timer_interrupt(void)
 {
 	struct clock_event_device *evt = this_cpu_ptr(&lapic_events);
@@ -344,8 +352,9 @@ static void local_apic_timer_interrupt(void)
 
 IPI 通过写 ICR 发出。物理 x2APIC 模式下，发送给单个 CPU 只需一次 `wrmsr`：
 
+[`arch/x86/kernel/apic/x2apic_phys.c:44-73`](../../linux/arch/x86/kernel/apic/x2apic_phys.c#L44-L73)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/x2apic_phys.c:44-73（v6.18.60）
 static void x2apic_send_IPI(int cpu, int vector)
 {
 	u32 dest = per_cpu(x86_cpu_to_apicid, cpu);
@@ -388,8 +397,9 @@ __x2apic_send_IPI_mask(const struct cpumask *mask, int vector, int apic_dest)
 
 I/O APIC 有若干输入引脚（通常 24 个），每个引脚对应**重定向表**（Redirection Table）中的一项，内核用 `struct IO_APIC_route_entry` 描述：
 
+[`arch/x86/include/asm/io_apic.h:58-88`](../../linux/arch/x86/include/asm/io_apic.h#L58-L88)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/io_apic.h:58-88（v6.18.60）
 struct IO_APIC_route_entry {
 	union {
 		struct {
@@ -431,8 +441,9 @@ ISA 设备通常是边沿触发，PCI INTx 则是电平触发、低电平有效�
 
 x86 上 LAPIC 的 EOI 对电平中断会自动广播给所有 I/O APIC（"EOI 广播"），但有例外，因此 `ioapic_chip` 的 `irq_eoi` 回调做了额外检查：
 
+[`arch/x86/kernel/apic/io_apic.c:1699-1721`](../../linux/arch/x86/kernel/apic/io_apic.c#L1699-L1721)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/io_apic.c:1699-1721（v6.18.60）
 	i = cfg->vector;
 	v = apic_read(APIC_TMR + ((i & ~0x1f) >> 1));
 
@@ -458,12 +469,13 @@ x86 上 LAPIC 的 EOI 对电平中断会自动广播给所有 I/O APIC（"EOI �
 }
 ```
 
-先读 LAPIC 的 TMR，看该向量在 LAPIC 看来是否为电平触发。若不是——某些 82093AA I/O APIC 的勘误会把电平中断误作边沿投递，或者 CPU 下线时中断经 IPI 转发而失去了电平属性——LAPIC 的 EOI 就不会广播，Remote IRR 永远不会被清除，该引脚上的中断就此"卡死"。此时必须手动向 I/O APIC 发 EOI。注释（`arch/x86/kernel/apic/io_apic.c:1667-1698`）详细记录了这段历史。`irq_mis_count` 即 `/proc/interrupts` 中的 `MIS` 计数。
+先读 LAPIC 的 TMR，看该向量在 LAPIC 看来是否为电平触发。若不是——某些 82093AA I/O APIC 的勘误会把电平中断误作边沿投递，或者 CPU 下线时中断经 IPI 转发而失去了电平属性——LAPIC 的 EOI 就不会广播，Remote IRR 永远不会被清除，该引脚上的中断就此"卡死"。此时必须手动向 I/O APIC 发 EOI。注释（[`arch/x86/kernel/apic/io_apic.c:1667-1698`](../../linux/arch/x86/kernel/apic/io_apic.c#L1667-L1698)）详细记录了这段历史。`irq_mis_count` 即 `/proc/interrupts` 中的 `MIS` 计数。
 
 手动 EOI 的方式取决于 I/O APIC 版本：
 
+[`arch/x86/kernel/apic/io_apic.c:439-457`](../../linux/arch/x86/kernel/apic/io_apic.c#L439-L457)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/io_apic.c:439-457（v6.18.60）
 static void __eoi_ioapic_pin(int apic, int pin, int vector)
 {
 	if (mpc_ioapic_ver(apic) >= 0x20) {
@@ -491,8 +503,9 @@ static void __eoi_ioapic_pin(int apic, int pin, int vector)
 
 I/O APIC 在通用中断层中表现为一个 `irq_chip`：
 
+[`arch/x86/kernel/apic/io_apic.c:1854-1880`](../../linux/arch/x86/kernel/apic/io_apic.c#L1854-L1880)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/io_apic.c:1854-1880（v6.18.60）
 static struct irq_chip ioapic_chip __read_mostly = {
 	.name			= "IO-APIC",
 	.irq_startup		= startup_ioapic_irq,
@@ -527,8 +540,9 @@ static struct irq_chip ioapic_ir_chip __read_mostly = {
 - `irq_ack` 是 `irq_chip_ack_parent`——I/O APIC 自己没有"应答"操作，边沿中断的应答直接交给父级（向量域的 `apic_ack_edge()`，即 LAPIC EOI）。
 - `irq_set_affinity` 先调用父级分配新 CPU 上的向量，成功后再重写重定向表项：
 
+[`arch/x86/kernel/apic/io_apic.c:1786-1809`](../../linux/arch/x86/kernel/apic/io_apic.c#L1786-L1809)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/io_apic.c:1786-1809（v6.18.60）
 static void ioapic_configure_entry(struct irq_data *irqd)
 {
 	struct mp_chip_data *mpd = irqd->chip_data;
@@ -555,7 +569,7 @@ static int ioapic_set_affinity(struct irq_data *irq_data, const struct cpumask *
 }
 ```
 
-`ioapic_setup_msg_from_msi()` 的名字道出了 v5.10 之后的设计观点（`arch/x86/kernel/apic/io_apic.c:1737-1752` 的注释）：**I/O APIC 不过是一个把传统引脚转换为 MSI 消息的设备**。它请父级域"组合一条 MSI 消息"，再把消息中的向量、目标 ID 等字段搬到重定向表项中。这样无论父级是普通向量域还是中断重映射域，I/O APIC 驱动都不必关心具体格式。
+`ioapic_setup_msg_from_msi()` 的名字道出了 v5.10 之后的设计观点（[`arch/x86/kernel/apic/io_apic.c:1737-1752`](../../linux/arch/x86/kernel/apic/io_apic.c#L1737-L1752) 的注释）：**I/O APIC 不过是一个把传统引脚转换为 MSI 消息的设备**。它请父级域"组合一条 MSI 消息"，再把消息中的向量、目标 ID 等字段搬到重定向表项中。这样无论父级是普通向量域还是中断重映射域，I/O APIC 驱动都不必关心具体格式。
 
 ## MSI 与 MSI-X
 
@@ -563,8 +577,9 @@ static int ioapic_set_affinity(struct irq_data *irq_data, const struct cpumask *
 
 MSI 让设备用一次普通的 PCIe 内存写事务来触发中断：写入的**地址**决定目标 CPU，写入的**数据**决定向量。x86 规定地址必须落在 `0xFEE00000`～`0xFEEFFFFF` 区间内，芯片组会把对这一区间的写入识别为中断消息：
 
+[`arch/x86/include/asm/msi.h:14-60`](../../linux/arch/x86/include/asm/msi.h#L14-L60)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/msi.h:14-60（v6.18.60）
 typedef struct x86_msi_data {
 	union {
 		struct {
@@ -616,8 +631,9 @@ typedef struct x86_msi_addr_hi {
 
 与 I/O APIC 表项一样，地址也有"直接"和"重映射"两种格式。直接格式中目标 APIC ID 只有 8 位（`destid_0_7`），最多寻址 256 个 APIC ID；超过 255 个 CPU 的系统必须启用中断重映射，或依赖部分虚拟化平台支持的"扩展目标 ID"（`virt_destid_8_14`，再扩展 7 位）。`__irq_msi_compose_msg()` 据此生成消息：
 
+[`arch/x86/kernel/apic/apic.c:2282-2310`](../../linux/arch/x86/kernel/apic/apic.c#L2282-L2310)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/apic.c:2282-2310（v6.18.60）
 void __irq_msi_compose_msg(struct irq_cfg *cfg, struct msi_msg *msg,
 			   bool dmar)
 {
@@ -661,8 +677,9 @@ MSI 天然是边沿语义：一次写入就是一次中断，不存在 Remote IR
 
 `msi_set_affinity()` 用一个巧妙的两步法解决这个问题：
 
+[`arch/x86/kernel/apic/msi.c:99-140`](../../linux/arch/x86/kernel/apic/msi.c#L99-L140)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/msi.c:99-140（v6.18.60）
 	lock_vector_lock();
 
 	/*
@@ -709,7 +726,7 @@ MSI 天然是边沿语义：一次写入就是一次中断，不存在 Remote IR
 
 前提是这段代码运行在中断当前的目标 CPU 上（x86 对不可屏蔽 MSI 采用"在下一次中断时迁移"的延迟策略，5.8 节）。第一步只改向量、目标仍是本 CPU；第二步只改目标 CPU、向量已是新值。每一步都只改变一个字段，任何中间状态都是合法的组合。若设备恰好在第一步与第二步之间发出中断，它会被投递到本 CPU 的新向量上——此时本 CPU 关着中断，中断停在 LAPIC 的 IRR 中。最后检查 IRR，若有挂起就通过 `irq_retrigger` 在新目标 CPU 上补发一次。
 
-当中断能被屏蔽（大多数 MSI-X 设备）或启用了中断重映射时，可以先屏蔽再一次性修改，走函数开头的快速路径（`arch/x86/kernel/apic/msi.c:65-72`）。
+当中断能被屏蔽（大多数 MSI-X 设备）或启用了中断重映射时，可以先屏蔽再一次性修改，走函数开头的快速路径（[`arch/x86/kernel/apic/msi.c:65-72`](../../linux/arch/x86/kernel/apic/msi.c#L65-L72)）。
 
 ## 中断重映射
 
@@ -725,7 +742,7 @@ MSI 天然是边沿语义：一次写入就是一次中断，不存在 Remote IR
 
 ### 8259 PIC 与虚拟线模式
 
-x86 的中断控制器历史可以追溯到 IBM PC 的两片级联 8259A PIC，提供 IRQ 0～15。为了兼容，系统上电时处于"PIC 模式"或"虚拟线模式"（PIC 的输出经 LAPIC 的 LINT0 以 ExtINT 方式送入 BSP）。Linux 在启动中通过 `init_ISA_irqs()`（`arch/x86/kernel/irqinit.c:54-73`）初始化 PIC，再在 `setup_IO_APIC()` 中切换到对称 I/O 模式，此后 PIC 被屏蔽，ISA IRQ 改由 I/O APIC 的前 16 个引脚提供。`/proc/interrupts` 中 IRQ 0～15 仍对应 ISA 中断号，向量范围是 `0x30`～`0x3f`（`ISA_IRQ_VECTOR()`，5.1 节）——不过一旦由 I/O APIC 接管，它们也可以被动态重新分配向量。
+x86 的中断控制器历史可以追溯到 IBM PC 的两片级联 8259A PIC，提供 IRQ 0～15。为了兼容，系统上电时处于"PIC 模式"或"虚拟线模式"（PIC 的输出经 LAPIC 的 LINT0 以 ExtINT 方式送入 BSP）。Linux 在启动中通过 `init_ISA_irqs()`（[`arch/x86/kernel/irqinit.c:54-73`](../../linux/arch/x86/kernel/irqinit.c#L54-L73)）初始化 PIC，再在 `setup_IO_APIC()` 中切换到对称 I/O 模式，此后 PIC 被屏蔽，ISA IRQ 改由 I/O APIC 的前 16 个引脚提供。`/proc/interrupts` 中 IRQ 0～15 仍对应 ISA 中断号，向量范围是 `0x30`～`0x3f`（`ISA_IRQ_VECTOR()`，5.1 节）——不过一旦由 I/O APIC 接管，它们也可以被动态重新分配向量。
 
 ### 为什么 Linux 不使用 TPR 做优先级
 

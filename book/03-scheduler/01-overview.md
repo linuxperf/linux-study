@@ -1,6 +1,6 @@
 # 3.1 调度器框架：调度策略、调度类与运行队列
 
-> **本节源码**：`kernel/sched/core.c`、`kernel/sched/sched.h`、`kernel/sched/syscalls.c`、`include/linux/sched.h`、`include/linux/sched/prio.h`、`include/uapi/linux/sched.h`、`include/asm-generic/vmlinux.lds.h`
+> **本节源码**：[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`kernel/sched/syscalls.c`](../../linux/kernel/sched/syscalls.c)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)、[`include/linux/sched/prio.h`](../../linux/include/linux/sched/prio.h)、[`include/uapi/linux/sched.h`](../../linux/include/uapi/linux/sched.h)、[`include/asm-generic/vmlinux.lds.h`](../../linux/include/asm-generic/vmlinux.lds.h)
 > **关键函数**：`__setscheduler_class()`、`__normal_prio()`、`set_load_weight()`、`enqueue_task()`、`activate_task()`、`wakeup_preempt()`
 > **前置知识**：第 2 章 进程管理（`task_struct` 与进程状态）
 
@@ -18,8 +18,9 @@ Linux 的做法是把"选择任务"这件事拆成两层：**核心层**（`kern
 
 用户态通过 `sched_setscheduler(2)` / `sched_setattr(2)` 为线程指定调度策略（Scheduling Policy）：
 
+[`include/uapi/linux/sched.h:114-121`](../../linux/include/uapi/linux/sched.h#L114-L121)（v6.18.60）
+
 ```c
-// include/uapi/linux/sched.h:114-121（v6.18.60）
 #define SCHED_NORMAL		0
 #define SCHED_FIFO		1
 #define SCHED_RR		2
@@ -46,8 +47,9 @@ Linux 的做法是把"选择任务"这件事拆成两层：**核心层**（`kern
 
 内核内部用一个整数表示优先级，实时与普通任务位于 `[0, 140)`，Deadline 任务固定为 -1，**数值越小优先级越高**：
 
+[`include/linux/sched/prio.h:16-28`](../../linux/include/linux/sched/prio.h#L16-L28)（v6.18.60）
+
 ```c
-// include/linux/sched/prio.h:16-28（v6.18.60）
 #define MAX_RT_PRIO		100
 #define MAX_DL_PRIO		0
 
@@ -63,7 +65,7 @@ Linux 的做法是把"选择任务"这件事拆成两层：**核心层**（`kern
 #define PRIO_TO_NICE(prio)	((prio) - DEFAULT_PRIO)
 ```
 
-其中 `NICE_WIDTH` 为 40（`prio.h:7`），所以 `MAX_PRIO` = 140，`DEFAULT_PRIO` = 120（即 nice 0）。
+其中 `NICE_WIDTH` 为 40（[`include/linux/sched/prio.h:7`](../../linux/include/linux/sched/prio.h#L7)），所以 `MAX_PRIO` = 140，`DEFAULT_PRIO` = 120（即 nice 0）。
 
 ```
   prio:  -1   0 ......................... 99  100 ............ 120 ............ 139
@@ -87,8 +89,9 @@ Linux 的做法是把"选择任务"这件事拆成两层：**核心层**（`kern
 
 `normal_prio` 的计算规则一目了然：
 
+[`kernel/sched/syscalls.c:19-31`](../../linux/kernel/sched/syscalls.c#L19-L31)（v6.18.60）
+
 ```c
-// kernel/sched/syscalls.c:19-31（v6.18.60）
 static inline int __normal_prio(int policy, int rt_prio, int nice)
 {
 	int prio;
@@ -110,8 +113,9 @@ static inline int __normal_prio(int policy, int rt_prio, int nice)
 
 任务属于哪个调度类，由 `prio`（而不是 `policy`）决定，这样 PI 提升可以把一个普通任务临时"升格"到实时调度类：
 
+[`kernel/sched/core.c:7281-7295`](../../linux/kernel/sched/core.c#L7281-L7295)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:7281-7295（v6.18.60）
 const struct sched_class *__setscheduler_class(int policy, int prio)
 {
 	if (dl_prio(prio))
@@ -129,7 +133,7 @@ const struct sched_class *__setscheduler_class(int policy, int prio)
 }
 ```
 
-`dl_prio()` 判断 `prio < MAX_DL_PRIO`（`include/linux/sched/deadline.h:13`），`rt_prio()` 判断 `MAX_DL_PRIO <= prio < MAX_RT_PRIO`（`include/linux/sched/rt.h:9`）。
+`dl_prio()` 判断 `prio < MAX_DL_PRIO`（[`include/linux/sched/deadline.h:13`](../../linux/include/linux/sched/deadline.h#L13)），`rt_prio()` 判断 `MAX_DL_PRIO <= prio < MAX_RT_PRIO`（[`include/linux/sched/rt.h:9`](../../linux/include/linux/sched/rt.h#L9)）。
 
 ## 调度类：面向对象的调度框架
 
@@ -137,8 +141,9 @@ const struct sched_class *__setscheduler_class(int policy, int prio)
 
 `struct sched_class` 是一张函数指针表，相当于 C 语言里的"接口"。下面只保留本章会反复出现的方法：
 
+[`kernel/sched/sched.h:2412-2456`](../../linux/kernel/sched/sched.h#L2412-L2456)（v6.18.60）
+
 ```c
-// kernel/sched/sched.h:2412-2456（v6.18.60）
 struct sched_class {
 
 #ifdef CONFIG_UCLAMP_TASK
@@ -184,17 +189,18 @@ v6.18.60 定义了 6 个调度类，按优先级从高到低：
 
 | 调度类 | 定义位置 | 服务对象 |
 |---|---|---|
-| `stop_sched_class` | `kernel/sched/stop_task.c:96` | 每 CPU 一个的 stopper 线程（`migration/N`），用于迁移、CPU 热插拔等 |
-| `dl_sched_class` | `kernel/sched/deadline.c:3321` | `SCHED_DEADLINE` 任务，以及 `fair_server` 等 dl_server |
-| `rt_sched_class` | `kernel/sched/rt.c:2587` | `SCHED_FIFO` / `SCHED_RR` |
-| `fair_sched_class` | `kernel/sched/fair.c:14112` | `SCHED_NORMAL` / `SCHED_BATCH` / `SCHED_IDLE`，使用 EEVDF 算法 |
-| `ext_sched_class` | `kernel/sched/ext.c:3400` | `SCHED_EXT`（依赖 `CONFIG_SCHED_CLASS_EXT`） |
-| `idle_sched_class` | `kernel/sched/idle.c:546` | 每 CPU 的 idle 线程 |
+| `stop_sched_class` | [`kernel/sched/stop_task.c:96`](../../linux/kernel/sched/stop_task.c#L96) | 每 CPU 一个的 stopper 线程（`migration/N`），用于迁移、CPU 热插拔等 |
+| `dl_sched_class` | [`kernel/sched/deadline.c:3321`](../../linux/kernel/sched/deadline.c#L3321) | `SCHED_DEADLINE` 任务，以及 `fair_server` 等 dl_server |
+| `rt_sched_class` | [`kernel/sched/rt.c:2587`](../../linux/kernel/sched/rt.c#L2587) | `SCHED_FIFO` / `SCHED_RR` |
+| `fair_sched_class` | [`kernel/sched/fair.c:14112`](../../linux/kernel/sched/fair.c#L14112) | `SCHED_NORMAL` / `SCHED_BATCH` / `SCHED_IDLE`，使用 EEVDF 算法 |
+| `ext_sched_class` | [`kernel/sched/ext.c:3400`](../../linux/kernel/sched/ext.c#L3400) | `SCHED_EXT`（依赖 `CONFIG_SCHED_CLASS_EXT`） |
+| `idle_sched_class` | [`kernel/sched/idle.c:546`](../../linux/kernel/sched/idle.c#L546) | 每 CPU 的 idle 线程 |
 
 以公平调度类为例，它的实例是这样填写的（节选）：
 
+[`kernel/sched/fair.c:14112-14134`](../../linux/kernel/sched/fair.c#L14112-L14134)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:14112-14134（v6.18.60）
 DEFINE_SCHED_CLASS(fair) = {
 
 	.enqueue_task		= enqueue_task_fair,
@@ -224,8 +230,9 @@ DEFINE_SCHED_CLASS(fair) = {
 
 调度类之间的优先级没有用一个整数字段表示，而是**用它们在内存中的地址顺序**表示。`DEFINE_SCHED_CLASS()` 把每个实例放进独立的段：
 
+[`kernel/sched/sched.h:2531-2534`](../../linux/kernel/sched/sched.h#L2531-L2534)（v6.18.60）
+
 ```c
-// kernel/sched/sched.h:2531-2534（v6.18.60）
 #define DEFINE_SCHED_CLASS(name) \
 const struct sched_class name##_sched_class \
 	__aligned(__alignof__(struct sched_class)) \
@@ -234,8 +241,9 @@ const struct sched_class name##_sched_class \
 
 链接脚本再按固定顺序把这些段排在一起，并在首尾定义两个边界符号：
 
+[`include/asm-generic/vmlinux.lds.h:136-145`](../../linux/include/asm-generic/vmlinux.lds.h#L136-L145)（v6.18.60）
+
 ```c
-// include/asm-generic/vmlinux.lds.h:136-145（v6.18.60）
 #define SCHED_DATA				\
 	STRUCT_ALIGN();				\
 	__sched_class_highest = .;		\
@@ -268,8 +276,9 @@ const struct sched_class name##_sched_class \
 
 于是"比较优先级"和"遍历调度类"都退化成了指针运算：
 
+[`kernel/sched/sched.h:2562-2574`](../../linux/kernel/sched/sched.h#L2562-L2574)（v6.18.60）
+
 ```c
-// kernel/sched/sched.h:2562-2574（v6.18.60）
 #define for_class_range(class, _from, _to) \
 	for (class = (_from); class < (_to); class++)
 
@@ -285,12 +294,13 @@ const struct sched_class name##_sched_class \
 #define sched_class_above(_a, _b)	((_a) < (_b))
 ```
 
-`next_active_class()`（`sched.h:2550`）在 `class++` 的基础上，处理 sched_ext 接管全部公平任务或未启用时跳过对应类的情况；未开启 `CONFIG_SCHED_CLASS_EXT` 时它就是简单的 `class++`。
+`next_active_class()`（[`kernel/sched/sched.h:2550`](../../linux/kernel/sched/sched.h#L2550)）在 `class++` 的基础上，处理 sched_ext 接管全部公平任务或未启用时跳过对应类的情况；未开启 `CONFIG_SCHED_CLASS_EXT` 时它就是简单的 `class++`。
 
 为了防止链接顺序出错，`sched_init()` 一开始就做了断言：
 
+[`kernel/sched/core.c:8649-8652`](../../linux/kernel/sched/core.c#L8649-L8652)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:8649-8652（v6.18.60）
 	BUG_ON(!sched_class_above(&stop_sched_class, &dl_sched_class));
 	BUG_ON(!sched_class_above(&dl_sched_class, &rt_sched_class));
 	BUG_ON(!sched_class_above(&rt_sched_class, &fair_sched_class));
@@ -305,13 +315,15 @@ const struct sched_class name##_sched_class \
 
 每个 CPU 拥有一个 `struct rq`，定义为 per-CPU 变量：
 
+[`kernel/sched/core.c:126`](../../linux/kernel/sched/core.c#L126)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:126（v6.18.60）
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 ```
 
+[`kernel/sched/sched.h:1360-1363`](../../linux/kernel/sched/sched.h#L1360-L1363)（v6.18.60）
+
 ```c
-// kernel/sched/sched.h:1360-1363（v6.18.60）
 #define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
 #define this_rq()		this_cpu_ptr(&runqueues)
 #define task_rq(p)		cpu_rq(task_cpu(p))
@@ -324,8 +336,9 @@ DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
 `struct rq` 有上百个字段，下面只保留与调度主流程相关的部分：
 
+[`kernel/sched/sched.h:1119-1228`](../../linux/kernel/sched/sched.h#L1119-L1228)（v6.18.60，节选）
+
 ```c
-// kernel/sched/sched.h:1119-1228（v6.18.60，节选）
 struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t		__lock;		// [注] 保护本 rq 的自旋锁，通过 rq_lock() 等接口访问
@@ -384,8 +397,9 @@ struct rq {
 
 `sched_init()` 在 `start_kernel()` 早期为每个可能的 CPU 初始化运行队列：
 
+[`kernel/sched/core.c:8708-8718`](../../linux/kernel/sched/core.c#L8708-L8718)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:8708-8718（v6.18.60）
 	for_each_possible_cpu(i) {
 		struct rq *rq;
 
@@ -399,14 +413,15 @@ struct rq {
 		init_dl_rq(&rq->dl);
 ```
 
-循环结束后，`sched_init()` 通过 `init_idle(current, smp_processor_id())`（`core.c:8822`）把当前执行流——也就是引导 CPU 上的 0 号进程——变成该 CPU 的 idle 线程。
+循环结束后，`sched_init()` 通过 `init_idle(current, smp_processor_id())`（[`kernel/sched/core.c:8822`](../../linux/kernel/sched/core.c#L8822)）把当前执行流——也就是引导 CPU 上的 0 号进程——变成该 CPU 的 idle 线程。
 
 ## task_struct 中的调度字段
 
 `task_struct` 中与调度相关的字段集中在前部：
 
+[`include/linux/sched.h:844-873`](../../linux/include/linux/sched.h#L844-L873)（v6.18.60，节选）
+
 ```c
-// include/linux/sched.h:844-873（v6.18.60，节选）
 	int				on_cpu;		// [注] 任务是否正在某个 CPU 上执行（含切换过程中）
 	struct __call_single_node	wake_entry;	// [注] 远程唤醒队列节点
 	...
@@ -429,8 +444,9 @@ struct rq {
 	const struct sched_class	*sched_class;	// [注] 当前所属调度类
 ```
 
+[`include/linux/sched.h:915-920`](../../linux/include/linux/sched.h#L915-L920)（v6.18.60）
+
 ```c
-// include/linux/sched.h:915-920（v6.18.60）
 	unsigned int			policy;
 	unsigned long			max_allowed_capacity;
 	int				nr_cpus_allowed;
@@ -439,14 +455,15 @@ struct rq {
 	cpumask_t			cpus_mask;
 ```
 
-`on_rq` 与 `on_cpu` 是两个独立的状态：一个任务可以在队列上但没在运行（等待 CPU），也可以正在运行。处于 `TASK_ON_RQ_MIGRATING`（`kernel/sched/sched.h:98`）时，任务正在两个 CPU 的运行队列之间搬移。
+`on_rq` 与 `on_cpu` 是两个独立的状态：一个任务可以在队列上但没在运行（等待 CPU），也可以正在运行。处于 `TASK_ON_RQ_MIGRATING`（[`kernel/sched/sched.h:98`](../../linux/kernel/sched/sched.h#L98)）时，任务正在两个 CPU 的运行队列之间搬移。
 
 ### 调度实体
 
 调度类操作的对象不是 `task_struct`，而是嵌入其中的**调度实体**（Scheduling Entity）。这样做有两个好处：每个调度类只需关心自己的那份数据；在组调度中，一个实体还可以代表一组任务（见 3.10 节）。公平调度类的实体如下：
 
+[`include/linux/sched.h:570-616`](../../linux/include/linux/sched.h#L570-L616)（v6.18.60，节选）
+
 ```c
-// include/linux/sched.h:570-616（v6.18.60，节选）
 struct sched_entity {
 	/* For load-balancing: */
 	struct load_weight		load;		// [注] 权重，由 nice 值决定
@@ -493,8 +510,9 @@ struct sched_entity {
 
 公平调度类按**权重**（Load Weight）比例分配 CPU 时间。nice 值通过一张预先计算的表映射为权重：
 
+[`kernel/sched/core.c:10331-10340`](../../linux/kernel/sched/core.c#L10331-L10340)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:10331-10340（v6.18.60）
 const int sched_prio_to_weight[40] = {
  /* -20 */     88761,     71755,     56483,     46273,     36291,
  /* -15 */     29154,     23254,     18705,     14949,     11916,
@@ -507,7 +525,7 @@ const int sched_prio_to_weight[40] = {
 };
 ```
 
-相邻两级的权重之比约为 1.25。源码注释（`core.c:10319-10329`）解释了这一取值：nice 值每变化 1，任务获得的 CPU 时间相对变化约 10%。例如两个 CPU 密集型任务分别为 nice 0 和 nice 1，它们的 CPU 份额为：
+相邻两级的权重之比约为 1.25。源码注释（[`kernel/sched/core.c:10319-10329`](../../linux/kernel/sched/core.c#L10319-L10329)）解释了这一取值：nice 值每变化 1，任务获得的 CPU 时间相对变化约 10%。例如两个 CPU 密集型任务分别为 nice 0 和 nice 1，它们的 CPU 份额为：
 
 ```
 nice 0: 1024 / (1024 + 820) ≈ 55.5%
@@ -516,8 +534,9 @@ nice 1:  820 / (1024 + 820) ≈ 44.5%
 
 权重由 `set_load_weight()` 写入调度实体：
 
+[`kernel/sched/core.c:1448-1469`](../../linux/kernel/sched/core.c#L1448-L1469)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:1448-1469（v6.18.60）
 void set_load_weight(struct task_struct *p, bool update_load)
 {
 	int prio = p->static_prio - MAX_RT_PRIO;
@@ -542,16 +561,17 @@ void set_load_weight(struct task_struct *p, bool update_load)
 }
 ```
 
-- `SCHED_IDLE` 策略的任务权重固定为 `WEIGHT_IDLEPRIO` = 3（`sched.h:2350`），比 nice 19 的 15 还低。
+- `SCHED_IDLE` 策略的任务权重固定为 `WEIGHT_IDLEPRIO` = 3（[`kernel/sched/sched.h:2350`](../../linux/kernel/sched/sched.h#L2350)），比 nice 19 的 15 还低。
 - `inv_weight` 是预先计算的 `2^32 / weight`，用来把除法换成乘法加移位。
-- 在 64 位内核上，`scale_load()` 把权重左移 `SCHED_FIXEDPOINT_SHIFT`（10）位以提高定点精度（`sched.h:147-149`），因此 nice 0 对应的内部负载 `NICE_0_LOAD` 为 `1 << 20`，而不是 1024。
+- 在 64 位内核上，`scale_load()` 把权重左移 `SCHED_FIXEDPOINT_SHIFT`（10）位以提高定点精度（[`kernel/sched/sched.h:147-149`](../../linux/kernel/sched/sched.h#L147-L149)），因此 nice 0 对应的内部负载 `NICE_0_LOAD` 为 `1 << 20`，而不是 1024。
 
 ## 核心层如何调用调度类
 
 核心层通过少数几个包装函数调用调度类方法。以入队为例：
 
+[`kernel/sched/core.c:2096-2117`](../../linux/kernel/sched/core.c#L2096-L2117)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:2096-2117（v6.18.60）
 void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	if (!(flags & ENQUEUE_NOCLOCK))
@@ -578,8 +598,9 @@ void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 
 `enqueue_task()` 先更新 rq 时钟，再分派给 `p->sched_class->enqueue_task()`，前后穿插 uclamp、PSI、调度统计、核心调度（Core Scheduling）等横切逻辑。`activate_task()` 在此基础上再设置 `on_rq`：
 
+[`kernel/sched/core.c:2143-2154`](../../linux/kernel/sched/core.c#L2143-L2154)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:2143-2154（v6.18.60）
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	if (task_on_rq_migrating(p))
@@ -596,8 +617,9 @@ void activate_task(struct rq *rq, struct task_struct *p, int flags)
 
 唤醒抢占的判断同样体现了"跨类比较由核心层做、类内比较由调度类做"的分工：
 
+[`kernel/sched/core.c:2219-2234`](../../linux/kernel/sched/core.c#L2219-L2234)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:2219-2234（v6.18.60）
 void wakeup_preempt(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct task_struct *donor = rq->donor;
@@ -653,9 +675,9 @@ flowchart TB
 
 ## 关键细节 / 设计考量
 
-- **`dequeue_task()` 可能"失败"**。`dequeue_task()` 返回 `bool`，注释明确"只有 `DEQUEUE_SLEEP` 时才可能返回 false"（`core.c:2119-2121`）。这是 v6.12 引入的延迟出队（Delayed Dequeue）：公平类中一个尚有负 lag 的任务睡眠时，会先以 `sched_delayed` 状态留在红黑树里，直到它"还清"欠下的时间才真正离开（`kernel/sched/fair.c:5579-5584`）。3.3 节会详细讨论。
-- **优先级与调度类解耦**。决定调度类的是动态的 `prio`，因此 rt_mutex 的优先级继承可以临时把任务移入更高的调度类，结束后再移回，调用 `check_class_changed()`（`core.c:2206`）通知新旧调度类。
-- **核心层与调度类的锁约定**。几乎所有 `sched_class` 方法都在持有 `rq->__lock` 的情况下被调用；`switched_from()` 例外，它允许释放 rq 锁，此时由 `p->pi_lock` 保证串行化（见 `sched.h:2458-2462` 注释）。
+- **`dequeue_task()` 可能"失败"**。`dequeue_task()` 返回 `bool`，注释明确"只有 `DEQUEUE_SLEEP` 时才可能返回 false"（[`kernel/sched/core.c:2119-2121`](../../linux/kernel/sched/core.c#L2119-L2121)）。这是 v6.12 引入的延迟出队（Delayed Dequeue）：公平类中一个尚有负 lag 的任务睡眠时，会先以 `sched_delayed` 状态留在红黑树里，直到它"还清"欠下的时间才真正离开（[`kernel/sched/fair.c:5579-5584`](../../linux/kernel/sched/fair.c#L5579-L5584)）。3.3 节会详细讨论。
+- **优先级与调度类解耦**。决定调度类的是动态的 `prio`，因此 rt_mutex 的优先级继承可以临时把任务移入更高的调度类，结束后再移回，调用 `check_class_changed()`（[`kernel/sched/core.c:2206`](../../linux/kernel/sched/core.c#L2206)）通知新旧调度类。
+- **核心层与调度类的锁约定**。几乎所有 `sched_class` 方法都在持有 `rq->__lock` 的情况下被调用；`switched_from()` 例外，它允许释放 rq 锁，此时由 `p->pi_lock` 保证串行化（见 [`kernel/sched/sched.h:2458-2462`](../../linux/kernel/sched/sched.h#L2458-L2462) 注释）。
 
 ## 动手实验
 

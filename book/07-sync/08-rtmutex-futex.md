@@ -1,6 +1,6 @@
 # 7.8 rt_mutex、优先级继承与 futex
 
-> **本节源码**：`include/linux/rtmutex.h`、`kernel/locking/rtmutex_common.h`、`kernel/locking/rtmutex.c`、`kernel/locking/rtmutex_api.c`、`include/linux/sched.h`、`include/linux/futex.h`、`kernel/futex/futex.h`、`kernel/futex/core.c`、`kernel/futex/waitwake.c`、`kernel/futex/pi.c`、`kernel/futex/syscalls.c`
+> **本节源码**：[`include/linux/rtmutex.h`](../../linux/include/linux/rtmutex.h)、[`kernel/locking/rtmutex_common.h`](../../linux/kernel/locking/rtmutex_common.h)、[`kernel/locking/rtmutex.c`](../../linux/kernel/locking/rtmutex.c)、[`kernel/locking/rtmutex_api.c`](../../linux/kernel/locking/rtmutex_api.c)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)、[`include/linux/futex.h`](../../linux/include/linux/futex.h)、[`kernel/futex/futex.h`](../../linux/kernel/futex/futex.h)、[`kernel/futex/core.c`](../../linux/kernel/futex/core.c)、[`kernel/futex/waitwake.c`](../../linux/kernel/futex/waitwake.c)、[`kernel/futex/pi.c`](../../linux/kernel/futex/pi.c)、[`kernel/futex/syscalls.c`](../../linux/kernel/futex/syscalls.c)
 > **关键函数**：`__rt_mutex_lock()`、`task_blocks_on_rt_mutex()`、`rt_mutex_adjust_prio_chain()`、`rt_mutex_adjust_prio()`、`mark_wakeup_next_waiter()`、`do_futex()`、`futex_wait_setup()`、`__futex_wait()`、`futex_wake()`、`__futex_hash()`、`futex_lock_pi()`
 > **前置知识**：3.6 实时调度类（优先级反转与优先级继承）、7.6 互斥锁与乐观自旋
 
@@ -16,8 +16,9 @@
 
 ### 核心数据结构
 
+[`include/linux/rtmutex.h:23-27`](../../linux/include/linux/rtmutex.h#L23-L27)（v6.18.60）
+
 ```c
-// include/linux/rtmutex.h:23-27（v6.18.60）
 struct rt_mutex_base {
 	raw_spinlock_t		wait_lock;
 	struct rb_root_cached   waiters;
@@ -27,8 +28,9 @@ struct rt_mutex_base {
 
 `owner` 与 mutex 一样是持锁者指针，最低位 `RT_MUTEX_HAS_WAITERS` 表示有等待者（迫使解锁走慢速路径）。与 mutex 的 FIFO 链表不同，等待者按**优先级**组织在红黑树 `waiters` 中，最左节点就是最高优先级的等待者（"top waiter"）。
 
+[`kernel/locking/rtmutex_common.h:32-59`](../../linux/kernel/locking/rtmutex_common.h#L32-L59)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex_common.h:32-59（v6.18.60）
 struct rt_waiter_node {
 	struct rb_node	entry;
 	int		prio;
@@ -66,8 +68,9 @@ struct rt_mutex_waiter {
 
 `task_struct` 中与 PI 有关的字段：
 
+[`include/linux/sched.h:1228-1239`](../../linux/include/linux/sched.h#L1228-L1239)（v6.18.60）
+
 ```c
-// include/linux/sched.h:1228-1239（v6.18.60）
 	/* Protection of the PI data structures: */
 	raw_spinlock_t			pi_lock;
 
@@ -104,16 +107,18 @@ struct rt_mutex_waiter {
 
 ### 加锁：快速路径与阻塞
 
+[`kernel/locking/rtmutex.c:224-227`](../../linux/kernel/locking/rtmutex.c#L224-L227)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:224-227（v6.18.60）
 static __always_inline bool rt_mutex_try_acquire(struct rt_mutex_base *lock)
 {
 	return rt_mutex_cmpxchg_acquire(lock, NULL, current);
 }
 ```
 
+[`kernel/locking/rtmutex.c:1813-1822`](../../linux/kernel/locking/rtmutex.c#L1813-L1822)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:1813-1822（v6.18.60）
 static __always_inline int __rt_mutex_lock(struct rt_mutex_base *lock,
 					   unsigned int state)
 {
@@ -128,8 +133,9 @@ static __always_inline int __rt_mutex_lock(struct rt_mutex_base *lock,
 
 快速路径与 mutex 相同，是一次 `owner: NULL → current` 的 cmpxchg。失败后进入 `rt_mutex_slowlock()`，获取 `wait_lock`，再次尝试后调用 `task_blocks_on_rt_mutex()` 把自己挂入等待树：
 
+[`kernel/locking/rtmutex.c:1203-1245`](../../linux/kernel/locking/rtmutex.c#L1203-L1245)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:1203-1245（v6.18.60）
 static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
 					   struct rt_mutex_waiter *waiter,
 					   struct task_struct *task,
@@ -175,8 +181,9 @@ static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
 	raw_spin_unlock(&task->pi_lock);
 ```
 
+[`kernel/locking/rtmutex.c:1262-1304`](../../linux/kernel/locking/rtmutex.c#L1262-L1304)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:1262-1304（v6.18.60）
 	if (!owner)
 		return 0;
 
@@ -231,8 +238,9 @@ static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
 
 `rt_mutex_adjust_prio()` 只是取出持锁者 `pi_waiters` 中最高优先级的等待任务，交给调度器：
 
+[`kernel/locking/rtmutex.c:527-540`](../../linux/kernel/locking/rtmutex.c#L527-L540)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:527-540（v6.18.60）
 static __always_inline void rt_mutex_adjust_prio(struct rt_mutex_base *lock,
 						 struct task_struct *p)
 {
@@ -249,14 +257,15 @@ static __always_inline void rt_mutex_adjust_prio(struct rt_mutex_base *lock,
 }
 ```
 
-`rt_mutex_setprio()`（`kernel/sched/core.c:7352`）把 `p->pi_top_task` 设为该任务，按其有效优先级更新 `p->prio`，必要时把 `p` 从公平调度类迁到实时或 Deadline 调度类并重新入队（3.1、3.6 节）。
+`rt_mutex_setprio()`（[`kernel/sched/core.c:7352`](../../linux/kernel/sched/core.c#L7352)）把 `p->pi_top_task` 设为该任务，按其有效优先级更新 `p->prio`，必要时把 `p` 从公平调度类迁到实时或 Deadline 调度类并重新入队（3.1、3.6 节）。
 
 ### 阻塞链传播
 
 `rt_mutex_adjust_prio_chain()` 是 rt_mutex 中最复杂的函数，它以"每步最多持有两把锁"的方式沿阻塞链向上走。函数前的注释给出了每一步的操作与保护：
 
+[`kernel/locking/rtmutex.c:648-673`](../../linux/kernel/locking/rtmutex.c#L648-L673)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:648-673（v6.18.60）
  *	again:
  *	  loop_sanity_check();
  *	retry:
@@ -287,12 +296,13 @@ static __always_inline void rt_mutex_adjust_prio(struct rt_mutex_base *lock,
 
 每一轮处理链上的一个"任务—锁"对：用阻塞任务的新优先级在锁的等待树中重新排序（步骤 7），再在锁持有者的 `pi_waiters` 中更新 top waiter 并调整其优先级（步骤 11），然后把持锁者当作下一轮的"阻塞任务"。由于中途会释放锁，链可能在走的过程中发生变化，四处 `check_exit_conditions` 负责检测并提前结束。
 
-由于整个过程不持有全局锁，深度过大的链会导致长时间遍历。链长超过 `max_lock_depth`（默认 1024，`kernel/locking/rtmutex_api.c:14`，可通过 `/proc/sys/kernel/max_lock_depth` 调整）时放弃传播并报告。开启死锁检测时（futex 路径总是开启），若链回到了起点任务，则返回 `-EDEADLK`。
+由于整个过程不持有全局锁，深度过大的链会导致长时间遍历。链长超过 `max_lock_depth`（默认 1024，[`kernel/locking/rtmutex_api.c:14`](../../linux/kernel/locking/rtmutex_api.c#L14)，可通过 `/proc/sys/kernel/max_lock_depth` 调整）时放弃传播并报告。开启死锁检测时（futex 路径总是开启），若链回到了起点任务，则返回 `-EDEADLK`。
 
 ### 解锁：去提升与唤醒
 
+[`kernel/locking/rtmutex.c:1472-1478`](../../linux/kernel/locking/rtmutex.c#L1472-L1478)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:1472-1478（v6.18.60）
 static __always_inline void __rt_mutex_unlock(struct rt_mutex_base *lock)
 {
 	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL)))
@@ -304,8 +314,9 @@ static __always_inline void __rt_mutex_unlock(struct rt_mutex_base *lock)
 
 慢速解锁 `rt_mutex_slowunlock()` 调用 `mark_wakeup_next_waiter()`：
 
+[`kernel/locking/rtmutex.c:1312-1341`](../../linux/kernel/locking/rtmutex.c#L1312-L1341)（v6.18.60）
+
 ```c
-// kernel/locking/rtmutex.c:1312-1341（v6.18.60）
 static void __sched mark_wakeup_next_waiter(struct rt_wake_q_head *wqh,
 					    struct rt_mutex_base *lock)
 {
@@ -340,7 +351,7 @@ static void __sched mark_wakeup_next_waiter(struct rt_wake_q_head *wqh,
 
 解锁者先把 top waiter 从自己的 `pi_waiters` 中移除并**立即去提升**（恢复到剩余 PI 来源或自身的正常优先级），再唤醒 top waiter。`owner` 被设为只有 `HAS_WAITERS` 位的"无主但有等待者"状态，迫使所有新来者走慢速路径，在那里按优先级与 top waiter 比较——只有优先级更高的任务才能偷锁（`rt_mutex_steal()`），从而保证高优先级等待者不会被低优先级的新来者抢先。
 
-被唤醒的 top waiter 在 `rt_mutex_slowlock_block()`（`kernel/locking/rtmutex.c:1610`）的循环中调用 `try_to_take_rt_mutex()` 取得锁。该循环中也有乐观自旋：只有 top waiter 会在持锁者上自旋（`rtmutex_spin_on_owner()`），其他等待者直接睡眠。
+被唤醒的 top waiter 在 `rt_mutex_slowlock_block()`（[`kernel/locking/rtmutex.c:1610`](../../linux/kernel/locking/rtmutex.c#L1610)）的循环中调用 `try_to_take_rt_mutex()` 取得锁。该循环中也有乐观自旋：只有 top waiter 会在持锁者上自旋（`rtmutex_spin_on_owner()`），其他等待者直接睡眠。
 
 ## futex
 
@@ -371,8 +382,9 @@ void unlock(int *f) {
 
 ### 系统调用入口
 
+[`kernel/futex/syscalls.c:112-130`](../../linux/kernel/futex/syscalls.c#L112-L130)（v6.18.60）
+
 ```c
-// kernel/futex/syscalls.c:112-130（v6.18.60）
 long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
 		u32 __user *uaddr2, u32 val2, u32 val3)
 {
@@ -394,14 +406,15 @@ long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
 		return futex_wait(uaddr, flags, val, timeout, val3);
 ```
 
-经典的 `futex()` 系统调用用 `op` 多路复用十几种操作。v5.16 起增加了 `futex_waitv()`（同时等待多个 futex），v6.7 起又增加了独立的 `futex_wake()`、`futex_wait()`、`futex_requeue()` 系统调用（`kernel/futex/syscalls.c:318-442`），支持 8/16/32/64 位 futex word 与 NUMA 感知。
+经典的 `futex()` 系统调用用 `op` 多路复用十几种操作。v5.16 起增加了 `futex_waitv()`（同时等待多个 futex），v6.7 起又增加了独立的 `futex_wake()`、`futex_wait()`、`futex_requeue()` 系统调用（[`kernel/futex/syscalls.c:318-442`](../../linux/kernel/futex/syscalls.c#L318-L442)），支持 8/16/32/64 位 futex word 与 NUMA 感知。
 
 ### 哈希桶与 futex_q
 
 内核不为每个 futex 分配对象，而是把等待者挂在一个全局哈希表中：
 
+[`kernel/futex/futex.h:143-147`](../../linux/kernel/futex/futex.h#L143-L147)（v6.18.60）
+
 ```c
-// kernel/futex/futex.h:143-147（v6.18.60）
 struct futex_hash_bucket {
 	atomic_t waiters;
 	spinlock_t lock;
@@ -409,8 +422,9 @@ struct futex_hash_bucket {
 } ____cacheline_aligned_in_smp;
 ```
 
+[`kernel/futex/futex.h:200-217`](../../linux/kernel/futex/futex.h#L200-L217)（v6.18.60）
+
 ```c
-// kernel/futex/futex.h:200-217（v6.18.60）
 struct futex_q {
 	struct plist_node list;
 
@@ -431,10 +445,11 @@ struct futex_q {
 } __randomize_layout;
 ```
 
-`futex_key` 唯一标识一个 futex：私有 futex（`FUTEX_PRIVATE_FLAG`，同一进程内的线程间同步）用"`mm` 指针 + 虚拟地址"；共享 futex（跨进程，如共享内存中的锁）则用"inode 序号 + 页偏移"或"`mm` 序号 + 地址"，保证不同进程映射同一物理位置时得到相同的键（`get_futex_key()`，`kernel/futex/core.c:516`）。
+`futex_key` 唯一标识一个 futex：私有 futex（`FUTEX_PRIVATE_FLAG`，同一进程内的线程间同步）用"`mm` 指针 + 虚拟地址"；共享 futex（跨进程，如共享内存中的锁）则用"inode 序号 + 页偏移"或"`mm` 序号 + 地址"，保证不同进程映射同一物理位置时得到相同的键（`get_futex_key()`，[`kernel/futex/core.c:516`](../../linux/kernel/futex/core.c#L516)）。
+
+[`kernel/futex/core.c:372-411`](../../linux/kernel/futex/core.c#L372-L411)（v6.18.60）
 
 ```c
-// kernel/futex/core.c:372-411（v6.18.60）
 static struct futex_hash_bucket *
 __futex_hash(union futex_key *key, struct futex_private_hash *fph, struct futex_private_hash **fph_p)
 {
@@ -477,12 +492,13 @@ __futex_hash(union futex_key *key, struct futex_private_hash *fph, struct futex_
 	return &futex_queues[node][hash & futex_hashmask];
 ```
 
-哈希表的大小在启动时确定（`futex_init()`），默认每个 CPU 256 个桶并按 NUMA 节点分配（`kernel/futex/core.c:2017-2051`）。本书配置开启了 `CONFIG_FUTEX_PRIVATE_HASH`（v6.16 引入）：多线程进程在创建线程时（`kernel/fork.c:2307` 调用 `futex_hash_allocate_default()`）会获得一个**进程私有**的哈希表，其私有 futex 不再与其他进程共用全局桶，消除了跨进程的哈希冲突与锁竞争；进程也可以用 `prctl(PR_FUTEX_HASH, ...)` 自行设定桶数。
+哈希表的大小在启动时确定（`futex_init()`），默认每个 CPU 256 个桶并按 NUMA 节点分配（[`kernel/futex/core.c:2017-2051`](../../linux/kernel/futex/core.c#L2017-L2051)）。本书配置开启了 `CONFIG_FUTEX_PRIVATE_HASH`（v6.16 引入）：多线程进程在创建线程时（[`kernel/fork.c:2307`](../../linux/kernel/fork.c#L2307) 调用 `futex_hash_allocate_default()`）会获得一个**进程私有**的哈希表，其私有 futex 不再与其他进程共用全局桶，消除了跨进程的哈希冲突与锁竞争；进程也可以用 `prctl(PR_FUTEX_HASH, ...)` 自行设定桶数。
 
 ### FUTEX_WAIT
 
+[`kernel/futex/waitwake.c:595-669`](../../linux/kernel/futex/waitwake.c#L595-L669)（v6.18.60）
+
 ```c
-// kernel/futex/waitwake.c:595-669（v6.18.60）
 int futex_wait_setup(u32 __user *uaddr, u32 val, unsigned int flags,
 		     struct futex_q *q, union futex_key *key2,
 		     struct task_struct *task)
@@ -564,8 +580,9 @@ retry_private:
 
 用户态内存可能不在内存中（缺页），而持有自旋锁时不能处理缺页。`futex_get_value_locked()` 在关闭缺页处理的情况下读取；若失败就释放桶锁，用普通的 `get_user()` 触发缺页把页面调入，再重试。
 
+[`kernel/futex/waitwake.c:671-709`](../../linux/kernel/futex/waitwake.c#L671-L709)（v6.18.60）
+
 ```c
-// kernel/futex/waitwake.c:671-709（v6.18.60）
 int __futex_wait(u32 __user *uaddr, unsigned int flags, u32 val,
 		 struct hrtimer_sleeper *to, u32 bitset)
 {
@@ -607,8 +624,9 @@ retry:
 }
 ```
 
+[`kernel/futex/waitwake.c:344-364`](../../linux/kernel/futex/waitwake.c#L344-L364)（v6.18.60）
+
 ```c
-// kernel/futex/waitwake.c:344-364（v6.18.60）
 void futex_do_wait(struct futex_q *q, struct hrtimer_sleeper *timeout)
 {
 	/* Arm the timer */
@@ -636,8 +654,9 @@ void futex_do_wait(struct futex_q *q, struct hrtimer_sleeper *timeout)
 
 ### FUTEX_WAKE 与"无等待者"优化
 
+[`kernel/futex/waitwake.c:155-201`](../../linux/kernel/futex/waitwake.c#L155-L201)（v6.18.60）
+
 ```c
-// kernel/futex/waitwake.c:155-201（v6.18.60）
 int futex_wake(u32 __user *uaddr, unsigned int flags, int nr_wake, u32 bitset)
 {
 	struct futex_q *this, *next;
@@ -689,10 +708,11 @@ int futex_wake(u32 __user *uaddr, unsigned int flags, int nr_wake, u32 bitset)
 
 唤醒方在哈希桶中查找键匹配（且 `bitset` 有交集）的等待者，调用 `this->wake()`（默认为 `futex_wake_mark()`）把它们移出队列并加入 `wake_q`，释放桶锁后统一唤醒。
 
-注意 `kernel/futex/waitwake.c:176` 的 `futex_hb_waiters_pending()`：如果桶中没有等待者，就直接返回而**不获取桶锁**。这是一个重要的优化（大多数 `FUTEX_WAKE` 调用实际上没有等待者），但它引入了一个典型的存储缓冲（SB）竞态，文件开头的注释给出了完整分析：
+注意 [`kernel/futex/waitwake.c:176`](../../linux/kernel/futex/waitwake.c#L176) 的 `futex_hb_waiters_pending()`：如果桶中没有等待者，就直接返回而**不获取桶锁**。这是一个重要的优化（大多数 `FUTEX_WAKE` 调用实际上没有等待者），但它引入了一个典型的存储缓冲（SB）竞态，文件开头的注释给出了完整分析：
+
+[`kernel/futex/waitwake.c:54-96`](../../linux/kernel/futex/waitwake.c#L54-L96)（v6.18.60）
 
 ```c
-// kernel/futex/waitwake.c:54-96（v6.18.60）
  * The correct serialization ensures that a waiter either observes
  * the changed user space value before blocking or is woken by a
  * concurrent waker:
@@ -740,8 +760,9 @@ int futex_wake(u32 __user *uaddr, unsigned int flags, int nr_wake, u32 bitset)
 
 等待方先增加 `waiters` 计数再读 futex 值，唤醒方先写 futex 值再读 `waiters`。两侧各有一个完整屏障（`futex_hb_waiters_inc()` 中的 `smp_mb__after_atomic()` 与 `futex_hb_waiters_pending()` 中的 `smp_mb()`），保证二者至少有一方看到对方的写——要么等待方看到新值不睡眠，要么唤醒方看到计数非零去加锁唤醒。这正是 7.3 节 SB 模式的实际应用：
 
+[`kernel/futex/futex.h:387-420`](../../linux/kernel/futex/futex.h#L387-L420)（v6.18.60）
+
 ```c
-// kernel/futex/futex.h:387-420（v6.18.60）
 static inline void futex_hb_waiters_inc(struct futex_hash_bucket *hb)
 {
 #ifdef CONFIG_SMP
@@ -783,11 +804,12 @@ static inline int futex_hb_waiters_pending(struct futex_hash_bucket *hb)
 普通 futex 不知道锁的持有者是谁，无法做优先级继承。PI futex 约定 futex word 中存放持有者的线程 ID（TID）：
 
 - 用户态加锁：cmpxchg `0 → TID`，成功即持锁，不进内核；
-- 失败时调用 `FUTEX_LOCK_PI`：内核 `futex_lock_pi()`（`kernel/futex/pi.c:983`）在 word 中置位 `FUTEX_WAITERS`（`0x80000000`），根据 TID 找到持有者任务，为该用户态锁创建（或找到）一个 `futex_pi_state`，其中内嵌一个 `rt_mutex_base`，并以持有者的身份"代理"加锁，然后当前任务阻塞在这个 rt_mutex 上——于是本节前半部分的整套 PI 机制自动生效，持有者被提升；
-- 用户态解锁：cmpxchg `TID → 0`；若因 `FUTEX_WAITERS` 置位而失败，调用 `FUTEX_UNLOCK_PI`，内核 `futex_unlock_pi()`（`kernel/futex/pi.c:1187`）把锁直接移交给 rt_mutex 的 top waiter，并把其 TID 写入 futex word。
+- 失败时调用 `FUTEX_LOCK_PI`：内核 `futex_lock_pi()`（[`kernel/futex/pi.c:983`](../../linux/kernel/futex/pi.c#L983)）在 word 中置位 `FUTEX_WAITERS`（`0x80000000`），根据 TID 找到持有者任务，为该用户态锁创建（或找到）一个 `futex_pi_state`，其中内嵌一个 `rt_mutex_base`，并以持有者的身份"代理"加锁，然后当前任务阻塞在这个 rt_mutex 上——于是本节前半部分的整套 PI 机制自动生效，持有者被提升；
+- 用户态解锁：cmpxchg `TID → 0`；若因 `FUTEX_WAITERS` 置位而失败，调用 `FUTEX_UNLOCK_PI`，内核 `futex_unlock_pi()`（[`kernel/futex/pi.c:1187`](../../linux/kernel/futex/pi.c#L1187)）把锁直接移交给 rt_mutex 的 top waiter，并把其 TID 写入 futex word。
+
+[`kernel/futex/futex.h:152-168`](../../linux/kernel/futex/futex.h#L152-L168)（v6.18.60）
 
 ```c
-// kernel/futex/futex.h:152-168（v6.18.60）
 struct futex_pi_state {
 	/*
 	 * list of 'owned' pi_state instances - these have to be

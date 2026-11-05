@@ -1,6 +1,6 @@
 # 4.12 页迁移、内存规整与 OOM Killer
 
-> **本节源码**：`mm/compaction.c`、`mm/memory.c`、`mm/mempolicy.c`、`kernel/sched/fair.c`、`include/linux/compaction.h`、`mm/migrate.c`、`mm/rmap.c`、`mm/oom_kill.c`、`mm/page_alloc.c`
+> **本节源码**：[`mm/compaction.c`](../../linux/mm/compaction.c)、[`mm/memory.c`](../../linux/mm/memory.c)、[`mm/mempolicy.c`](../../linux/mm/mempolicy.c)、[`kernel/sched/fair.c`](../../linux/kernel/sched/fair.c)、[`include/linux/compaction.h`](../../linux/include/linux/compaction.h)、[`mm/migrate.c`](../../linux/mm/migrate.c)、[`mm/rmap.c`](../../linux/mm/rmap.c)、[`mm/oom_kill.c`](../../linux/mm/oom_kill.c)、[`mm/page_alloc.c`](../../linux/mm/page_alloc.c)
 > **关键函数**：`do_numa_page()`、`try_to_compact_pages()`、`compact_zone()`、`__compact_finished()`、`__compaction_suitable()`、`isolate_migratepages()`、`isolate_freepages()`、`kcompactd()`、`migrate_pages()`、`migrate_folio_unmap()`、`out_of_memory()`、`oom_badness()`、`select_bad_process()`、`__oom_kill_process()`、`oom_reap_task_mm()`
 > **前置知识**：4.3 伙伴系统、4.4 慢速路径、4.9 反向映射、4.10 页面回收
 
@@ -22,7 +22,7 @@
 
 ### 迁移项
 
-迁移期间，页表中指向旧 folio 的 PTE 被替换为**迁移项（Migration Entry）**——一种特殊的不存在 PTE，编码了旧 folio 的 PFN 和读/写权限。进程此时访问该地址会触发缺页，`do_swap_page()` 识别出迁移项后调用 `migration_entry_wait()`（`mm/migrate.c:480`）在旧 folio 的锁上等待，迁移完成后重新执行访问（4.11 节）。
+迁移期间，页表中指向旧 folio 的 PTE 被替换为**迁移项（Migration Entry）**——一种特殊的不存在 PTE，编码了旧 folio 的 PFN 和读/写权限。进程此时访问该地址会触发缺页，`do_swap_page()` 识别出迁移项后调用 `migration_entry_wait()`（[`mm/migrate.c:480`](../../linux/mm/migrate.c#L480)）在旧 folio 的锁上等待，迁移完成后重新执行访问（4.11 节）。
 
 ### 主流程
 
@@ -56,9 +56,9 @@ v6.3 起，`migrate_pages_batch()` 把"解除映射"与"移动"拆成两个批�
 
 页迁移的另一个重要使用者是 **自动 NUMA 平衡（Automatic NUMA Balancing）**（`CONFIG_NUMA_BALANCING=y`，默认启用），它把进程频繁访问的页迁移到进程所在 CPU 的本地节点。其机制是“制造缺页来采样访问”：
 
-1. 调度器周期性地在任务返回用户态时执行 `task_numa_work()`（`kernel/sched/fair.c:3374`），每次扫描进程地址空间的一段（默认 256 MB，`sysctl_numa_balancing_scan_size`，`kernel/sched/fair.c:1527`），调用 `change_prot_numa()`（`mm/mempolicy.c:821`）把其中的 PTE 改为 PROTNONE（4.8 节）；
-2. 进程再访问这些页时触发缺页，`handle_pte_fault()` 调用 `do_numa_page()`（`mm/memory.c:5980`）：恢复正常权限，并由 `numa_migrate_check()` 结合访问者的 CPU、该页上次访问者（`_last_cpupid`）和内存策略判断是否应迁移；
-3. 需要迁移时调用 `migrate_misplaced_folio()`（`mm/migrate.c:2731`）把页迁到目标节点；`task_numa_fault()` 记录统计，供调度器决定是否反过来把任务迁到内存所在的节点（第 3 章）。
+1. 调度器周期性地在任务返回用户态时执行 `task_numa_work()`（[`kernel/sched/fair.c:3374`](../../linux/kernel/sched/fair.c#L3374)），每次扫描进程地址空间的一段（默认 256 MB，`sysctl_numa_balancing_scan_size`，[`kernel/sched/fair.c:1527`](../../linux/kernel/sched/fair.c#L1527)），调用 `change_prot_numa()`（[`mm/mempolicy.c:821`](../../linux/mm/mempolicy.c#L821)）把其中的 PTE 改为 PROTNONE（4.8 节）；
+2. 进程再访问这些页时触发缺页，`handle_pte_fault()` 调用 `do_numa_page()`（[`mm/memory.c:5980`](../../linux/mm/memory.c#L5980)）：恢复正常权限，并由 `numa_migrate_check()` 结合访问者的 CPU、该页上次访问者（`_last_cpupid`）和内存策略判断是否应迁移；
+3. 需要迁移时调用 `migrate_misplaced_folio()`（[`mm/migrate.c:2731`](../../linux/mm/migrate.c#L2731)）把页迁到目标节点；`task_numa_fault()` 记录统计，供调度器决定是否反过来把任务迁到内存所在的节点（第 3 章）。
 
 启用内存分层模式（`NUMA_BALANCING_MEMORY_TIERING`）时，同一机制还用于把慢速内存节点（如 CXL 内存）上的热页提升到快速节点，这就是 4.4 节 `WMARK_PROMO` 水位的用途。
 
@@ -91,8 +91,9 @@ v6.3 起，`migrate_pages_batch()` 把"解除映射"与"移动"拆成两个批�
 
 ### 主循环：`compact_zone()`
 
+[`mm/compaction.c:2541-2728`](../../linux/mm/compaction.c#L2541-L2728)（v6.18.60，节选）
+
 ```c
-// mm/compaction.c:2541-2728（v6.18.60，节选）
 static enum compact_result
 compact_zone(struct compact_control *cc, struct capture_control *capc)
 {
@@ -151,13 +152,14 @@ rescan:
 
 - **扫描位置缓存**：两个扫描器的位置保存在 `zone->compact_cached_migrate_pfn[]` 和 `compact_cached_free_pfn` 中，下次规整从上次停下的地方继续，避免每次都从头扫描。
 - **跳过位（skip bit）**：扫描中发现无可迁移页或无空闲页的页块会被设置 `PB_migrate_skip` 标志，之后的扫描跳过它；规整多次失败后（`compaction_restarting()`）或 kswapd 休眠前清除这些标志。
-- **`compaction_alloc()`**（`mm/compaction.c:1877`）是传给 `migrate_pages()` 的目标页分配函数：从 `cc->freepages[]` 中取空闲页，不够时调用 `isolate_freepages()` 让空闲扫描器继续前进。
+- **`compaction_alloc()`**（[`mm/compaction.c:1877`](../../linux/mm/compaction.c#L1877)）是传给 `migrate_pages()` 的目标页分配函数：从 `cc->freepages[]` 中取空闲页，不够时调用 `isolate_freepages()` 让空闲扫描器继续前进。
 - **捕获（capture）**：直接规整时，4.3 节 `__free_one_page()` 中的 `compaction_capture()` 会把迁移释放出的、恰好满足请求阶的块直接交给规整者，避免被其他分配抢走。
 
 ### 何时结束：`__compact_finished()`
 
+[`mm/compaction.c:2265-2367`](../../linux/mm/compaction.c#L2265-L2367)（v6.18.60，节选）
+
 ```c
-// mm/compaction.c:2265-2367（v6.18.60，节选）
 static enum compact_result __compact_finished(struct compact_control *cc)
 {
 	...
@@ -202,8 +204,9 @@ static enum compact_result __compact_finished(struct compact_control *cc)
 
 规整需要空闲页作为迁移目标，如果空闲页太少，规整本身就会失败：
 
+[`mm/compaction.c:2388-2413`](../../linux/mm/compaction.c#L2388-L2413)（v6.18.60，节选）
+
 ```c
-// mm/compaction.c:2388-2413（v6.18.60，节选）
 static bool __compaction_suitable(struct zone *zone, int order,
 				  unsigned long watermark, int highest_zoneidx,
 				  unsigned long free_pages)
@@ -217,17 +220,17 @@ static bool __compaction_suitable(struct zone *zone, int order,
 }
 ```
 
-`compact_gap(order)` 为 `2UL << order`（`include/linux/compaction.h:66-82`），即要求 order 0 的空闲页至少比水位多出请求大小的两倍。不满足时返回 `COMPACT_SKIPPED`，提示调用者应先回收。
+`compact_gap(order)` 为 `2UL << order`（[`include/linux/compaction.h:66-82`](../../linux/include/linux/compaction.h#L66-L82)），即要求 order 0 的空闲页至少比水位多出请求大小的两倍。不满足时返回 `COMPACT_SKIPPED`，提示调用者应先回收。
 
-另一个判断依据是**碎片化指数（Fragmentation Index）**：它衡量分配失败是因为"内存不足"（指数接近 0）还是"碎片化"（指数接近 1000）。指数低于 `vm.extfrag_threshold`（默认 500，`mm/compaction.c:1922`）时，说明缺的是内存而不是连续性，规整也被跳过（`mm/compaction.c:2448`）。
+另一个判断依据是**碎片化指数（Fragmentation Index）**：它衡量分配失败是因为"内存不足"（指数接近 0）还是"碎片化"（指数接近 1000）。指数低于 `vm.extfrag_threshold`（默认 500，[`mm/compaction.c:1922`](../../linux/mm/compaction.c#L1922)）时，说明缺的是内存而不是连续性，规整也被跳过（[`mm/compaction.c:2448`](../../linux/mm/compaction.c#L2448)）。
 
 ### 触发时机
 
 规整有四个触发来源：
 
-1. **直接规整**：慢速路径中的 `__alloc_pages_direct_compact()` → `try_to_compact_pages()`（`mm/compaction.c:2814`），对 zonelist 上每个合格 zone 调用 `compact_zone_order()`（4.4 节）。为避免反复失败，每个 zone 维护"推迟"机制：失败后 `compact_defer_shift` 加一，接下来的 2^shift 次请求直接跳过规整。
+1. **直接规整**：慢速路径中的 `__alloc_pages_direct_compact()` → `try_to_compact_pages()`（[`mm/compaction.c:2814`](../../linux/mm/compaction.c#L2814)），对 zonelist 上每个合格 zone 调用 `compact_zone_order()`（4.4 节）。为避免反复失败，每个 zone 维护"推迟"机制：失败后 `compact_defer_shift` 加一，接下来的 2^shift 次请求直接跳过规整。
 2. **kcompactd**：每个节点一个后台线程。kswapd 回收完成后、或 `wakeup_kswapd()` 判断节点只是碎片化时唤醒它（4.4 节）。
-3. **主动规整（Proactive Compaction）**：kcompactd 每 500 ms（`HPAGE_FRAG_CHECK_INTERVAL_MSEC`，`mm/compaction.c:33`）检查节点的碎片化分数，超过 `vm.compaction_proactiveness`（默认 20，`mm/compaction.c:1921`）对应的阈值时主动规整，使 THP 等大页分配更容易成功。
+3. **主动规整（Proactive Compaction）**：kcompactd 每 500 ms（`HPAGE_FRAG_CHECK_INTERVAL_MSEC`，[`mm/compaction.c:33`](../../linux/mm/compaction.c#L33)）检查节点的碎片化分数，超过 `vm.compaction_proactiveness`（默认 20，[`mm/compaction.c:1921`](../../linux/mm/compaction.c#L1921)）对应的阈值时主动规整，使 THP 等大页分配更容易成功。
 4. **手动**：`echo 1 > /proc/sys/vm/compact_memory` 对所有节点做完整规整。
 
 ## OOM Killer
@@ -241,8 +244,9 @@ OOM Killer 由两条路径触发：
 
 ### `out_of_memory()`
 
+[`mm/oom_kill.c:1118-1186`](../../linux/mm/oom_kill.c#L1118-L1186)（v6.18.60，节选）
+
 ```c
-// mm/oom_kill.c:1118-1186（v6.18.60，节选）
 bool out_of_memory(struct oom_control *oc)
 {
 	unsigned long freed = 0;
@@ -316,14 +320,15 @@ bool out_of_memory(struct oom_control *oc)
 1. 通知 `oom_notify_list` 上的订阅者（如 virtio-balloon）释放内存，若有收获则不杀进程；
 2. 当前任务已经在退出（或已收到 SIGKILL）：直接让它作为牺牲者，授予储备访问权以便尽快退出；
 3. `GFP_NOFS` 分配不触发全局 OOM——这类分配无法进行完整的文件系统回收，杀进程可能并不必要，返回"有进展"让其重试；
-4. `constrained_alloc()`（`mm/oom_kill.c:252`）判断这次 OOM 是否只是 cpuset 或 mempolicy 限定的节点不足，以决定候选进程的范围和 `totalpages` 的计算；
+4. `constrained_alloc()`（[`mm/oom_kill.c:252`](../../linux/mm/oom_kill.c#L252)）判断这次 OOM 是否只是 cpuset 或 mempolicy 限定的节点不足，以决定候选进程的范围和 `totalpages` 的计算；
 5. `vm.panic_on_oom` 为真时直接 panic；`vm.oom_kill_allocating_task` 为真时直接杀当前进程；
 6. 否则 `select_bad_process()` 选择得分最高者并杀死。
 
 ### 打分：`oom_badness()`
 
+[`mm/oom_kill.c:202-240`](../../linux/mm/oom_kill.c#L202-L240)（v6.18.60）
+
 ```c
-// mm/oom_kill.c:202-240（v6.18.60）
 long oom_badness(struct task_struct *p, unsigned long totalpages)
 {
 	long points;
@@ -367,12 +372,13 @@ long oom_badness(struct task_struct *p, unsigned long totalpages)
 
 得分 = 驻留内存页数 + 交换项数 + 页表页数 + `oom_score_adj × totalpages / 1000`。也就是说，得分以"占用了多少内存"为基准，`oom_score_adj`（范围 −1000～1000，通过 `/proc/PID/oom_score_adj` 设置）按千分之一总内存为单位调整。`-1000`（`OOM_SCORE_ADJ_MIN`）使进程完全免于被选中；`+1000` 几乎保证被优先选中。内核线程、init 进程等 `oom_unkillable_task()` 返回真的任务不参与。
 
-v2.6.36 之前的打分算法要复杂得多（考虑 CPU 时间、nice 值、运行时长、子进程数等），由 David Rientjes 重写为现在这种"只看内存占用"的简洁形式，行为更可预测。`/proc/PID/oom_score` 显示的是归一化后的分数（`fs/proc/base.c:596`，`(1000 + badness × 1000 / totalpages) × 2 / 3`）。
+v2.6.36 之前的打分算法要复杂得多（考虑 CPU 时间、nice 值、运行时长、子进程数等），由 David Rientjes 重写为现在这种"只看内存占用"的简洁形式，行为更可预测。`/proc/PID/oom_score` 显示的是归一化后的分数（[`fs/proc/base.c:596`](../../linux/fs/proc/base.c#L596)，`(1000 + badness × 1000 / totalpages) × 2 / 3`）。
 
 ### 选择：`select_bad_process()`
 
+[`mm/oom_kill.c:309-380`](../../linux/mm/oom_kill.c#L309-L380)（v6.18.60，节选）
+
 ```c
-// mm/oom_kill.c:309-380（v6.18.60，节选）
 static int oom_evaluate_task(struct task_struct *task, void *arg)
 {
 	struct oom_control *oc = arg;
@@ -425,8 +431,9 @@ static void select_bad_process(struct oom_control *oc)
 
 ### 杀死：`__oom_kill_process()`
 
+[`mm/oom_kill.c:927-1006`](../../linux/mm/oom_kill.c#L927-L1006)（v6.18.60，节选）
+
 ```c
-// mm/oom_kill.c:927-1006（v6.18.60，节选）
 static void __oom_kill_process(struct task_struct *victim, const char *message)
 {
 	...
@@ -476,16 +483,17 @@ static void __oom_kill_process(struct task_struct *victim, const char *message)
 - 所有共享同一 `mm` 的进程（`CLONE_VM` 但非同一线程组，如 `vfork()` 的子进程）也被杀死，否则 mm 不会被释放；
 - 内核日志中常见的 "Killed process ... anon-rss:... file-rss:..." 就来自这里。
 
-外层的 `oom_kill_process()`（`mm/oom_kill.c:1023`）还会处理 cgroup v2 的 `memory.oom.group`：若牺牲者所在的 cgroup 设置了该选项，整个 cgroup 的进程都会被一起杀死，保证一个多进程服务不会被"杀掉一半"。
+外层的 `oom_kill_process()`（[`mm/oom_kill.c:1023`](../../linux/mm/oom_kill.c#L1023)）还会处理 cgroup v2 的 `memory.oom.group`：若牺牲者所在的 cgroup 设置了该选项，整个 cgroup 的进程都会被一起杀死，保证一个多进程服务不会被"杀掉一半"。
 
 ### 收割：OOM Reaper
 
 牺牲者收到 SIGKILL 后，要等到它被调度运行、执行完退出路径（`exit_mmap()`），内存才会释放。如果它正阻塞在某个不可中断的等待中（例如等待另一个也在等内存的锁），系统可能陷入活锁。
 
-**OOM Reaper**（v4.6 引入）是一个内核线程，在牺牲者被杀约 2 秒后（`OOM_REAPER_DELAY`，`mm/oom_kill.c:700`）主动替它拆除地址空间中的匿名映射：
+**OOM Reaper**（v4.6 引入）是一个内核线程，在牺牲者被杀约 2 秒后（`OOM_REAPER_DELAY`，[`mm/oom_kill.c:700`](../../linux/mm/oom_kill.c#L700)）主动替它拆除地址空间中的匿名映射：
+
+[`mm/oom_kill.c:577-615`](../../linux/mm/oom_kill.c#L577-L615)（v6.18.60，节选）
 
 ```c
-// mm/oom_kill.c:577-615（v6.18.60，节选）
 static bool oom_reap_task_mm(struct task_struct *tsk, struct mm_struct *mm)
 {
 	bool ret = true;
@@ -513,7 +521,7 @@ static bool oom_reap_task_mm(struct task_struct *tsk, struct mm_struct *mm)
 }
 ```
 
-收割只需 `mmap_lock` 读锁（用 trylock，失败则稍后重试），`__oom_reap_task_mm()`（`mm/oom_kill.c:515`）遍历所有 VMA，跳过 hugetlb 与 `VM_PFNMAP` 映射，对匿名 VMA 和私有（非 `VM_SHARED`）映射调用 `unmap_page_range()` 释放其中的页——牺牲者反正要死了，这些私有内存不再需要。共享映射被跳过，因为别的进程可能还在使用。收割完成（或重试多次失败）后设置 `MMF_OOM_SKIP`，告诉 OOM Killer"这个牺牲者已经尽力了"，如果内存仍然不足，可以选择下一个牺牲者。
+收割只需 `mmap_lock` 读锁（用 trylock，失败则稍后重试），`__oom_reap_task_mm()`（[`mm/oom_kill.c:515`](../../linux/mm/oom_kill.c#L515)）遍历所有 VMA，跳过 hugetlb 与 `VM_PFNMAP` 映射，对匿名 VMA 和私有（非 `VM_SHARED`）映射调用 `unmap_page_range()` 释放其中的页——牺牲者反正要死了，这些私有内存不再需要。共享映射被跳过，因为别的进程可能还在使用。收割完成（或重试多次失败）后设置 `MMF_OOM_SKIP`，告诉 OOM Killer"这个牺牲者已经尽力了"，如果内存仍然不足，可以选择下一个牺牲者。
 
 ```mermaid
 sequenceDiagram

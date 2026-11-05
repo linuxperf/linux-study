@@ -1,6 +1,6 @@
 # 4.11 交换机制
 
-> **本节源码**：`include/linux/swap.h`、`include/linux/swapops.h`、`arch/x86/include/asm/pgtable_64.h`、`mm/swapfile.c`、`mm/swap.h`、`mm/swap_table.h`、`mm/swap_state.c`、`mm/page_io.c`、`mm/rmap.c`、`mm/vmscan.c`、`mm/memory.c`、`mm/zswap.c`
+> **本节源码**：[`include/linux/swap.h`](../../linux/include/linux/swap.h)、[`include/linux/swapops.h`](../../linux/include/linux/swapops.h)、[`arch/x86/include/asm/pgtable_64.h`](../../linux/arch/x86/include/asm/pgtable_64.h)、[`mm/swapfile.c`](../../linux/mm/swapfile.c)、[`mm/swap.h`](../../linux/mm/swap.h)、[`mm/swap_table.h`](../../linux/mm/swap_table.h)、[`mm/swap_state.c`](../../linux/mm/swap_state.c)、[`mm/page_io.c`](../../linux/mm/page_io.c)、[`mm/rmap.c`](../../linux/mm/rmap.c)、[`mm/vmscan.c`](../../linux/mm/vmscan.c)、[`mm/memory.c`](../../linux/mm/memory.c)、[`mm/zswap.c`](../../linux/mm/zswap.c)
 > **关键函数**：`folio_alloc_swap()`、`swap_alloc_fast()`、`swap_alloc_slow()`、`swap_cache_get_folio()`、`try_to_unmap_one()`、`swap_writeout()`、`do_swap_page()`、`swapin_readahead()`、`zswap_store()`
 > **前置知识**：4.9 写时复制与反向映射、4.10 页面回收
 
@@ -18,20 +18,22 @@
 
 交换项 `swp_entry_t` 是一个 `unsigned long`，由两部分组成：交换设备号（type，即 `swap_info[]` 的下标）和设备内的槽位偏移（offset，以页为单位）：
 
+[`include/linux/swapops.h:27-28`](../../linux/include/linux/swapops.h#L27-L28)（v6.18.60）
+
 ```c
-// include/linux/swapops.h:27-28（v6.18.60）
 #define SWP_TYPE_SHIFT	(BITS_PER_XA_VALUE - MAX_SWAPFILES_SHIFT)
 #define SWP_OFFSET_MASK	((1UL << SWP_TYPE_SHIFT) - 1)
 ```
 
-`swp_entry()`、`swp_type()`、`swp_offset()`（`include/linux/swapops.h:86-110`）在这个与体系结构无关的格式上做编解码。type 的高端编号被保留给"非交换"用途：迁移项（Migration Entry）、设备私有项、硬件损坏项（hwpoison）、PTE 标记等，它们复用同一套不存在 PTE 的编码，`non_swap_entry()` 用来区分。
+`swp_entry()`、`swp_type()`、`swp_offset()`（[`include/linux/swapops.h:86-110`](../../linux/include/linux/swapops.h#L86-L110)）在这个与体系结构无关的格式上做编解码。type 的高端编号被保留给"非交换"用途：迁移项（Migration Entry）、设备私有项、硬件损坏项（hwpoison）、PTE 标记等，它们复用同一套不存在 PTE 的编码，`non_swap_entry()` 用来区分。
 
 ### 在 x86_64 PTE 中的编码
 
 交换项写入 PTE 时要转换为体系结构相关的格式，保证 Present 位为 0：
 
+[`arch/x86/include/asm/pgtable_64.h:213-235`](../../linux/arch/x86/include/asm/pgtable_64.h#L213-L235)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/pgtable_64.h:213-235（v6.18.60）
 #define SWP_TYPE_BITS		5
 
 #define SWP_OFFSET_FIRST_BIT	(_PAGE_BIT_PROTNONE + 1)
@@ -67,7 +69,7 @@
 
 *图 4-17：x86_64 交换项 PTE 格式（P=0；E=独占，F=uffd-wp，SD=soft-dirty）*
 
-几个设计细节（见 `arch/x86/include/asm/pgtable_64.h:184-211` 的注释）：
+几个设计细节（见 [`arch/x86/include/asm/pgtable_64.h:184-211`](../../linux/arch/x86/include/asm/pgtable_64.h#L184-L211) 的注释）：
 
 - type 放在最高 5 位，最多 32 个交换设备（`MAX_SWAPFILES` 实际更少，部分编号保留给非交换项）；
 - offset 从第 9 位开始，避开第 8 位（PROTNONE）以及 Accessed/Dirty 位（某些 CPU 的勘误会在不存在的 PTE 上错误地设置它们）；
@@ -80,8 +82,9 @@
 
 每个交换设备（`swapon` 启用的分区或文件）由一个 `swap_info_struct` 描述：
 
+[`include/linux/swap.h:263-286`](../../linux/include/linux/swap.h#L263-L286)（v6.18.60，节选）
+
 ```c
-// include/linux/swap.h:263-286（v6.18.60，节选）
 struct swap_info_struct {
 	struct percpu_ref users;	/* indicate and keep swap device valid. */
 	unsigned long	flags;		/* SWP_USED etc: see above */
@@ -120,10 +123,11 @@ struct swap_info_struct {
 
 ### cluster
 
-槽位按 **cluster** 组织，每个 cluster 包含 `SWAPFILE_CLUSTER` 个槽位，启用 THP 时等于 `HPAGE_PMD_NR`（512，即 2 MB），否则为 256（`mm/swap.h:12-15`）：
+槽位按 **cluster** 组织，每个 cluster 包含 `SWAPFILE_CLUSTER` 个槽位，启用 THP 时等于 `HPAGE_PMD_NR`（512，即 2 MB），否则为 256（[`mm/swap.h:12-15`](../../linux/mm/swap.h#L12-L15)）：
+
+[`mm/swap.h:30-41`](../../linux/mm/swap.h#L30-L41)（v6.18.60）
 
 ```c
-// mm/swap.h:30-41（v6.18.60）
 struct swap_cluster_info {
 	spinlock_t lock;	/*
 				 * Protect swap_cluster_info fields
@@ -142,8 +146,9 @@ struct swap_cluster_info {
 
 ### 分配：`folio_alloc_swap()`
 
+[`mm/swapfile.c:1429-1479`](../../linux/mm/swapfile.c#L1429-L1479)（v6.18.60，节选）
+
 ```c
-// mm/swapfile.c:1429-1479（v6.18.60，节选）
 int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 {
 	unsigned int order = folio_order(folio);
@@ -187,8 +192,9 @@ again:
 
 快速路径 `swap_alloc_fast()` 使用 per-CPU 记录的"当前 cluster"（每阶一个）：
 
+[`mm/swapfile.c:1315-1344`](../../linux/mm/swapfile.c#L1315-L1344)（v6.18.60）
+
 ```c
-// mm/swapfile.c:1315-1344（v6.18.60）
 static bool swap_alloc_fast(swp_entry_t *entry,
 			    int order)
 {
@@ -221,7 +227,7 @@ static bool swap_alloc_fast(swp_entry_t *entry,
 }
 ```
 
-只需持有该 cluster 的锁即可分配，不同 CPU 使用不同 cluster，互不竞争。同一 CPU 连续换出的页落在相邻槽位，换入时可以顺序预读，对机械硬盘尤其有利。快速路径失败时，`swap_alloc_slow()`（`mm/swapfile.c:1347`）按优先级遍历可用设备（`swap_avail_heads[node]`，每个 NUMA 节点一个列表），从中选取新的 cluster（`cluster_alloc_swap_entry()`，`mm/swapfile.c:1028`），同优先级设备之间通过 `plist_requeue()` 轮转。
+只需持有该 cluster 的锁即可分配，不同 CPU 使用不同 cluster，互不竞争。同一 CPU 连续换出的页落在相邻槽位，换入时可以顺序预读，对机械硬盘尤其有利。快速路径失败时，`swap_alloc_slow()`（[`mm/swapfile.c:1347`](../../linux/mm/swapfile.c#L1347)）按优先级遍历可用设备（`swap_avail_heads[node]`，每个 NUMA 节点一个列表），从中选取新的 cluster（`cluster_alloc_swap_entry()`，[`mm/swapfile.c:1028`](../../linux/mm/swapfile.c#L1028)），同优先级设备之间通过 `plist_requeue()` 轮转。
 
 `SWAP_HAS_CACHE` 参数表示分配的槽位同时被交换缓存占用。分配成功后 `mem_cgroup_try_charge_swap()` 把槽位计入 memcg 的交换用量（`memory.swap.max`），最后 `swap_cache_add_folio()` 把 folio 放入交换缓存。
 
@@ -239,8 +245,9 @@ static bool swap_alloc_fast(swp_entry_t *entry,
 
 v6.18 之前，交换缓存用每 64 MB 一棵的 XArray（基数树）实现。v6.18 引入**交换表**：每个 cluster 附带一个与 cluster 槽位一一对应的指针数组：
 
+[`mm/swap_table.h:9-12`](../../linux/mm/swap_table.h#L9-L12)（v6.18.60）
+
 ```c
-// mm/swap_table.h:9-12（v6.18.60）
 /* A typical flat array in each cluster as swap table */
 struct swap_table {
 	atomic_long_t entries[SWAPFILE_CLUSTER];
@@ -249,8 +256,9 @@ struct swap_table {
 
 一个 cluster 有 512 个槽位，交换表恰好 512 × 8 字节 = 一页。表项有三种取值：NULL（槽位未用）、folio 指针（槽位正在换入/换出，或已换入但仍保留）、shadow 值（已换出，记录 workingset 信息供 refault 检测）。由于换入换出时总是已经知道（或持有）对应的 cluster，查找退化为一次数组下标访问：
 
+[`mm/swap_state.c:87-103`](../../linux/mm/swap_state.c#L87-L103)（v6.18.60）
+
 ```c
-// mm/swap_state.c:87-103（v6.18.60）
 struct folio *swap_cache_get_folio(swp_entry_t entry)
 {
 	unsigned long swp_tb;
@@ -278,8 +286,9 @@ struct folio *swap_cache_get_folio(swp_entry_t entry)
 
 ### 第一步：分配槽位并加入交换缓存
 
+[`mm/vmscan.c:1307-1344`](../../linux/mm/vmscan.c#L1307-L1344)（v6.18.60，节选）
+
 ```c
-// mm/vmscan.c:1307-1344（v6.18.60，节选）
 		if (folio_test_anon(folio) && folio_test_swapbacked(folio)) {
 			if (!folio_test_swapcache(folio)) {
 				if (!(sc->gfp_mask & __GFP_IO))
@@ -309,8 +318,9 @@ struct folio *swap_cache_get_folio(swp_entry_t entry)
 
 `try_to_unmap()` 经反向映射对每个映射调用 `try_to_unmap_one()`，匿名页分支把 PTE 替换为交换项：
 
+[`mm/rmap.c:2183-2228`](../../linux/mm/rmap.c#L2183-L2228)（v6.18.60，节选）
+
 ```c
-// mm/rmap.c:2183-2228（v6.18.60，节选）
 			if (swap_duplicate(entry) < 0) {
 				set_pte_at(mm, address, pvmw.pte, pteval);
 				goto walk_abort;
@@ -344,8 +354,9 @@ struct folio *swap_cache_get_folio(swp_entry_t entry)
 
 解除所有映射后，脏的交换缓存 folio 由 `pageout()` 写出，匿名页最终进入 `swap_writeout()`：
 
+[`mm/page_io.c:240-289`](../../linux/mm/page_io.c#L240-L289)（v6.18.60，节选）
+
 ```c
-// mm/page_io.c:240-289（v6.18.60，节选）
 int swap_writeout(struct folio *folio, struct swap_iocb **swap_plug)
 {
 	int ret = 0;
@@ -387,7 +398,7 @@ int swap_writeout(struct folio *folio, struct swap_iocb **swap_plug)
 2. **全零页**：只在 `zeromap` 中置位，不做 I/O，换入时直接填零（v6.12 引入）；
 3. **zswap**：压缩后存入内存池（见后文），成功则不写盘。
 
-都不满足时 `__swap_writepage()`（`mm/page_io.c:447`）构造 bio 提交给块设备，或对交换文件调用文件系统的 `->swap_rw`。写完成后，回收路径的下一轮扫描会发现 folio 已干净、未映射，`__remove_mapping()` 把它从交换缓存中删除（留下 shadow），释放回伙伴系统。
+都不满足时 `__swap_writepage()`（[`mm/page_io.c:447`](../../linux/mm/page_io.c#L447)）构造 bio 提交给块设备，或对交换文件调用文件系统的 `->swap_rw`。写完成后，回收路径的下一轮扫描会发现 folio 已干净、未映射，`__remove_mapping()` 把它从交换缓存中删除（留下 shadow），释放回伙伴系统。
 
 ```mermaid
 stateDiagram-v2
@@ -408,8 +419,9 @@ stateDiagram-v2
 
 `handle_pte_fault()` 遇到"非空且不存在"的 PTE 时进入 `do_swap_page()`（4.8 节）。它首先区分非交换项：
 
+[`mm/memory.c:4618-4672`](../../linux/mm/memory.c#L4618-L4672)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:4618-4672（v6.18.60，节选）
 	entry = pte_to_swp_entry(vmf->orig_pte);
 	if (unlikely(non_swap_entry(entry))) {
 		if (is_migration_entry(entry)) {
@@ -435,8 +447,9 @@ stateDiagram-v2
 
 ### 查找或读入 folio
 
+[`mm/memory.c:4674-4750`](../../linux/mm/memory.c#L4674-L4750)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:4674-4750（v6.18.60，节选）
 	/* Prevent swapoff from happening to us. */
 	si = get_swap_device(entry);
 	if (unlikely(!si))
@@ -486,8 +499,9 @@ stateDiagram-v2
 
 ### 预读
 
+[`mm/swap_state.c:815-828`](../../linux/mm/swap_state.c#L815-L828)（v6.18.60）
+
 ```c
-// mm/swap_state.c:815-828（v6.18.60）
 struct folio *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 				struct vm_fault *vmf)
 {
@@ -512,12 +526,13 @@ struct folio *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 | `swap_cluster_readahead()` | 交换设备上相邻的槽位（物理局部性），窗口大小 2^`vm.page-cluster`（默认 3，即 8 页） | 旋转介质（存在 `SWP_SOLIDSTATE` 以外设备时） |
 | `swap_vma_readahead()` | 出错地址在 VMA 中相邻的 PTE 所指向的交换项（虚拟局部性） | 默认（`enable_vma_readahead`，SSD 上的交换） |
 
-`swap_use_vma_readahead()`（`mm/swap_state.c:360-363`）在没有旋转介质交换设备时选择 VMA 预读。两者的窗口大小都会根据近期预读命中率（`swap_update_readahead()` 统计）自适应调整（`__swapin_nr_pages()`，`mm/swap_state.c:542`）。
+`swap_use_vma_readahead()`（[`mm/swap_state.c:360-363`](../../linux/mm/swap_state.c#L360-L363)）在没有旋转介质交换设备时选择 VMA 预读。两者的窗口大小都会根据近期预读命中率（`swap_update_readahead()` 统计）自适应调整（`__swapin_nr_pages()`，[`mm/swap_state.c:542`](../../linux/mm/swap_state.c#L542)）。
 
 ### 建立映射
 
+[`mm/memory.c:4924-4986`](../../linux/mm/memory.c#L4924-L4986)（v6.18.60，节选）
+
 ```c
-// mm/memory.c:4924-4986（v6.18.60，节选）
 	arch_swap_restore(folio_swap(entry, folio), folio);
 
 	/*
@@ -558,7 +573,7 @@ struct folio *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	set_ptes(vma->vm_mm, address, ptep, pte, nr_pages);
 ```
 
-`swap_free_nr()` 减少槽位引用计数。`should_try_to_free_swap()`（`mm/memory.c:4332-4349`）判断是否立即释放交换缓存与槽位：交换空间紧张（`mem_cgroup_swap_full()`，使用超过一半）、VMA 或 folio 被 mlock，或者这是一次写缺页且当前进程很可能是唯一使用者（换入后马上会被修改，交换副本没有保留价值）时释放。若交换项带有独占位（E 位）或引用计数表明独占，且 VMA 可写，则直接映射为可写，省去一次后续的写保护缺页。
+`swap_free_nr()` 减少槽位引用计数。`should_try_to_free_swap()`（[`mm/memory.c:4332-4349`](../../linux/mm/memory.c#L4332-L4349)）判断是否立即释放交换缓存与槽位：交换空间紧张（`mem_cgroup_swap_full()`，使用超过一半）、VMA 或 folio 被 mlock，或者这是一次写缺页且当前进程很可能是唯一使用者（换入后马上会被修改，交换副本没有保留价值）时释放。若交换项带有独占位（E 位）或引用计数表明独占，且 VMA 可写，则直接映射为可写，省去一次后续的写保护缺页。
 
 ## zswap：压缩交换缓存
 
@@ -566,8 +581,8 @@ zswap 是位于回收路径与交换设备之间的一层**压缩内存缓存**�
 
 本书配置 `CONFIG_ZSWAP=y`，默认压缩算法为 lzo（`CONFIG_ZSWAP_COMPRESSOR_DEFAULT="lzo"`），但默认**未启用**（`CONFIG_ZSWAP_DEFAULT_ON` 未设置），需启动参数 `zswap.enabled=1` 或写 `/sys/module/zswap/parameters/enabled` 打开。
 
-- **存储**：`zswap_store()`（`mm/zswap.c:1496`）逐页压缩（`zswap_compress()`），把压缩结果存入 zsmalloc（`CONFIG_ZSMALLOC=y`），并以交换项为键记录在 zswap 的 XArray 中。仍然需要先分配交换槽位——zswap 只是"截获"了写盘这一步。
-- **加载**：换入时 `swap_read_folio()` 先调用 `zswap_load()`（`mm/zswap.c:1602`），命中则解压，不发起 I/O。
+- **存储**：`zswap_store()`（[`mm/zswap.c:1496`](../../linux/mm/zswap.c#L1496)）逐页压缩（`zswap_compress()`），把压缩结果存入 zsmalloc（`CONFIG_ZSMALLOC=y`），并以交换项为键记录在 zswap 的 XArray 中。仍然需要先分配交换槽位——zswap 只是"截获"了写盘这一步。
+- **加载**：换入时 `swap_read_folio()` 先调用 `zswap_load()`（[`mm/zswap.c:1602`](../../linux/mm/zswap.c#L1602)），命中则解压，不发起 I/O。
 - **回写**：zswap 池超过 `max_pool_percent`（默认为内存的 20%），或 zswap shrinker（`CONFIG_ZSWAP_SHRINKER_DEFAULT_ON=y`）判断其中的页已经很冷时，把最老的压缩页解压并写入真正的交换设备。
 - **memcg**：cgroup v2 的 `memory.zswap.max` 与 `memory.zswap.writeback` 可以分别限制每个 cgroup 的 zswap 用量和是否允许回写到磁盘（上文 `swap_writeout()` 中的 `mem_cgroup_zswap_writeback_enabled()` 检查）。
 

@@ -1,6 +1,6 @@
 # 3.8 PELT 负载跟踪
 
-> **本节源码**：`kernel/sched/pelt.c`、`kernel/sched/pelt.h`、`kernel/sched/sched-pelt.h`、`kernel/sched/fair.c`、`include/linux/sched.h`
+> **本节源码**：[`kernel/sched/pelt.c`](../../linux/kernel/sched/pelt.c)、[`kernel/sched/pelt.h`](../../linux/kernel/sched/pelt.h)、[`kernel/sched/sched-pelt.h`](../../linux/kernel/sched/sched-pelt.h)、[`kernel/sched/fair.c`](../../linux/kernel/sched/fair.c)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)
 > **关键函数**：`decay_load()`、`accumulate_sum()`、`___update_load_sum()`、`___update_load_avg()`、`__update_load_avg_se()`、`update_load_avg()`、`update_rq_clock_pelt()`、`util_est_update()`、`cpu_util()`
 > **前置知识**：3.1 调度器框架（`struct sched_avg`）、3.3 EEVDF、3.5 调度时钟（`clock_pelt`）
 
@@ -18,7 +18,7 @@ EEVDF 解决的是"一个 CPU 上谁先运行"，但调度器还要回答另外�
   sum = u₀ + u₁·y + u₂·y² + u₃·y³ + ...       其中 y³² = 0.5
 ```
 
-源码注释（`kernel/sched/pelt.c:152-179`）解释了这一选择：32 ms 前的贡献权重恰好是当前周期的一半。每跨过一个周期边界，只需把旧和乘以 `y` 再加上新周期的贡献，就完成了"重新编号"。
+源码注释（[`kernel/sched/pelt.c:152-179`](../../linux/kernel/sched/pelt.c#L152-L179)）解释了这一选择：32 ms 前的贡献权重恰好是当前周期的一半。每跨过一个周期边界，只需把旧和乘以 `y` 再加上新周期的贡献，就完成了"重新编号"。
 
 当实体一直处于该状态时，`sum` 收敛到最大值：
 
@@ -26,13 +26,14 @@ EEVDF 解决的是"一个 CPU 上谁先运行"，但调度器还要回答另外�
   LOAD_AVG_MAX = 1024 × (1 + y + y² + ...) ≈ 1024 / (1 − y) ≈ 47742
 ```
 
+[`kernel/sched/sched-pelt.h:14-15`](../../linux/kernel/sched/sched-pelt.h#L14-L15)（v6.18.60）
+
 ```c
-// kernel/sched/sched-pelt.h:14-15（v6.18.60）
 #define LOAD_AVG_PERIOD 32
 #define LOAD_AVG_MAX 47742
 ```
 
-平均值 `avg = sum / LOAD_AVG_MAX` 就落在 `[0, 1]` 之间，再乘以一个刻度得到最终信号。`struct sched_avg` 中的三组信号（3.1 节，`include/linux/sched.h:460-515`）分别为：
+平均值 `avg = sum / LOAD_AVG_MAX` 就落在 `[0, 1]` 之间，再乘以一个刻度得到最终信号。`struct sched_avg` 中的三组信号（3.1 节，[`include/linux/sched.h:460-515`](../../linux/include/linux/sched.h#L460-L515)）分别为：
 
 | 信号 | 定义（源码注释） | 含义 | 范围 |
 |---|---|---|---|
@@ -46,8 +47,9 @@ EEVDF 解决的是"一个 CPU 上谁先运行"，但调度器还要回答另外�
 
 ### 衰减：decay_load()
 
+[`kernel/sched/pelt.c:32-56`](../../linux/kernel/sched/pelt.c#L32-L56)（v6.18.60）
+
 ```c
-// kernel/sched/pelt.c:32-56（v6.18.60）
 static u64 decay_load(u64 val, u64 n)
 {
 	unsigned int local_n;
@@ -89,14 +91,15 @@ static u64 decay_load(u64 val, u64 n)
  ... |---x---|------| ... |------|-----x (now)
 ```
 
-*图 3-13：一次 PELT 更新覆盖的三段时间（摘自 `pelt.c:86-90` 注释）*
+*图 3-13：一次 PELT 更新覆盖的三段时间（摘自 [`kernel/sched/pelt.c:86-90`](../../linux/kernel/sched/pelt.c#L86-L90) 注释）*
 
 - `d1`：上次更新所在周期的剩余部分；
 - `d2`：中间完整的 `p − 1` 个周期；
 - `d3`：当前周期已经过去的部分。
 
+[`kernel/sched/pelt.c:102-150`](../../linux/kernel/sched/pelt.c#L102-L150)（v6.18.60，节选）
+
 ```c
-// kernel/sched/pelt.c:102-150（v6.18.60，节选）
 static __always_inline u32
 accumulate_sum(u64 delta, struct sched_avg *sa,
 	       unsigned long load, unsigned long runnable, int running)
@@ -140,14 +143,15 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 ```
 
 1. 若跨过了周期边界，先把三个旧和各衰减 `periods` 次；
-2. `__accumulate_pelt_segments()`（`pelt.c:58-79`）算出三段的总贡献：`d1·yᵖ + 1024·Σ(n=1..p-1) yⁿ + d3`，其中中间的等比数列和用 `LOAD_AVG_MAX − decay_load(LOAD_AVG_MAX, p) − 1024` 直接求得；
+2. `__accumulate_pelt_segments()`（[`kernel/sched/pelt.c:58-79`](../../linux/kernel/sched/pelt.c#L58-L79)）算出三段的总贡献：`d1·yᵖ + 1024·Σ(n=1..p-1) yⁿ + d3`，其中中间的等比数列和用 `LOAD_AVG_MAX − decay_load(LOAD_AVG_MAX, p) − 1024` 直接求得；
 3. `period_contrib` 记住当前周期已累积的长度，供下次使用；
 4. 根据实体在这段时间的状态（`load` / `runnable` / `running` 三个参数）把贡献加到对应的和上。注意这里隐含了一个假设：两次更新之间实体的状态没有变化——这正是为什么每次状态变化（入队、出队、切换）前都要先更新 PELT。
 
 ### 求平均：___update_load_avg()
 
+[`kernel/sched/pelt.c:257-268`](../../linux/kernel/sched/pelt.c#L257-L268)（v6.18.60）
+
 ```c
-// kernel/sched/pelt.c:257-268（v6.18.60）
 static __always_inline void
 ___update_load_avg(struct sched_avg *sa, unsigned long load)
 {
@@ -162,16 +166,17 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load)
 }
 ```
 
-除数不是固定的 `LOAD_AVG_MAX`，而是 `LOAD_AVG_MAX − 1024 + period_contrib`（`pelt.h:45-50`）。注释（`pelt.c:233-256`）解释：当前周期尚未走完的部分不应被当作空闲，否则一个始终运行的任务的 `util_avg` 会在 1002～1024 之间振荡。
+除数不是固定的 `LOAD_AVG_MAX`，而是 `LOAD_AVG_MAX − 1024 + period_contrib`（[`kernel/sched/pelt.h:45-50`](../../linux/kernel/sched/pelt.h#L45-L50)）。注释（[`kernel/sched/pelt.c:233-256`](../../linux/kernel/sched/pelt.c#L233-L256)）解释：当前周期尚未走完的部分不应被当作空闲，否则一个始终运行的任务的 `util_avg` 会在 1002～1024 之间振荡。
 
-`___update_load_sum()`（`pelt.c:180-231`）是对外入口：以 1024 ns 为单位（近似 1 μs，可用移位代替除法）计算 `delta`，只有跨过周期边界时才返回 1，提示调用者需要重新计算平均值。
+`___update_load_sum()`（[`kernel/sched/pelt.c:180-231`](../../linux/kernel/sched/pelt.c#L180-L231)）是对外入口：以 1024 ns 为单位（近似 1 μs，可用移位代替除法）计算 `delta`，只有跨过周期边界时才返回 1，提示调用者需要重新计算平均值。
 
 ### 各类实体的更新
 
 `pelt.c` 为不同对象提供了薄包装，区别只在于传入的 `load` / `runnable` / `running`：
 
+[`kernel/sched/pelt.c:307-334`](../../linux/kernel/sched/pelt.c#L307-L334)（v6.18.60）
+
 ```c
-// kernel/sched/pelt.c:307-334（v6.18.60）
 int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	if (___update_load_sum(now, &se->avg, !!se->on_rq, se_runnable(se),
@@ -211,16 +216,17 @@ int __update_load_avg_cfs_rq(u64 now, struct cfs_rq *cfs_rq)
 | 中断（`CONFIG_HAVE_SCHED_AVG_IRQ`） | 中断时间 | 同左 | 同左 | `rq->avg_irq` |
 | 硬件压力（`CONFIG_SCHED_HW_PRESSURE`） | 被限频的算力 | 同左 | 同左 | `rq->avg_hw` |
 
-RT 与 DL 不跟踪单个任务，只在 rq 级别统计"本 CPU 有多少时间在跑 RT / DL"（`update_rt_rq_load_avg()`、`update_dl_rq_load_avg()`，`pelt.c:347-386`），在 3.6、3.7 节的 `put_prev_task` / `task_tick` 中调用。
+RT 与 DL 不跟踪单个任务，只在 rq 级别统计"本 CPU 有多少时间在跑 RT / DL"（`update_rt_rq_load_avg()`、`update_dl_rq_load_avg()`，[`kernel/sched/pelt.c:347-386`](../../linux/kernel/sched/pelt.c#L347-L386)），在 3.6、3.7 节的 `put_prev_task` / `task_tick` 中调用。
 
-注意 `cfs_rq` 的 `load_sum` 已经乘了权重，所以 `___update_load_avg(&cfs_rq->avg, 1)` 传入 1；而 `__update_load_avg_blocked_se()`（`pelt.c:296-305`）以全 0 参数更新睡眠实体，只做衰减。
+注意 `cfs_rq` 的 `load_sum` 已经乘了权重，所以 `___update_load_avg(&cfs_rq->avg, 1)` 传入 1；而 `__update_load_avg_blocked_se()`（[`kernel/sched/pelt.c:296-305`](../../linux/kernel/sched/pelt.c#L296-L305)）以全 0 参数更新睡眠实体，只做衰减。
 
 ## 在公平类中的维护
 
 ### update_load_avg()
 
+[`kernel/sched/fair.c:4904-4944`](../../linux/kernel/sched/fair.c#L4904-L4944)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:4904-4944（v6.18.60）
 static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	u64 now = cfs_rq_clock_pelt(cfs_rq);
@@ -267,7 +273,7 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 3.3 节中 `enqueue_entity()`、`dequeue_entity()`、`set_next_entity()`、`put_prev_entity()`、`entity_tick()` 开头的 `update_load_avg()` 调用都是为了在状态变化前"结算"PELT：
 
 1. 更新实体自己的信号；
-2. 更新所在 `cfs_rq` 的信号（`update_cfs_rq_load_avg()`，`fair.c:4746` 起），并处理 `removed` 中异步移除的负载（迁移走的任务的贡献）；
+2. 更新所在 `cfs_rq` 的信号（`update_cfs_rq_load_avg()`，[`kernel/sched/fair.c:4746`](../../linux/kernel/sched/fair.c#L4746) 起），并处理 `removed` 中异步移除的负载（迁移走的任务的贡献）；
 3. 若为组实体，把子 `cfs_rq` 的变化沿层级向上传播（`propagate_entity_load_avg()`）；
 4. 任务迁入新 CPU 时 **attach**（把任务的贡献加到新 `cfs_rq`），迁出时 **detach**；
 5. `cfs_rq_util_change()` 通知 cpufreq：利用率变了，可能需要调频；
@@ -277,12 +283,13 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 
 `cfs_rq` 的信号是其上**所有实体**的贡献之和，包括已经睡眠但曾在此运行的任务（"blocked load"）。任务睡眠时不会立即从 `cfs_rq->avg` 中移除，而是随时间一起衰减。这让负载均衡看到的是"最近一段时间"的负载，而不是瞬时的可运行任务数——一个频繁短暂睡眠的任务不会让 CPU 看起来忽忙忽闲。
 
-空闲 CPU 不会自己更新 blocked load，所以 nohz idle 负载均衡会顺便替它们衰减（`sched_balance_update_blocked_averages()`，3.9 节），`rq->has_blocked_load` 记录是否还有待衰减的负载（`kernel/sched/sched.h:1131`，依赖 `CONFIG_NO_HZ_COMMON`）。
+空闲 CPU 不会自己更新 blocked load，所以 nohz idle 负载均衡会顺便替它们衰减（`sched_balance_update_blocked_averages()`，3.9 节），`rq->has_blocked_load` 记录是否还有待衰减的负载（[`kernel/sched/sched.h:1131`](../../linux/kernel/sched/sched.h#L1131)，依赖 `CONFIG_NO_HZ_COMMON`）。
 
 ### 新任务的初值
 
+[`kernel/sched/fair.c:1159-1175`](../../linux/kernel/sched/fair.c#L1159-L1175)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:1159-1175（v6.18.60）
 void init_entity_runnable_average(struct sched_entity *se)
 {
 	struct sched_avg *sa = &se->avg;
@@ -302,14 +309,15 @@ void init_entity_runnable_average(struct sched_entity *se)
 }
 ```
 
-新任务的 `load_avg` 初始为满值，使 fork 均衡把它当作重任务对待；`util_avg` 则在 `wake_up_new_task()` 中由 `post_init_entity_util_avg()`（`fair.c:1204-1240`）根据目标 CPU 现有利用率外推，并限制为剩余算力的一半（注释给出了 512、256、128… 的递减序列），防止一次 fork 大量任务时把利用率估爆。
+新任务的 `load_avg` 初始为满值，使 fork 均衡把它当作重任务对待；`util_avg` 则在 `wake_up_new_task()` 中由 `post_init_entity_util_avg()`（[`kernel/sched/fair.c:1204-1240`](../../linux/kernel/sched/fair.c#L1204-L1240)）根据目标 CPU 现有利用率外推，并限制为剩余算力的一半（注释给出了 512、256、128… 的递减序列），防止一次 fork 大量任务时把利用率估爆。
 
 ## 频率与算力不变性
 
 如果 CPU 以一半频率运行，完成同样的工作需要两倍时间，未经修正的 `util_avg` 会翻倍，导致 schedutil 误以为需要更高频率——形成正反馈。PELT 通过专用时钟 `clock_pelt` 解决这个问题：
 
+[`kernel/sched/pelt.h:100-127`](../../linux/kernel/sched/pelt.h#L100-L127)（v6.18.60，节选）
+
 ```c
-// kernel/sched/pelt.h:100-127（v6.18.60，节选）
 static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
 {
 	if (unlikely(is_idle_task(rq->curr))) {
@@ -325,7 +333,7 @@ static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
 ```
 
 - 运行时，`clock_pelt` 按"CPU 算力 / 最大算力 × 当前频率 / 最大频率"缩放后前进，因此测得的是"折算到最大算力最高频率下完成的工作量"。x86 上频率比例来自 3.5 节 `sched_tick()` 中 `arch_scale_freq_tick()` 读取的 APERF/MPERF。
-- 空闲时，`clock_pelt` 直接同步到 `clock_task`（`_update_idle_rq_clock_pelt()`，`pelt.h:78-86`）。注释中的示意图（`pelt.h:88-99`）展示了半速运行时 `clock_pelt` 先变慢、空闲时再追上的过程。
+- 空闲时，`clock_pelt` 直接同步到 `clock_task`（`_update_idle_rq_clock_pelt()`，[`kernel/sched/pelt.h:78-86`](../../linux/kernel/sched/pelt.h#L78-L86)）。注释中的示意图（[`kernel/sched/pelt.h:88-99`](../../linux/kernel/sched/pelt.h#L88-L99)）展示了半速运行时 `clock_pelt` 先变慢、空闲时再追上的过程。
 
 于是 `util_avg` 的含义变成"需要多少最大算力"，可以直接与 `capacity_of(cpu)` 比较。`update_rq_clock_pelt()` 由 3.5 节 `update_rq_clock_task()` 末尾调用。
 
@@ -333,10 +341,11 @@ static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
 
 PELT 的平滑带来一个问题：一个周期性运行 8 ms、睡眠 8 ms 的任务，长时间睡眠后 `util_avg` 会衰减得很低，醒来时调频和选核会低估它的需求，需要几十毫秒才能"爬"回来。
 
-`util_est`（`UTIL_EST` 特性，默认开启，`features.h:129`）为每个任务记住它**上次睡眠时**的利用率，并用指数加权移动平均（EWMA）平滑：
+`util_est`（`UTIL_EST` 特性，默认开启，[`kernel/sched/features.h:129`](../../linux/kernel/sched/features.h#L129)）为每个任务记住它**上次睡眠时**的利用率，并用指数加权移动平均（EWMA）平滑：
+
+[`kernel/sched/fair.c:5076-5101`](../../linux/kernel/sched/fair.c#L5076-L5101)（v6.18.60，节选）
 
 ```c
-// kernel/sched/fair.c:5076-5101（v6.18.60，节选）
 	/* Get utilization at dequeue */
 	dequeued = task_util(p);
 
@@ -365,14 +374,15 @@ PELT 的平滑带来一个问题：一个周期性运行 8 ms、睡眠 8 ms 的�
 		goto done;
 ```
 
-- **上升立即跟随，下降缓慢平滑**：利用率变大时直接采用新值，变小时按权重 1/4（`UTIL_EST_WEIGHT_SHIFT = 2`，`include/linux/sched.h:525`）做 EWMA。
+- **上升立即跟随，下降缓慢平滑**：利用率变大时直接采用新值，变小时按权重 1/4（`UTIL_EST_WEIGHT_SHIFT = 2`，[`include/linux/sched.h:525`](../../linux/include/linux/sched.h#L525)）做 EWMA。
 - 如果任务在这次激活中排队时间较多（`runnable` 明显大于 `util`），说明它没拿到想要的 CPU，测得的 `util` 偏低，这次不更新。
-- `cfs_rq->avg.util_est` 是当前可运行任务 `util_est` 之和，在 `util_est_enqueue()` / `util_est_dequeue()`（`fair.c:5016-5046`）中增减。
+- `cfs_rq->avg.util_est` 是当前可运行任务 `util_est` 之和，在 `util_est_enqueue()` / `util_est_dequeue()`（[`kernel/sched/fair.c:5016-5046`](../../linux/kernel/sched/fair.c#L5016-L5046)）中增减。
 
 任务对外的利用率是二者的较大值：
 
+[`kernel/sched/fair.c:5011-5014`](../../linux/kernel/sched/fair.c#L5011-L5014)（v6.18.60）
+
 ```c
-// kernel/sched/fair.c:5011-5014（v6.18.60）
 static inline unsigned long task_util_est(struct task_struct *p)
 {
 	return max(task_util(p), _task_util_est(p));
@@ -383,8 +393,9 @@ static inline unsigned long task_util_est(struct task_struct *p)
 
 调度器各处使用的"CPU 有多忙"最终由 `cpu_util()` 给出：
 
+[`kernel/sched/fair.c:8156-8186`](../../linux/kernel/sched/fair.c#L8156-L8186)（v6.18.60，节选）
+
 ```c
-// kernel/sched/fair.c:8156-8186（v6.18.60，节选）
 static unsigned long
 cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost)
 {
@@ -408,16 +419,16 @@ cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost)
 	if (sched_feat(UTIL_EST)) {
 ```
 
-它在 `cfs_rq->avg.util_avg` 的基础上：可选地模拟"任务 p 迁入 / 迁出后"的值（供 EAS 和选核评估）；`boost` 时取 `runnable_avg` 与 `util_avg` 的较大值以反映争用；再与 `util_est` 取较大值；最后不超过 CPU 算力（`fair.c:8225`）。
+它在 `cfs_rq->avg.util_avg` 的基础上：可选地模拟"任务 p 迁入 / 迁出后"的值（供 EAS 和选核评估）；`boost` 时取 `runnable_avg` 与 `util_avg` 的较大值以反映争用；再与 `util_est` 取较大值；最后不超过 CPU 算力（[`kernel/sched/fair.c:8225`](../../linux/kernel/sched/fair.c#L8225)）。
 
 主要使用者：
 
 | 使用者 | 用到的信号 |
 |---|---|
-| schedutil 调频（本书配置的默认调频器，`CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y`） | `cpu_util_cfs_boost()` + `avg_rt` + `avg_dl` + `avg_irq`，经 `effective_cpu_util()`（`fair.c:8280` 起）合成 |
-| 负载均衡（3.9 节） | `cpu_load()` = `cfs_rq->avg.load_avg`（`fair.c:7374-7377`）；`cpu_util_cfs()`；`runnable_avg` |
+| schedutil 调频（本书配置的默认调频器，`CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y`） | `cpu_util_cfs_boost()` + `avg_rt` + `avg_dl` + `avg_irq`，经 `effective_cpu_util()`（[`kernel/sched/fair.c:8280`](../../linux/kernel/sched/fair.c#L8280) 起）合成 |
+| 负载均衡（3.9 节） | `cpu_load()` = `cfs_rq->avg.load_avg`（[`kernel/sched/fair.c:7374-7377`](../../linux/kernel/sched/fair.c#L7374-L7377)）；`cpu_util_cfs()`；`runnable_avg` |
 | 唤醒选核 `wake_affine_weight()`（3.4 节） | `cpu_load()`、`task_h_load()` |
-| CPU 可用算力 `capacity_of()` | 返回 `rq->cpu_capacity`，由 `scale_rt_capacity()`（`fair.c:10261-10286`）从实际最大算力（已扣除硬件压力）中扣除 `avg_rt` / `avg_dl` / `avg_irq` |
+| CPU 可用算力 `capacity_of()` | 返回 `rq->cpu_capacity`，由 `scale_rt_capacity()`（[`kernel/sched/fair.c:10261-10286`](../../linux/kernel/sched/fair.c#L10261-L10286)）从实际最大算力（已扣除硬件压力）中扣除 `avg_rt` / `avg_dl` / `avg_irq` |
 | EAS、misfit 检测 | `task_util_est()`、`cpu_util()` |
 
 ## 关键细节 / 设计考量
@@ -425,7 +436,7 @@ cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost)
 - **为什么是 32 ms 半衰期**。半衰期太短，信号抖动大，负载均衡会频繁迁移任务；太长，信号对负载变化反应迟钝，调频跟不上。32 ms 约等于若干个调度周期，是长期实践中的折中。
 - **为什么以 1024 为单位**。时间以 1024 ns、周期以 1024 μs 为单位，使大量除法变为移位；`SCHED_CAPACITY_SCALE` 同为 1024，使 `util_avg` 与 CPU 算力在同一刻度上。
 - **load 与 util 的区别**。`load_avg` 乘以权重，衡量"该分到多少 CPU"，用于负载均衡中按权重均分；`util_avg` 不含权重，衡量"实际用了多少 CPU"，用于调频和算力匹配。一个 nice 19 的死循环 `util_avg` 接近 1024，`load_avg` 却只有 15。
-- **迁移的异步移除**。任务被唤醒迁移时不持有旧 CPU 的 rq 锁（3.4 节），无法直接修改旧 `cfs_rq->avg`，于是 `migrate_task_rq_fair()` 把它的贡献记到旧 `cfs_rq->removed`（`kernel/sched/sched.h:714` 处的 `struct cfs_rq` 字段），由旧 CPU 下次更新时扣除。
+- **迁移的异步移除**。任务被唤醒迁移时不持有旧 CPU 的 rq 锁（3.4 节），无法直接修改旧 `cfs_rq->avg`，于是 `migrate_task_rq_fair()` 把它的贡献记到旧 `cfs_rq->removed`（[`kernel/sched/sched.h:714`](../../linux/kernel/sched/sched.h#L714) 处的 `struct cfs_rq` 字段），由旧 CPU 下次更新时扣除。
 
 ## 动手实验
 

@@ -1,6 +1,6 @@
 # 5.7 中断申请、流控处理与线程化中断
 
-> **本节源码**：`include/linux/interrupt.h`、`kernel/irq/manage.c`、`kernel/irq/chip.c`、`kernel/irq/handle.c`、`kernel/irq/spurious.c`、`kernel/sched/syscalls.c`
+> **本节源码**：[`include/linux/interrupt.h`](../../linux/include/linux/interrupt.h)、[`kernel/irq/manage.c`](../../linux/kernel/irq/manage.c)、[`kernel/irq/chip.c`](../../linux/kernel/irq/chip.c)、[`kernel/irq/handle.c`](../../linux/kernel/irq/handle.c)、[`kernel/irq/spurious.c`](../../linux/kernel/irq/spurious.c)、[`kernel/sched/syscalls.c`](../../linux/kernel/sched/syscalls.c)
 > **关键函数**：`request_threaded_irq()`、`__setup_irq()`、`setup_irq_thread()`、`irq_setup_forced_threading()`、`handle_edge_irq()`、`handle_fasteoi_irq()`、`handle_level_irq()`、`__irq_wake_thread()`、`irq_thread()`、`irq_finalize_oneshot()`、`free_irq()`、`synchronize_irq()`、`note_interrupt()`
 > **前置知识**：5.6 通用中断层、3.6 实时调度类、7.1 并发来源与执行上下文
 
@@ -17,8 +17,9 @@
 
 每次 `request_irq()` 创建一个 `irqaction`，挂到 `desc->action` 链表上：
 
+[`include/linux/interrupt.h:122-136`](../../linux/include/linux/interrupt.h#L122-L136)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:122-136（v6.18.60）
 struct irqaction {
 	irq_handler_t		handler;	// [注] 主处理函数，硬中断上下文
 	void			*dev_id;	// [注] 驱动私有指针，共享中断时用于识别 action
@@ -38,8 +39,9 @@ struct irqaction {
 
 ### IRQF 标志
 
+[`include/linux/interrupt.h:74-90`](../../linux/include/linux/interrupt.h#L74-L90)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:74-90（v6.18.60）
 #define IRQF_SHARED		0x00000080
 #define IRQF_PROBE_SHARED	0x00000100
 #define __IRQF_TIMER		0x00000200
@@ -69,7 +71,7 @@ struct irqaction {
 | `IRQF_NO_AUTOEN` | `request_irq()` 后不自动使能，驱动稍后调用 `enable_irq()` |
 | `IRQF_NOBALANCING` | 不允许修改亲和性（`/proc/irq/N/smp_affinity` 写入失败） |
 | `IRQF_COND_ONESHOT` | 若共享者已设置 ONESHOT 则跟随（v6.9 引入；v6.18 中 `request_irq()` 默认带上该标志） |
-| `IRQF_TRIGGER_*` | 指定触发方式（`include/linux/interrupt.h:31-38`），用于需要配置的控制器 |
+| `IRQF_TRIGGER_*` | 指定触发方式（[`include/linux/interrupt.h:31-38`](../../linux/include/linux/interrupt.h#L31-L38)），用于需要配置的控制器 |
 
 *表 5-11：常用 IRQF 标志*
 
@@ -79,8 +81,9 @@ struct irqaction {
 
 `request_irq()` 只是 `thread_fn` 为空的特例：
 
+[`include/linux/interrupt.h:168-173`](../../linux/include/linux/interrupt.h#L168-L173)（v6.18.60）
+
 ```c
-// include/linux/interrupt.h:168-173（v6.18.60）
 static inline int __must_check
 request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
 	    const char *name, void *dev)
@@ -89,8 +92,9 @@ request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
 }
 ```
 
+[`kernel/irq/manage.c:2080-2146`](../../linux/kernel/irq/manage.c#L2080-L2146)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:2080-2146（v6.18.60）
 int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 			 irq_handler_t thread_fn, unsigned long irqflags,
 			 const char *devname, void *dev_id)
@@ -149,17 +153,18 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 ```
 
 - 共享中断必须提供非空的 `dev_id`：`free_irq()` 靠它在 action 链表中找到要删除的那一个。
-- 只提供 `thread_fn` 而 `handler` 为空时，使用默认主处理函数 `irq_default_primary_handler()`（`kernel/irq/manage.c:986-989`），它什么都不做，直接返回 `IRQ_WAKE_THREAD`。
+- 只提供 `thread_fn` 而 `handler` 为空时，使用默认主处理函数 `irq_default_primary_handler()`（[`kernel/irq/manage.c:986-989`](../../linux/kernel/irq/manage.c#L986-L989)），它什么都不做，直接返回 `IRQ_WAKE_THREAD`。
 - 函数使用 `GFP_KERNEL` 分配内存并可能创建内核线程，**只能在进程上下文中调用**。
 
 ### __setup_irq
 
-`__setup_irq()` 是注册的核心，按锁的层次分为几个阶段（`kernel/irq/manage.c:1431-1444` 的注释说明了锁规则：`request_mutex` → `chip_bus_lock` → `desc->lock`）。
+`__setup_irq()` 是注册的核心，按锁的层次分为几个阶段（[`kernel/irq/manage.c:1431-1444`](../../linux/kernel/irq/manage.c#L1431-L1444) 的注释说明了锁规则：`request_mutex` → `chip_bus_lock` → `desc->lock`）。
 
 **阶段一：线程化准备**（不持锁）
 
+[`kernel/irq/manage.c:1469-1507`](../../linux/kernel/irq/manage.c#L1469-L1507)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1469-1507（v6.18.60）
 	/*
 	 * Check whether the interrupt nests into another interrupt
 	 * thread.
@@ -205,8 +210,9 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 
 `setup_irq_thread()` 为每个带 `thread_fn` 的 action 创建一个内核线程：
 
+[`kernel/irq/manage.c:1396-1429`](../../linux/kernel/irq/manage.c#L1396-L1429)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1396-1429（v6.18.60）
 static int
 setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
 {
@@ -247,8 +253,9 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
 
 **阶段二：检查共享兼容性**（持 `desc->lock`）
 
+[`kernel/irq/manage.c:1553-1612`](../../linux/kernel/irq/manage.c#L1553-L1612)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1553-1612（v6.18.60）
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	old_ptr = &desc->action;
 	old = *old_ptr;
@@ -297,8 +304,9 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
 
 **阶段三：分配 ONESHOT 位**
 
+[`kernel/irq/manage.c:1619-1671`](../../linux/kernel/irq/manage.c#L1619-L1671)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1619-1671（v6.18.60）
 	if (new->flags & IRQF_ONESHOT) {
 		/*
 		 * Unlikely to have 32 resp 64 irqs sharing one line,
@@ -337,12 +345,13 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
 
 每个 ONESHOT action 分到 `thread_mask` 中的一位，硬中断唤醒线程时把该位或进 `desc->threads_oneshot`，线程结束时清除；所有位都清零后才解除中断线屏蔽。注释解释了"无主处理函数却不带 ONESHOT"为何被拒绝：对电平中断，默认主处理函数不会让设备撤销中断请求，一旦解除屏蔽，中断立即再次触发，形成中断风暴。
 
-PCI MSI 的 `irq_chip` 设置了 `IRQCHIP_ONESHOT_SAFE`（`drivers/pci/msi/irqdomain.c:134`），`__setup_irq()` 在前面会清除 `IRQF_ONESHOT`（`kernel/irq/manage.c:1518-1519`）：MSI 是边沿语义，一次写入就是一次中断，不存在"电平持续有效"的问题，因此无需在屏蔽/解除屏蔽之间来回切换。
+PCI MSI 的 `irq_chip` 设置了 `IRQCHIP_ONESHOT_SAFE`（[`drivers/pci/msi/irqdomain.c:134`](../../linux/drivers/pci/msi/irqdomain.c#L134)），`__setup_irq()` 在前面会清除 `IRQF_ONESHOT`（[`kernel/irq/manage.c:1518-1519`](../../linux/kernel/irq/manage.c#L1518-L1519)）：MSI 是边沿语义，一次写入就是一次中断，不存在"电平持续有效"的问题，因此无需在屏蔽/解除屏蔽之间来回切换。
 
 **阶段四：首个 action 启动中断**
 
+[`kernel/irq/manage.c:1673-1734`](../../linux/kernel/irq/manage.c#L1673-L1734)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1673-1734（v6.18.60）
 	if (!shared) {
 		/* Setup the type (level, edge polarity) if configured: */
 		if (new->flags & IRQF_TRIGGER_MASK) {
@@ -388,8 +397,9 @@ PCI MSI 的 `irq_chip` 设置了 `IRQCHIP_ONESHOT_SAFE`（`drivers/pci/msi/irqdo
 
 **阶段五：挂入链表并唤醒线程**
 
+[`kernel/irq/manage.c:1746-1775`](../../linux/kernel/irq/manage.c#L1746-L1775)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1746-1775（v6.18.60）
 	*old_ptr = new;
 
 	irq_pm_install_action(desc, new);
@@ -441,8 +451,9 @@ PCI MSI 的 `irq_chip` 设置了 `IRQCHIP_ONESHOT_SAFE`（`drivers/pci/msi/irqdo
 
 边沿中断的特点是：一旦应答，控制器就可以锁存下一次中断，即使上一次还没处理完。因此必须**先应答再处理**，并处理"处理期间又来了一次"的情况：
 
+[`kernel/irq/chip.c:823-858`](../../linux/kernel/irq/chip.c#L823-L858)（v6.18.60）
+
 ```c
-// kernel/irq/chip.c:823-858（v6.18.60）
 void handle_edge_irq(struct irq_desc *desc)
 {
 	guard(raw_spinlock)(&desc->lock);
@@ -481,18 +492,19 @@ void handle_edge_irq(struct irq_desc *desc)
 }
 ```
 
-- `irq_can_handle()`（`kernel/irq/chip.c:555-561`）在中断正在其他 CPU 上处理（`IRQD_IRQ_INPROGRESS`）、被禁用或没有 action 时返回假。此时记下 `IRQS_PENDING`、屏蔽并应答后直接返回，**不丢失这次中断**。
+- `irq_can_handle()`（[`kernel/irq/chip.c:555-561`](../../linux/kernel/irq/chip.c#L555-L561)）在中断正在其他 CPU 上处理（`IRQD_IRQ_INPROGRESS`）、被禁用或没有 action 时返回假。此时记下 `IRQS_PENDING`、屏蔽并应答后直接返回，**不丢失这次中断**。
 - 正在处理的 CPU 在 `handle_irq_event()` 返回后（它会重新获取 `desc->lock`），看到 `IRQS_PENDING` 就解除屏蔽、再循环处理一次。`handle_irq_event()` 开头会清除 `IRQS_PENDING`（5.6 节），所以循环在没有新中断时退出。
 - 对 x86 的 MSI 和 I/O APIC 边沿中断，`irq_ack` 最终是向量域的 `apic_ack_edge()`（5.5 节），即 LAPIC EOI。**x86 上边沿中断的 EOI 在调用驱动处理函数之前就已发出**，LAPIC 可以立即投递同一或更低优先级的其他中断——但由于 CPU 此时关着中断，它们要等到这次中断返回后才会被处理。
 
-`irq_can_handle_pm()` 中还有一段专门处理亲和性迁移的逻辑（`kernel/irq/chip.c:508-541`）：对单目标的边沿中断，若中断刚从 CPU0 迁到本 CPU、而 CPU0 仍在处理上一次，本 CPU 会自旋等待 CPU0 完成，而不是设置 PENDING 后返回。注释说明这是在虚拟机中观察到的问题：设备以极高频率发中断时，CPU0 可能因为不断看到 PENDING 而永远循环下去。
+`irq_can_handle_pm()` 中还有一段专门处理亲和性迁移的逻辑（[`kernel/irq/chip.c:508-541`](../../linux/kernel/irq/chip.c#L508-L541)）：对单目标的边沿中断，若中断刚从 CPU0 迁到本 CPU、而 CPU0 仍在处理上一次，本 CPU 会自旋等待 CPU0 完成，而不是设置 PENDING 后返回。注释说明这是在虚拟机中观察到的问题：设备以极高频率发中断时，CPU0 可能因为不断看到 PENDING 而永远循环下去。
 
 #### handle_fasteoi_irq
 
 "fasteoi"指控制器在硬件中自行处理了应答与屏蔽，软件只需在处理结束时发一次 EOI。I/O APIC 的电平中断属于此类——Remote IRR 机制保证 EOI 之前不会再投递：
 
+[`kernel/irq/chip.c:736-773`](../../linux/kernel/irq/chip.c#L736-L773)（v6.18.60）
+
 ```c
-// kernel/irq/chip.c:736-773（v6.18.60）
 void handle_fasteoi_irq(struct irq_desc *desc)
 {
 	struct irq_chip *chip = desc->irq_data.chip;
@@ -533,14 +545,15 @@ void handle_fasteoi_irq(struct irq_desc *desc)
 }
 ```
 
-ONESHOT 中断在调用处理函数之前先屏蔽；处理之后由 `cond_unmask_eoi_irq()`（`kernel/irq/chip.c:700-719`）决定：若没有唤醒任何线程（`threads_oneshot == 0`），立即 EOI 并解除屏蔽；否则只 EOI、保持屏蔽，等线程结束后再解除。**EOI 与解除屏蔽被分开了**：EOI 让 I/O APIC 清除 Remote IRR，屏蔽则阻止设备仍然有效的电平信号再次触发中断。
+ONESHOT 中断在调用处理函数之前先屏蔽；处理之后由 `cond_unmask_eoi_irq()`（[`kernel/irq/chip.c:700-719`](../../linux/kernel/irq/chip.c#L700-L719)）决定：若没有唤醒任何线程（`threads_oneshot == 0`），立即 EOI 并解除屏蔽；否则只 EOI、保持屏蔽，等线程结束后再解除。**EOI 与解除屏蔽被分开了**：EOI 让 I/O APIC 清除 Remote IRR，屏蔽则阻止设备仍然有效的电平信号再次触发中断。
 
 #### handle_level_irq
 
 传统电平控制器（如 8259 PIC）没有 Remote IRR，必须先屏蔽并应答，处理完再解除屏蔽：
 
+[`kernel/irq/chip.c:685-697`](../../linux/kernel/irq/chip.c#L685-L697)（v6.18.60）
+
 ```c
-// kernel/irq/chip.c:685-697（v6.18.60）
 void handle_level_irq(struct irq_desc *desc)
 {
 	guard(raw_spinlock)(&desc->lock);
@@ -572,8 +585,9 @@ handle_level_irq：    [mask+ack] ─▶ handler ─▶ (无线程? unmask)
 
 主处理函数返回 `IRQ_WAKE_THREAD` 后，`__handle_irq_event_percpu()` 调用 `__irq_wake_thread()`（5.6 节）：
 
+[`kernel/irq/handle.c:61-137`](../../linux/kernel/irq/handle.c#L61-L137)（v6.18.60）
+
 ```c
-// kernel/irq/handle.c:61-137（v6.18.60）
 void __irq_wake_thread(struct irq_desc *desc, struct irqaction *action)
 {
 	/*
@@ -608,12 +622,13 @@ void __irq_wake_thread(struct irq_desc *desc, struct irqaction *action)
 }
 ```
 
-`IRQTF_RUNTHREAD` 位保证线程尚未运行时重复到来的中断只唤醒一次——线程运行时会处理设备上所有挂起的事件。`threads_active` 计数供 `synchronize_irq()` 等待线程结束。注释（`kernel/irq/handle.c:78-122`）详细论证了为什么 `threads_oneshot` 可以在不持锁的情况下修改：同一中断的硬中断处理不会在两个 CPU 上并行（5.6 节），而线程清除该位时与硬中断通过 `IRQD_IRQ_INPROGRESS` 串行化。
+`IRQTF_RUNTHREAD` 位保证线程尚未运行时重复到来的中断只唤醒一次——线程运行时会处理设备上所有挂起的事件。`threads_active` 计数供 `synchronize_irq()` 等待线程结束。注释（[`kernel/irq/handle.c:78-122`](../../linux/kernel/irq/handle.c#L78-L122)）详细论证了为什么 `threads_oneshot` 可以在不持锁的情况下修改：同一中断的硬中断处理不会在两个 CPU 上并行（5.6 节），而线程清除该位时与硬中断通过 `IRQD_IRQ_INPROGRESS` 串行化。
 
 #### 线程主循环
 
+[`kernel/irq/manage.c:1242-1281`](../../linux/kernel/irq/manage.c#L1242-L1281)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1242-1281（v6.18.60）
 static int irq_thread(void *data)
 {
 	struct callback_head on_exit_work;
@@ -656,14 +671,15 @@ static int irq_thread(void *data)
 }
 ```
 
-- **调度策略**：`sched_set_fifo()` 把线程设为 `SCHED_FIFO`、优先级 `MAX_RT_PRIO / 2` 即 50（`kernel/sched/syscalls.c:853-857`）。中断线程因此优先于所有普通任务，但低于更高优先级的实时任务——系统管理员可以用 `chrt` 调整，这正是 PREEMPT_RT 系统中区分中断重要性的手段（3.6 节）。
-- **等待**：`irq_wait_for_interrupt()`（`kernel/irq/manage.c:1052-1077`）是一个标准的"设置状态 → 检查条件 → `schedule()`"循环（3.4 节的睡眠—唤醒协议），检查并清除 `IRQTF_RUNTHREAD`。
+- **调度策略**：`sched_set_fifo()` 把线程设为 `SCHED_FIFO`、优先级 `MAX_RT_PRIO / 2` 即 50（[`kernel/sched/syscalls.c:853-857`](../../linux/kernel/sched/syscalls.c#L853-L857)）。中断线程因此优先于所有普通任务，但低于更高优先级的实时任务——系统管理员可以用 `chrt` 调整，这正是 PREEMPT_RT 系统中区分中断重要性的手段（3.6 节）。
+- **等待**：`irq_wait_for_interrupt()`（[`kernel/irq/manage.c:1052-1077`](../../linux/kernel/irq/manage.c#L1052-L1077)）是一个标准的"设置状态 → 检查条件 → `schedule()`"循环（3.4 节的睡眠—唤醒协议），检查并清除 `IRQTF_RUNTHREAD`。
 - **异常退出保护**：如果线程函数中发生 Oops 导致线程退出，`irq_thread_dtor()` 会被 task_work 调用，清理 `threads_active` 与 ONESHOT 状态，避免中断线永久屏蔽、`synchronize_irq()` 永久等待。
 
 普通线程化中断调用 `irq_thread_fn()`：
 
+[`kernel/irq/manage.c:1139-1148`](../../linux/kernel/irq/manage.c#L1139-L1148)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1139-1148（v6.18.60）
 static irqreturn_t irq_thread_fn(struct irq_desc *desc,	struct irqaction *action)
 {
 	irqreturn_t ret = action->thread_fn(action->irq, action->dev_id);
@@ -678,8 +694,9 @@ static irqreturn_t irq_thread_fn(struct irq_desc *desc,	struct irqaction *action
 
 线程函数在**进程上下文**中运行：可以睡眠、可以获取 mutex、可以执行 I2C/SPI 传输等慢速操作。结束后 `irq_finalize_oneshot()` 清除本 action 的 ONESHOT 位，并在所有位都清零时解除中断线屏蔽：
 
+[`kernel/irq/manage.c:1084-1132`](../../linux/kernel/irq/manage.c#L1084-L1132)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1084-1132（v6.18.60）
 static void irq_finalize_oneshot(struct irq_desc *desc,
 				 struct irqaction *action)
 {
@@ -752,10 +769,11 @@ sequenceDiagram
 
 ### 强制线程化
 
-即使驱动只提供了主处理函数，内核也可以把它放到线程中执行，这就是**强制线程化**（forced threading），由启动参数 `threadirqs` 打开（`CONFIG_IRQ_FORCED_THREADING=y`，`kernel/irq/manage.c:27-36`）。PREEMPT_RT 内核则无条件开启（`force_irqthreads()` 恒为真）。
+即使驱动只提供了主处理函数，内核也可以把它放到线程中执行，这就是**强制线程化**（forced threading），由启动参数 `threadirqs` 打开（`CONFIG_IRQ_FORCED_THREADING=y`，[`kernel/irq/manage.c:27-36`](../../linux/kernel/irq/manage.c#L27-L36)）。PREEMPT_RT 内核则无条件开启（`force_irqthreads()` 恒为真）。
+
+[`kernel/irq/manage.c:1307-1344`](../../linux/kernel/irq/manage.c#L1307-L1344)（v6.18.60）
 
 ```c
-// kernel/irq/manage.c:1307-1344（v6.18.60）
 static int irq_setup_forced_threading(struct irqaction *new)
 {
 	if (!force_irqthreads())
@@ -800,8 +818,9 @@ static int irq_setup_forced_threading(struct irqaction *new)
 
 被强制线程化的处理函数原本是为硬中断上下文写的，它可能隐含地依赖"中断关闭、软中断关闭"这一事实。因此 `irq_forced_thread_fn()` 在调用前补上这些条件：
 
+[`kernel/irq/manage.c:1150-1168`](../../linux/kernel/irq/manage.c#L1150-L1168)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1150-1168（v6.18.60）
 /*
  * Interrupts which are not explicitly requested as threaded
  * interrupts rely on the implicit bh/preempt disable of the hard irq
@@ -827,8 +846,9 @@ static irqreturn_t irq_forced_thread_fn(struct irq_desc *desc, struct irqaction 
 
 ### free_irq 与同步
 
+[`kernel/irq/manage.c:1851-1893`](../../linux/kernel/irq/manage.c#L1851-L1893)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:1851-1893（v6.18.60）
 	/* Found it - now remove it from the list of entries: */
 	*action_ptr = action->next;
 
@@ -855,7 +875,7 @@ static irqreturn_t irq_forced_thread_fn(struct irq_desc *desc, struct irqaction 
 	__synchronize_irq(desc);
 ```
 
-`__free_irq()`（`kernel/irq/manage.c:1818-1948`）的关键顺序：
+`__free_irq()`（[`kernel/irq/manage.c:1818-1948`](../../linux/kernel/irq/manage.c#L1818-L1948)）的关键顺序：
 
 1. 在 `desc->lock` 下把 action 从链表中摘除；若是最后一个，`irq_shutdown()` 屏蔽中断线。
 2. 释放锁后 `__synchronize_irq()`，等待正在其他 CPU 上执行的硬中断处理函数和中断线程结束。
@@ -864,8 +884,9 @@ static irqreturn_t irq_forced_thread_fn(struct irq_desc *desc, struct irqaction 
 
 第 2 步之后驱动才能安全释放 `dev_id` 指向的数据结构。`synchronize_irq()` 分两步等待：
 
+[`kernel/irq/manage.c:40-72`](../../linux/kernel/irq/manage.c#L40-L72)（v6.18.60）
+
 ```c
-// kernel/irq/manage.c:40-72（v6.18.60）
 static void __synchronize_hardirq(struct irq_desc *desc, bool sync_chip)
 {
 	struct irq_data *irqd = irq_desc_get_irq_data(desc);
@@ -901,7 +922,7 @@ static void __synchronize_hardirq(struct irq_desc *desc, bool sync_chip)
 }
 ```
 
-先自旋等待 `IRQD_IRQ_INPROGRESS` 清除（硬中断处理结束），再在锁下复核；`sync_chip` 为真时还会询问控制器"是否有已投递但尚未服务的中断"——I/O APIC 的 `ioapic_irq_get_chip_state()` 检查 Remote IRR（5.5 节）。然后 `__synchronize_irq()` 在 `wait_for_threads` 等待队列上睡眠，直到 `threads_active` 归零（`kernel/irq/manage.c:108-116`）。
+先自旋等待 `IRQD_IRQ_INPROGRESS` 清除（硬中断处理结束），再在锁下复核；`sync_chip` 为真时还会询问控制器"是否有已投递但尚未服务的中断"——I/O APIC 的 `ioapic_irq_get_chip_state()` 检查 Remote IRR（5.5 节）。然后 `__synchronize_irq()` 在 `wait_for_threads` 等待队列上睡眠，直到 `threads_active` 归零（[`kernel/irq/manage.c:108-116`](../../linux/kernel/irq/manage.c#L108-L116)）。
 
 `disable_irq()` 是"禁用 + 同步"，`disable_irq_nosync()` 只禁用不等待。**在中断处理函数中调用 `disable_irq()` 处理自己的中断会死锁**：它会等待 `INPROGRESS` 清除，而那正是它自己。
 
@@ -909,8 +930,9 @@ static void __synchronize_hardirq(struct irq_desc *desc, bool sync_chip)
 
 `note_interrupt()`（`kernel/irq/spurious.c`）统计处理函数返回 `IRQ_NONE` 的次数，检测"中断不断到来却没有人认领"的故障（通常是中断路由错误或设备没有清除中断条件）：
 
+[`kernel/irq/spurious.c:355-380`](../../linux/kernel/irq/spurious.c#L355-L380)（v6.18.60）
+
 ```c
-// kernel/irq/spurious.c:355-380（v6.18.60）
 	if (likely(!desc->irqs_unhandled))
 		return;
 
@@ -939,7 +961,7 @@ static void __synchronize_hardirq(struct irq_desc *desc, bool sync_chip)
 }
 ```
 
-每 10 万次中断中若有超过 99900 次无人处理，打印 `irq N: nobody cared (try booting with the "irqpoll" option)` 与所有 action 的信息，然后禁用该中断，并启动一个定时器周期性轮询。对线程化中断，主处理函数总是返回 `IRQ_WAKE_THREAD`，真正的结论要等线程运行后才知道，所以 `note_interrupt()` 用 `threads_handled` 计数做了"延迟一个周期"的判断（`kernel/irq/spurious.c:270-311`）。
+每 10 万次中断中若有超过 99900 次无人处理，打印 `irq N: nobody cared (try booting with the "irqpoll" option)` 与所有 action 的信息，然后禁用该中断，并启动一个定时器周期性轮询。对线程化中断，主处理函数总是返回 `IRQ_WAKE_THREAD`，真正的结论要等线程运行后才知道，所以 `note_interrupt()` 用 `threads_handled` 计数做了"延迟一个周期"的判断（[`kernel/irq/spurious.c:270-311`](../../linux/kernel/irq/spurious.c#L270-L311)）。
 
 ## 关键细节 / 设计考量
 
@@ -958,7 +980,7 @@ static void __synchronize_hardirq(struct irq_desc *desc, bool sync_chip)
 
 ### 主处理函数的职责
 
-对于共享中断上的线程化处理，主处理函数并非可有可无。如果只有线程函数（`handler = NULL`），则中断线必须保持屏蔽直到线程运行，共享该线的其他设备的中断也会被延迟。因此 `request_threaded_irq()` 的文档（`kernel/irq/manage.c:2059-2065`）建议：主处理函数检查中断是否来自本设备，若是则**在设备上关闭中断**并返回 `IRQ_WAKE_THREAD`，这样中断线可以立即解除屏蔽，线程处理完再在设备上重新开启中断。
+对于共享中断上的线程化处理，主处理函数并非可有可无。如果只有线程函数（`handler = NULL`），则中断线必须保持屏蔽直到线程运行，共享该线的其他设备的中断也会被延迟。因此 `request_threaded_irq()` 的文档（[`kernel/irq/manage.c:2059-2065`](../../linux/kernel/irq/manage.c#L2059-L2065)）建议：主处理函数检查中断是否来自本设备，若是则**在设备上关闭中断**并返回 `IRQ_WAKE_THREAD`，这样中断线可以立即解除屏蔽，线程处理完再在设备上重新开启中断。
 
 ### 中断处理函数的返回值
 

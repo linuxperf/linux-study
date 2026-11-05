@@ -1,6 +1,6 @@
 # 5.2 中断入口与出口：idtentry 与 irqentry 框架
 
-> **本节源码**：`arch/x86/entry/entry_64.S`、`arch/x86/entry/calling.h`、`arch/x86/include/asm/idtentry.h`、`arch/x86/include/asm/irq_stack.h`、`arch/x86/include/asm/ptrace.h`、`kernel/entry/common.c`、`include/linux/irq-entry-common.h`、`include/linux/hardirq.h`、`kernel/softirq.c`、`arch/x86/kernel/irq.c`、`arch/x86/entry/entry_fred.c`
+> **本节源码**：[`arch/x86/entry/entry_64.S`](../../linux/arch/x86/entry/entry_64.S)、[`arch/x86/entry/calling.h`](../../linux/arch/x86/entry/calling.h)、[`arch/x86/include/asm/idtentry.h`](../../linux/arch/x86/include/asm/idtentry.h)、[`arch/x86/include/asm/irq_stack.h`](../../linux/arch/x86/include/asm/irq_stack.h)、[`arch/x86/include/asm/ptrace.h`](../../linux/arch/x86/include/asm/ptrace.h)、[`kernel/entry/common.c`](../../linux/kernel/entry/common.c)、[`include/linux/irq-entry-common.h`](../../linux/include/linux/irq-entry-common.h)、[`include/linux/hardirq.h`](../../linux/include/linux/hardirq.h)、[`kernel/softirq.c`](../../linux/kernel/softirq.c)、[`arch/x86/kernel/irq.c`](../../linux/arch/x86/kernel/irq.c)、[`arch/x86/entry/entry_fred.c`](../../linux/arch/x86/entry/entry_fred.c)
 > **关键函数**：`error_entry()`、`sync_regs()`、`irqentry_enter()`、`irqentry_exit()`、`irq_enter_rcu()`、`irq_exit_rcu()`、`common_interrupt()`、`exit_to_user_mode_loop()`
 > **前置知识**：5.1 x86_64 中断与异常体系、3.5 调度时钟与抢占模型、7.1 并发来源与执行上下文
 
@@ -18,8 +18,9 @@ v5.8 之前，这些逻辑大部分写在汇编里，各架构各自实现，容
 
 入口代码把被打断的寄存器保存为一个 `struct pt_regs`，它同时是系统调用、异常、中断共用的现场格式：
 
+[`arch/x86/include/asm/ptrace.h:103-170`](../../linux/arch/x86/include/asm/ptrace.h#L103-L170)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/ptrace.h:103-170（v6.18.60）
 struct pt_regs {
 	/*
 	 * C ABI says these regs are callee-preserved. They aren't saved on
@@ -78,7 +79,7 @@ struct pt_regs {
 };
 ```
 
-结构体的字段顺序与栈上的压入顺序严格对应：从 `ip` 到 `ss` 的 5 个字是 CPU 压入的硬件帧；`orig_ax` 是错误码槽位（无错误码的异常由入口代码补压 `-1`，设备中断则是入口桩压入的向量号）；`di` 到 `r15` 由 `PUSH_REGS` 宏（`arch/x86/entry/calling.h:68-100`）依次压入。`user_mode(regs)` 通过检查 `regs->cs` 的低 2 位（CPL）判断被打断的是用户态还是内核态。
+结构体的字段顺序与栈上的压入顺序严格对应：从 `ip` 到 `ss` 的 5 个字是 CPU 压入的硬件帧；`orig_ax` 是错误码槽位（无错误码的异常由入口代码补压 `-1`，设备中断则是入口桩压入的向量号）；`di` 到 `r15` 由 `PUSH_REGS` 宏（[`arch/x86/entry/calling.h:68-100`](../../linux/arch/x86/entry/calling.h#L68-L100)）依次压入。`user_mode(regs)` 通过检查 `regs->cs` 的低 2 位（CPL）判断被打断的是用户态还是内核态。
 
 ```
   高地址
@@ -101,8 +102,9 @@ struct pt_regs {
 
 `irqentry_enter()` 返回一个不透明的状态对象，必须原样传给 `irqentry_exit()`：
 
+[`include/linux/irq-entry-common.h:310-315`](../../linux/include/linux/irq-entry-common.h#L310-L315)（v6.18.60）
+
 ```c
-// include/linux/irq-entry-common.h:310-315（v6.18.60）
 typedef struct irqentry_state {
 	union {
 		bool	exit_rcu;
@@ -138,12 +140,13 @@ irq_entries_start[vector - 0x20]         arch/x86/include/asm/idtentry.h   push 
 
 ### 第一步：汇编入口桩
 
-`idtentry.h` 中的每个 `DECLARE_IDTENTRY*()` 在被 `entry_64.S` 包含时展开为一个汇编宏调用（`arch/x86/include/asm/idtentry.h:477-529`），在被 C 文件包含时展开为函数声明。这样同一份列表同时生成汇编桩和 C 原型，二者不会不一致。
+`idtentry.h` 中的每个 `DECLARE_IDTENTRY*()` 在被 `entry_64.S` 包含时展开为一个汇编宏调用（[`arch/x86/include/asm/idtentry.h:477-529`](../../linux/arch/x86/include/asm/idtentry.h#L477-L529)），在被 C 文件包含时展开为函数声明。这样同一份列表同时生成汇编桩和 C 原型，二者不会不一致。
 
 最常用的 `idtentry` 宏如下：
 
+[`arch/x86/entry/entry_64.S:329-365`](../../linux/arch/x86/entry/entry_64.S#L329-L365)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:329-365（v6.18.60）
 .macro idtentry vector asmsym cfunc has_error_code:req
 SYM_CODE_START(\asmsym)
 
@@ -187,12 +190,13 @@ SYM_CODE_END(\asmsym)
 - 无错误码的异常补压 `-1`，使所有入口的栈布局一致。`-1` 同时表示"这不是系统调用"，信号处理不会尝试重启系统调用。
 - #BP 的特殊处理是为 text_poke / static_call 服务的：内核在运行时改写指令时用 `int3` 临时替换首字节，`int3` 处理函数若需模拟一条 `call` 指令，就要往被打断的栈上压返回地址，所以这里预先在硬件帧下方复制出 6 个字的空隙。
 
-设备中断使用的 `idtentry_irq` 只是 `has_error_code=1` 的 `idtentry`，并把入口对齐到缓存行（`arch/x86/entry/entry_64.S:376-379`）——入口桩压入的向量号正好占据错误码槽位。
+设备中断使用的 `idtentry_irq` 只是 `has_error_code=1` 的 `idtentry`，并把入口对齐到缓存行（[`arch/x86/entry/entry_64.S:376-379`](../../linux/arch/x86/entry/entry_64.S#L376-L379)）——入口桩压入的向量号正好占据错误码槽位。
 
 `idtentry_body` 负责调用 `error_entry` 并转入 C 函数：
 
+[`arch/x86/entry/entry_64.S:289-317`](../../linux/arch/x86/entry/entry_64.S#L289-L317)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:289-317（v6.18.60）
 .macro idtentry_body cfunc has_error_code:req
 
 	/*
@@ -228,8 +232,9 @@ C 函数的第一个参数是 `pt_regs` 指针，第二个参数是错误码（�
 
 ### 第二步：error_entry
 
+[`arch/x86/entry/entry_64.S:1006-1067`](../../linux/arch/x86/entry/entry_64.S#L1006-L1067)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:1006-1067（v6.18.60）
 SYM_CODE_START(error_entry)
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_FUNC
@@ -277,7 +282,7 @@ SYM_CODE_START(error_entry)
 	RET
 ```
 
-`PUSH_AND_CLEAR_REGS save_ret=1` 压入所有通用寄存器，并把返回地址挪到栈顶（`error_entry` 是被 `call` 进来的）；随后把寄存器清零，防止被打断代码留下的值被推测执行攻击利用（`arch/x86/entry/calling.h:102-124`）。
+`PUSH_AND_CLEAR_REGS save_ret=1` 压入所有通用寄存器，并把返回地址挪到栈顶（`error_entry` 是被 `call` 进来的）；随后把寄存器清零，防止被打断代码留下的值被推测执行攻击利用（[`arch/x86/entry/calling.h:102-124`](../../linux/arch/x86/entry/calling.h#L102-L124)）。
 
 接下来分两种情况：
 
@@ -287,8 +292,9 @@ SYM_CODE_START(error_entry)
 3. `IBRS_ENTER` / `UNTRAIN_RET_FROM_CALL`：Retbleed 等漏洞的缓解，按 CPU 型号由 alternatives 打补丁，不需要时为空。
 4. 尾调用 `sync_regs()`，把 `pt_regs` 从入口栈复制到任务栈顶，返回新地址；`idtentry_body` 中的 `movq %rax, %rsp` 完成栈切换。
 
+[`arch/x86/kernel/traps.c:923-929`](../../linux/arch/x86/kernel/traps.c#L923-L929)（v6.18.60）
+
 ```c
-// arch/x86/kernel/traps.c:923-929（v6.18.60）
 asmlinkage __visible noinstr struct pt_regs *sync_regs(struct pt_regs *eregs)
 {
 	struct pt_regs *regs = (struct pt_regs *)current_top_of_stack() - 1;
@@ -300,14 +306,15 @@ asmlinkage __visible noinstr struct pt_regs *sync_regs(struct pt_regs *eregs)
 
 从用户态进入时任务栈一定是空的，`pt_regs` 总是位于任务栈的最顶端。这也是 `task_pt_regs()` 能直接算出用户现场地址的原因。
 
-**来自内核态**：GS 与 CR3 已经是内核的值，无需切换，也不换栈。但有两处特例：如果异常发生在 `native_irq_return_iret`（返回用户态的 `iretq` 本身出错，例如用户提供了非法的段选择子）或 `.Lgs_change`（加载用户 GS 选择子时出错），此时 GS 已经是用户值，必须先 `swapgs`，并由 `fixup_bad_iret()` 伪造一个"好像是从用户态刚进入"的现场（`arch/x86/entry/entry_64.S:1069-1092`）。
+**来自内核态**：GS 与 CR3 已经是内核的值，无需切换，也不换栈。但有两处特例：如果异常发生在 `native_irq_return_iret`（返回用户态的 `iretq` 本身出错，例如用户提供了非法的段选择子）或 `.Lgs_change`（加载用户 GS 选择子时出错），此时 GS 已经是用户值，必须先 `swapgs`，并由 `fixup_bad_iret()` 伪造一个"好像是从用户态刚进入"的现场（[`arch/x86/entry/entry_64.S:1069-1092`](../../linux/arch/x86/entry/entry_64.S#L1069-L1092)）。
 
 ### 第三步：C 入口宏
 
 `common_interrupt()` 用 `DEFINE_IDTENTRY_IRQ` 定义：
 
+[`arch/x86/include/asm/idtentry.h:206-222`](../../linux/arch/x86/include/asm/idtentry.h#L206-L222)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/idtentry.h:206-222（v6.18.60）
 #define DEFINE_IDTENTRY_IRQ(func)					\
 static void __##func(struct pt_regs *regs, u32 vector);			\
 									\
@@ -329,7 +336,7 @@ static noinline void __##func(struct pt_regs *regs, u32 vector)
 
 宏把一个处理函数拆成两层：外层 `func()` 是 `noinstr` 的，只做进出口工作；内层 `__func()` 是普通函数，宏后面跟随的花括号就是它的函数体。`(u32)(u8)error_code` 撤销了入口桩 `push imm8` 的符号扩展。`kvm_set_cpu_l1tf_flush_l1d()` 告诉 KVM"本 CPU 刚处理过中断，下次 VM-entry 前要刷 L1D"，是 L1TF 漏洞的缓解。
 
-**`noinstr` 与插桩区间**。`noinstr`（`include/linux/compiler_types.h:411-417`）把函数放进 `.noinstr.text` 段，并禁止 ftrace、kprobes、KASAN、KCSAN、gcov 等一切插桩。原因是：在 `irqentry_enter()` 完成之前，RCU 可能还没有"看着"这个 CPU，lockdep 还不知道中断已关闭；此时如果进入一个 tracer 回调，它使用的 RCU 读临界区就是无效的。`instrumentation_begin()` / `instrumentation_end()` 是给 objtool 的标注，表明区间内允许调用可插桩的代码；objtool 在构建时会检查 `noinstr` 函数是否在标注区间之外调用了普通函数。
+**`noinstr` 与插桩区间**。`noinstr`（[`include/linux/compiler_types.h:411-417`](../../linux/include/linux/compiler_types.h#L411-L417)）把函数放进 `.noinstr.text` 段，并禁止 ftrace、kprobes、KASAN、KCSAN、gcov 等一切插桩。原因是：在 `irqentry_enter()` 完成之前，RCU 可能还没有"看着"这个 CPU，lockdep 还不知道中断已关闭；此时如果进入一个 tracer 回调，它使用的 RCU 读临界区就是无效的。`instrumentation_begin()` / `instrumentation_end()` 是给 objtool 的标注，表明区间内允许调用可插桩的代码；objtool 在构建时会检查 `noinstr` 函数是否在标注区间之外调用了普通函数。
 
 其他几个变体：
 
@@ -351,8 +358,9 @@ RAW 变体存在的原因以 #PF 为例：CR2 寄存器保存着缺页地址，�
 
 ### 第四步：irqentry_enter
 
+[`kernel/entry/common.c:78-144`](../../linux/kernel/entry/common.c#L78-L144)（v6.18.60）
+
 ```c
-// kernel/entry/common.c:78-144（v6.18.60）
 noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 {
 	irqentry_state_t ret = {
@@ -407,7 +415,7 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 
 三条路径对应被打断时 CPU 的三种状态：
 
-1. **用户态**：调用 `enter_from_user_mode()`（`include/linux/irq-entry-common.h:87-99`），其中 `user_exit_irqoff()` 通知上下文跟踪（Context Tracking）CPU 离开用户态。本书配置开启了 `CONFIG_NO_HZ_FULL` 与 `CONFIG_CONTEXT_TRACKING_USER`，在 nohz_full CPU 上用户态是 RCU 的扩展静止状态，这一步让 RCU 重新开始关注该 CPU，同时完成用户态 CPU 时间的记账（`CONFIG_VIRT_CPU_ACCOUNTING_GEN=y`）。
+1. **用户态**：调用 `enter_from_user_mode()`（[`include/linux/irq-entry-common.h:87-99`](../../linux/include/linux/irq-entry-common.h#L87-L99)），其中 `user_exit_irqoff()` 通知上下文跟踪（Context Tracking）CPU 离开用户态。本书配置开启了 `CONFIG_NO_HZ_FULL` 与 `CONFIG_CONTEXT_TRACKING_USER`，在 nohz_full CPU 上用户态是 RCU 的扩展静止状态，这一步让 RCU 重新开始关注该 CPU，同时完成用户态 CPU 时间的记账（`CONFIG_VIRT_CPU_ACCOUNTING_GEN=y`）。
 2. **内核态 idle**：idle 任务在 `cpuidle` 中可能已进入 RCU 扩展静止状态（7.10 节），必须调用 `ct_irq_enter()` 让 RCU 重新"看着"本 CPU，否则中断处理函数中的 `rcu_read_lock()` 将不受保护。注释解释了为什么这里要**无条件**调用而不是先检查 `rcu_is_watching()`：中断可能嵌套（第一个中断在退出时执行软中断并打开中断），嵌套的时钟中断若误以为自己是第一层，会错误地报告静止状态，提前结束宽限期。
 3. **普通内核态**：RCU 已在工作，只需检查 NO_HZ 下是否要重启 tick（`rcu_irq_enter_check_tick()`）。
 
@@ -417,8 +425,9 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 
 `run_irq_on_irqstack_cond()` 展开为 `call_on_irqstack_cond()`：
 
+[`arch/x86/include/asm/irq_stack.h:132-153`](../../linux/arch/x86/include/asm/irq_stack.h#L132-L153)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/irq_stack.h:132-153（v6.18.60）
 #define call_on_irqstack_cond(func, regs, asm_call, constr, c_args...)	\
 {									\
 	/*								\
@@ -447,8 +456,9 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 
 真正的切栈由内联汇编完成：
 
+[`arch/x86/include/asm/irq_stack.h:81-100`](../../linux/arch/x86/include/asm/irq_stack.h#L81-L100)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/irq_stack.h:81-100（v6.18.60）
 #define call_on_stack(stack, func, asm_call, argconstr...)		\
 {									\
 	register void *tos asm("r11");					\
@@ -471,14 +481,15 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 }
 ```
 
-先把旧 RSP 存到中断栈顶（`hardirq_stack_ptr` 指向的那 8 字节），再把 RSP 指向那里，调用完成后 `popq %rsp` 一步恢复。对设备中断，`asm_call` 是 `ASM_CALL_IRQ`（`arch/x86/include/asm/irq_stack.h:189-192`）：依次 `call irq_enter_rcu`、`call __common_interrupt`、`call irq_exit_rcu`。也就是说，**`irq_exit_rcu()` 及其中的软中断处理同样在中断栈上执行**，这正是本书配置 `CONFIG_HAVE_IRQ_EXIT_ON_IRQ_STACK=y` 的含义。
+先把旧 RSP 存到中断栈顶（`hardirq_stack_ptr` 指向的那 8 字节），再把 RSP 指向那里，调用完成后 `popq %rsp` 一步恢复。对设备中断，`asm_call` 是 `ASM_CALL_IRQ`（[`arch/x86/include/asm/irq_stack.h:189-192`](../../linux/arch/x86/include/asm/irq_stack.h#L189-L192)）：依次 `call irq_enter_rcu`、`call __common_interrupt`、`call irq_exit_rcu`。也就是说，**`irq_exit_rcu()` 及其中的软中断处理同样在中断栈上执行**，这正是本书配置 `CONFIG_HAVE_IRQ_EXIT_ON_IRQ_STACK=y` 的含义。
 
 ### 第六步：irq_enter_rcu / irq_exit_rcu
 
 这对函数标记"硬中断上下文"的边界：
 
+[`kernel/softirq.c:659-671`](../../linux/kernel/softirq.c#L659-L671)（v6.18.60）
+
 ```c
-// kernel/softirq.c:659-671（v6.18.60）
 /**
  * irq_enter_rcu - Enter an interrupt context with RCU watching
  */
@@ -494,10 +505,11 @@ void irq_enter_rcu(void)
 }
 ```
 
-`__irq_enter_raw()`（`include/linux/hardirq.h:46-50`）给 `preempt_count` 加上 `HARDIRQ_OFFSET`，此后 `in_hardirq()` 为真（7.1 节）。如果打断的是 idle 且是最外层中断，`tick_irq_enter()` 会在 NO_HZ 模式下补更新 jiffies，让中断处理函数看到正确的时间（第 8 章）。
+`__irq_enter_raw()`（[`include/linux/hardirq.h:46-50`](../../linux/include/linux/hardirq.h#L46-L50)）给 `preempt_count` 加上 `HARDIRQ_OFFSET`，此后 `in_hardirq()` 为真（7.1 节）。如果打断的是 idle 且是最外层中断，`tick_irq_enter()` 会在 NO_HZ 模式下补更新 jiffies，让中断处理函数看到正确的时间（第 8 章）。
+
+[`kernel/softirq.c:713-742`](../../linux/kernel/softirq.c#L713-L742)（v6.18.60）
 
 ```c
-// kernel/softirq.c:713-742（v6.18.60）
 static inline void __irq_exit_rcu(void)
 {
 #ifndef __ARCH_IRQ_EXIT_IRQS_DISABLED
@@ -534,8 +546,9 @@ void irq_exit_rcu(void)
 
 ### 第七步：common_interrupt 的函数体
 
+[`arch/x86/kernel/irq.c:314-329`](../../linux/arch/x86/kernel/irq.c#L314-L329)（v6.18.60）
+
 ```c
-// arch/x86/kernel/irq.c:314-329（v6.18.60）
 /*
  * common_interrupt() handles all normal device IRQ's (the special SMP
  * cross-CPU interrupts have their own entry points).
@@ -554,12 +567,13 @@ DEFINE_IDTENTRY_IRQ(common_interrupt)
 }
 ```
 
-这就是内层 `__common_interrupt()` 的函数体。`set_irq_regs()` 把 `regs` 存入 per-CPU 变量 `__irq_regs`，供 `get_irq_regs()` 在深层调用中取用（例如 perf 采样、sysrq 打印寄存器）。`call_irq_handler()`（`arch/x86/kernel/irq.c:273-312`）用 `vector_irq[vector]` 查到 `struct irq_desc`，调用 `generic_handle_irq_desc()` 进入通用中断层（5.6、5.7 节）。如果向量没有对应的描述符（例如设备中断刚被释放），只发送中断结束信号（End Of Interrupt，EOI），避免本地 APIC 一直停留在"服务中"状态（5.5 节）。
+这就是内层 `__common_interrupt()` 的函数体。`set_irq_regs()` 把 `regs` 存入 per-CPU 变量 `__irq_regs`，供 `get_irq_regs()` 在深层调用中取用（例如 perf 采样、sysrq 打印寄存器）。`call_irq_handler()`（[`arch/x86/kernel/irq.c:273-312`](../../linux/arch/x86/kernel/irq.c#L273-L312)）用 `vector_irq[vector]` 查到 `struct irq_desc`，调用 `generic_handle_irq_desc()` 进入通用中断层（5.6、5.7 节）。如果向量没有对应的描述符（例如设备中断刚被释放），只发送中断结束信号（End Of Interrupt，EOI），避免本地 APIC 一直停留在"服务中"状态（5.5 节）。
 
 系统向量的入口更直接，以本地 APIC 定时器为例：
 
+[`arch/x86/kernel/apic/apic.c:1052-1062`](../../linux/arch/x86/kernel/apic/apic.c#L1052-L1062)（v6.18.60）
+
 ```c
-// arch/x86/kernel/apic/apic.c:1052-1062（v6.18.60）
 DEFINE_IDTENTRY_SYSVEC(sysvec_apic_timer_interrupt)
 {
 	struct pt_regs *old_regs = set_irq_regs(regs);
@@ -577,8 +591,9 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_apic_timer_interrupt)
 
 ### 第八步：irqentry_exit
 
+[`kernel/entry/common.c:185-224`](../../linux/kernel/entry/common.c#L185-L224)（v6.18.60）
+
 ```c
-// kernel/entry/common.c:185-224（v6.18.60）
 noinstr void irqentry_exit(struct pt_regs *regs, irqentry_state_t state)
 {
 	lockdep_assert_irqs_disabled();
@@ -624,13 +639,14 @@ noinstr void irqentry_exit(struct pt_regs *regs, irqentry_state_t state)
 退出同样分三种情况：
 
 - **返回用户态**：`irqentry_exit_to_user_mode()` 调用 `exit_to_user_mode_prepare()` 处理挂起的工作，然后 `exit_to_user_mode()` 通知上下文跟踪 CPU 回到用户态。
-- **返回开中断的内核态**：这是**内核抢占**的发生点之一。`irqentry_exit_cond_resched()` 在 `preempt_count() == 0` 且 `need_resched()` 时调用 `preempt_schedule_irq()`（`kernel/entry/common.c:160-170`）。本书配置为 `CONFIG_PREEMPT_DYNAMIC`，它是一个 static call，按当前抢占模型被修补为实际函数或空操作（3.5 节）。如果打断的是 idle（`exit_rcu` 为真），则不检查抢占——idle 循环自己会调用 `schedule()`。
+- **返回开中断的内核态**：这是**内核抢占**的发生点之一。`irqentry_exit_cond_resched()` 在 `preempt_count() == 0` 且 `need_resched()` 时调用 `preempt_schedule_irq()`（[`kernel/entry/common.c:160-170`](../../linux/kernel/entry/common.c#L160-L170)）。本书配置为 `CONFIG_PREEMPT_DYNAMIC`，它是一个 static call，按当前抢占模型被修补为实际函数或空操作（3.5 节）。如果打断的是 idle（`exit_rcu` 为真），则不检查抢占——idle 循环自己会调用 `schedule()`。
 - **返回关中断的内核态**：被打断的代码原本就关着中断（只可能是被异常打断，因为可屏蔽中断不会在 `IF=0` 时到来），不能抢占，只需恢复 RCU 状态。
 
 返回用户态前的工作循环：
 
+[`kernel/entry/common.c:19-63`](../../linux/kernel/entry/common.c#L19-L63)（v6.18.60）
+
 ```c
-// kernel/entry/common.c:19-63（v6.18.60）
 __always_inline unsigned long exit_to_user_mode_loop(struct pt_regs *regs,
 						     unsigned long ti_work)
 {
@@ -684,8 +700,9 @@ __always_inline unsigned long exit_to_user_mode_loop(struct pt_regs *regs,
 
 `error_return` 根据 `CS` 选择返回路径：
 
+[`arch/x86/entry/entry_64.S:1095-1101`](../../linux/arch/x86/entry/entry_64.S#L1095-L1101)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:1095-1101（v6.18.60）
 SYM_CODE_START_LOCAL(error_return)
 	UNWIND_HINT_REGS
 	DEBUG_ENTRY_ASSERT_IRQS_OFF
@@ -695,10 +712,11 @@ SYM_CODE_START_LOCAL(error_return)
 SYM_CODE_END(error_return)
 ```
 
-返回内核态只需 `POP_REGS`、跳过 `orig_ax`、执行 `iretq`（`arch/x86/entry/entry_64.S:619-659`）。返回用户态要多做几件事：
+返回内核态只需 `POP_REGS`、跳过 `orig_ax`、执行 `iretq`（[`arch/x86/entry/entry_64.S:619-659`](../../linux/arch/x86/entry/entry_64.S#L619-L659)）。返回用户态要多做几件事：
+
+[`arch/x86/entry/entry_64.S:582-617`](../../linux/arch/x86/entry/entry_64.S#L582-L617)（v6.18.60）
 
 ```asm
-// arch/x86/entry/entry_64.S:582-617（v6.18.60）
 #ifdef CONFIG_MITIGATION_PAGE_TABLE_ISOLATION
 .Lpti_restore_regs_and_return_to_usermode:
 	POP_REGS pop_rdi=0
@@ -737,7 +755,7 @@ SYM_CODE_END(error_return)
 #endif
 ```
 
-PTI 开启时，切回用户 CR3 之后任务栈就不再被映射，所以必须先把 IRET 帧复制到 cpu_entry_area 中的入口栈（`TSS_sp0`），在那里切换 CR3，最后 `swapgs` 并 `iretq`。`.Lswapgs_and_iret` 中的 `CLEAR_CPU_BUFFERS`（`arch/x86/entry/entry_64.S:574-580`）是 MDS 类漏洞的缓解，用 `verw` 清除 CPU 内部缓冲区。
+PTI 开启时，切回用户 CR3 之后任务栈就不再被映射，所以必须先把 IRET 帧复制到 cpu_entry_area 中的入口栈（`TSS_sp0`），在那里切换 CR3，最后 `swapgs` 并 `iretq`。`.Lswapgs_and_iret` 中的 `CLEAR_CPU_BUFFERS`（[`arch/x86/entry/entry_64.S:574-580`](../../linux/arch/x86/entry/entry_64.S#L574-L580)）是 MDS 类漏洞的缓解，用 `verw` 清除 CPU 内部缓冲区。
 
 ```mermaid
 sequenceDiagram
@@ -774,10 +792,11 @@ v5.8 之前，x86 的 `entry_64.S` 中有大量用汇编宏实现的 `TRACE_IRQS
 
 ### FRED 下的入口
 
-开启 FRED（`fred=on`）后，上述大部分汇编工作由硬件完成：CPU 在事件投递时自动切换 GS、保存完整的扩展栈帧（包括事件类型、向量号、CR2/DR6 等事件数据），并跳到 `asm_fred_entrypoint_user` 或 `asm_fred_entrypoint_kernel`（`arch/x86/entry/entry_64_fred.S:38-59`）。软件只需 `PUSH_AND_CLEAR_REGS` 后调用 C 分发函数：
+开启 FRED（`fred=on`）后，上述大部分汇编工作由硬件完成：CPU 在事件投递时自动切换 GS、保存完整的扩展栈帧（包括事件类型、向量号、CR2/DR6 等事件数据），并跳到 `asm_fred_entrypoint_user` 或 `asm_fred_entrypoint_kernel`（[`arch/x86/entry/entry_64_fred.S:38-59`](../../linux/arch/x86/entry/entry_64_fred.S#L38-L59)）。软件只需 `PUSH_AND_CLEAR_REGS` 后调用 C 分发函数：
+
+[`arch/x86/entry/entry_fred.c:278-304`](../../linux/arch/x86/entry/entry_fred.c#L278-L304)（v6.18.60）
 
 ```c
-// arch/x86/entry/entry_fred.c:278-304（v6.18.60）
 __visible noinstr void fred_entry_from_kernel(struct pt_regs *regs)
 {
 	unsigned long error_code = regs->orig_ax;
@@ -807,7 +826,7 @@ __visible noinstr void fred_entry_from_kernel(struct pt_regs *regs)
 }
 ```
 
-`fred_extint()`（`arch/x86/entry/entry_fred.c:168-186`）对系统向量查 `sysvec_table`，对设备向量直接调用 `common_interrupt(regs, vector)`——同一个 C 入口在 IDT 与 FRED 两种模式下复用。`DEFINE_IDTENTRY_SYSVEC` 中额外生成的 `fred_##func()`（`arch/x86/include/asm/idtentry.h:267-270`）就是为 FRED 分发表准备的。
+`fred_extint()`（[`arch/x86/entry/entry_fred.c:168-186`](../../linux/arch/x86/entry/entry_fred.c#L168-L186)）对系统向量查 `sysvec_table`，对设备向量直接调用 `common_interrupt(regs, vector)`——同一个 C 入口在 IDT 与 FRED 两种模式下复用。`DEFINE_IDTENTRY_SYSVEC` 中额外生成的 `fred_##func()`（[`arch/x86/include/asm/idtentry.h:267-270`](../../linux/arch/x86/include/asm/idtentry.h#L267-L270)）就是为 FRED 分发表准备的。
 
 ### 中断嵌套
 

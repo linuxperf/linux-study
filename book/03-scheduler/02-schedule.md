@@ -1,6 +1,6 @@
 # 3.2 主调度函数与上下文切换
 
-> **本节源码**：`kernel/sched/core.c`、`kernel/sched/sched.h`、`kernel/entry/common.c`、`include/linux/preempt.h`、`arch/x86/include/asm/preempt.h`、`arch/x86/include/asm/switch_to.h`、`arch/x86/entry/entry_64.S`、`arch/x86/kernel/process_64.c`
+> **本节源码**：[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`kernel/entry/common.c`](../../linux/kernel/entry/common.c)、[`include/linux/preempt.h`](../../linux/include/linux/preempt.h)、[`arch/x86/include/asm/preempt.h`](../../linux/arch/x86/include/asm/preempt.h)、[`arch/x86/include/asm/switch_to.h`](../../linux/arch/x86/include/asm/switch_to.h)、[`arch/x86/entry/entry_64.S`](../../linux/arch/x86/entry/entry_64.S)、[`arch/x86/kernel/process_64.c`](../../linux/arch/x86/kernel/process_64.c)
 > **关键函数**：`schedule()`、`__schedule()`、`try_to_block_task()`、`pick_next_task()`、`__pick_next_task()`、`context_switch()`、`__switch_to_asm()`、`__switch_to()`、`finish_task_switch()`、`resched_curr()`
 > **前置知识**：3.1 调度器框架
 
@@ -19,12 +19,13 @@
 - **主动调度**：任务自己调用 `schedule()`，通常是因为要等待某个事件（锁、I/O、等待队列），调用前已把 `__state` 设为非 `TASK_RUNNING`。这种切换计入**自愿上下文切换**（Voluntary Context Switch，`nvcsw`）。
 - **被动调度（抢占，Preemption）**：其他代码判断当前任务应当让出 CPU，于是给它打上 `TIF_NEED_RESCHED` 标记，等到下一个**抢占点**再调用 `__schedule(SM_PREEMPT)`。这种切换计入**非自愿上下文切换**（Involuntary Context Switch，`nivcsw`）。
 
-源码在 `__schedule()` 之前的长注释（`kernel/sched/core.c:6762-6799`）列出了这些驱动方式。需要强调的是：**唤醒本身不会进入 `schedule()`**，它只把任务放回运行队列，必要时设置 `TIF_NEED_RESCHED`。
+源码在 `__schedule()` 之前的长注释（[`kernel/sched/core.c:6762-6799`](../../linux/kernel/sched/core.c#L6762-L6799)）列出了这些驱动方式。需要强调的是：**唤醒本身不会进入 `schedule()`**，它只把任务放回运行队列，必要时设置 `TIF_NEED_RESCHED`。
 
 ### 设置重调度标记：resched_curr()
 
+[`kernel/sched/core.c:1113-1147`](../../linux/kernel/sched/core.c#L1113-L1147)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:1113-1147（v6.18.60）
 static void __resched_curr(struct rq *rq, int tif)
 {
 	struct task_struct *curr = rq->curr;
@@ -65,14 +66,15 @@ static void __resched_curr(struct rq *rq, int tif)
 - **本 CPU**：设置 `thread_info->flags` 中的标志位；若是 `TIF_NEED_RESCHED`，还要同步到 `preempt_count`（见下文）。
 - **远程 CPU**：用 `set_nr_and_not_polling()` 原子地设置标志，如果目标 CPU 不在 idle 轮询状态，就发送重调度 IPI（`smp_send_reschedule()`）把它"敲醒"；如果目标 CPU 正在 idle 中轮询 `TIF_NEED_RESCHED`（`TIF_POLLING_NRFLAG`），就省掉这次 IPI。
 
-`resched_curr()` 传入 `TIF_NEED_RESCHED`，`resched_curr_lazy()` 则在惰性抢占（Lazy Preemption）开启时传入 `TIF_NEED_RESCHED_LAZY`（`core.c:1155-1184`）。后者只要求"在返回用户态或下一个 tick 时再调度"，不会在 `preempt_enable()` 处立即抢占。本书配置开启了 `CONFIG_PREEMPT_LAZY` 和 `CONFIG_PREEMPT_DYNAMIC`，抢占模型的细节在 3.5 节展开。
+`resched_curr()` 传入 `TIF_NEED_RESCHED`，`resched_curr_lazy()` 则在惰性抢占（Lazy Preemption）开启时传入 `TIF_NEED_RESCHED_LAZY`（[`kernel/sched/core.c:1155-1184`](../../linux/kernel/sched/core.c#L1155-L1184)）。后者只要求"在返回用户态或下一个 tick 时再调度"，不会在 `preempt_enable()` 处立即抢占。本书配置开启了 `CONFIG_PREEMPT_LAZY` 和 `CONFIG_PREEMPT_DYNAMIC`，抢占模型的细节在 3.5 节展开。
 
 ### x86 上的 preempt_count 小技巧
 
 x86 把"需要重调度"的信息同时折叠进 per-CPU 的 `__preempt_count` 最高位，而且是**取反**存放：
 
+[`arch/x86/include/asm/preempt.h:12-19`](../../linux/arch/x86/include/asm/preempt.h#L12-L19)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/preempt.h:12-19（v6.18.60）
 /* We use the MSB mostly because its available */
 #define PREEMPT_NEED_RESCHED	0x80000000
 
@@ -83,10 +85,11 @@ x86 把"需要重调度"的信息同时折叠进 per-CPU 的 `__preempt_count` �
 #define PREEMPT_ENABLED	(0 + PREEMPT_NEED_RESCHED)
 ```
 
-`set_preempt_need_resched()` **清除**这一位（`arch/x86/include/asm/preempt.h:59-62`）。这样 `preempt_enable()` 只需一条 `decl` 指令，结果为 0 即同时说明"抢占计数为 0"且"需要重调度"：
+`set_preempt_need_resched()` **清除**这一位（[`arch/x86/include/asm/preempt.h:59-62`](../../linux/arch/x86/include/asm/preempt.h#L59-L62)）。这样 `preempt_enable()` 只需一条 `decl` 指令，结果为 0 即同时说明"抢占计数为 0"且"需要重调度"：
+
+[`include/linux/preempt.h:230-235`](../../linux/include/linux/preempt.h#L230-L235)（v6.18.60）
 
 ```c
-// include/linux/preempt.h:230-235（v6.18.60）
 #define preempt_enable() \
 do { \
 	barrier(); \
@@ -106,8 +109,9 @@ do { \
 | `do_task_dead()` | `SM_NONE` | 进程退出 `do_exit()` 的最后一步 |
 | `schedule_rtlock()` | `SM_RTLOCK_WAIT` | PREEMPT_RT 下的睡眠自旋锁（依赖 `CONFIG_PREEMPT_RT`） |
 
+[`kernel/sched/core.c:6533-6536`](../../linux/kernel/sched/core.c#L6533-L6536)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:6533-6536（v6.18.60）
 #define SM_IDLE			(-1)
 #define SM_NONE			0
 #define SM_PREEMPT		1
@@ -116,8 +120,9 @@ do { \
 
 返回用户态时检查标记的代码位于通用入口层：
 
+[`kernel/entry/common.c:26-31`](../../linux/kernel/entry/common.c#L26-L31)（v6.18.60）
+
 ```c
-// kernel/entry/common.c:26-31（v6.18.60）
 	while (ti_work & EXIT_TO_USER_MODE_WORK) {
 
 		local_irq_enable_exit_to_user(ti_work);
@@ -128,8 +133,9 @@ do { \
 
 中断返回内核态时，只有 `preempt_count()` 为 0 才允许抢占：
 
+[`kernel/entry/common.c:160-168`](../../linux/kernel/entry/common.c#L160-L168)（v6.18.60）
+
 ```c
-// kernel/entry/common.c:160-168（v6.18.60）
 void raw_irqentry_exit_cond_resched(void)
 {
 	if (!preempt_count()) {
@@ -169,8 +175,9 @@ schedule()                                   kernel/sched/core.c
 
 ## schedule() 与 __schedule_loop()
 
+[`kernel/sched/core.c:7016-7037`](../../linux/kernel/sched/core.c#L7016-L7037)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:7016-7037（v6.18.60）
 static __always_inline void __schedule_loop(int sched_mode)
 {
 	do {
@@ -195,15 +202,16 @@ asmlinkage __visible void __sched schedule(void)
 }
 ```
 
-- `sched_submit_work()`（`core.c:6969`）只在任务**真的要睡眠**时调用：如果是 workqueue 工作线程，通知 workqueue 可能需要唤醒另一个 worker 维持并发度；如果有被 plug 住的块 I/O，先提交出去，以免自己睡眠时没人提交而死锁。
+- `sched_submit_work()`（[`kernel/sched/core.c:6969`](../../linux/kernel/sched/core.c#L6969)）只在任务**真的要睡眠**时调用：如果是 workqueue 工作线程，通知 workqueue 可能需要唤醒另一个 worker 维持并发度；如果有被 plug 住的块 I/O，先提交出去，以免自己睡眠时没人提交而死锁。
 - `__schedule()` 要求调用者已关闭抢占，所以循环里先 `preempt_disable()`。返回后用 `sched_preempt_enable_no_resched()` 恢复，**不**在这里触发抢占，而是用 `while (need_resched())` 显式重试——切回本任务时可能又有新的重调度请求。
 
 ## __schedule() 逐段分析
 
 ### 第一步：关中断、加锁、更新时钟
 
+[`kernel/sched/core.c:6801-6856`](../../linux/kernel/sched/core.c#L6801-L6856)（v6.18.60，节选）
+
 ```c
-// kernel/sched/core.c:6801-6856（v6.18.60，节选）
 static void __sched notrace __schedule(int sched_mode)
 {
 	struct task_struct *prev, *next;
@@ -242,13 +250,14 @@ static void __sched notrace __schedule(int sched_mode)
 - `prev` 就是当前 CPU 的 `rq->curr`，也就是 `current`。
 - `schedule_debug()` 检查是否在原子上下文中调用了 `schedule()`（著名的 "scheduling while atomic" 报错就出自这里）。
 - `rcu_note_context_switch()` 向 RCU 报告一个静止状态（Quiescent State）；对于在 RCU 读临界区中被抢占的任务，把它挂到阻塞链表上（依赖 `CONFIG_PREEMPT_RCU`）。
-- `smp_mb__after_spinlock()` 提供一个完整内存屏障，与 `signal_wake_up()` 一侧的屏障配对：保证下文 `signal_pending_state()` 读到的信号状态不会早于调用者设置 `__state` 的那次写（源码在 `core.c:6833-6849` 的注释中画出了这个竞态）。
+- `smp_mb__after_spinlock()` 提供一个完整内存屏障，与 `signal_wake_up()` 一侧的屏障配对：保证下文 `signal_pending_state()` 读到的信号状态不会早于调用者设置 `__state` 的那次写（源码在 [`kernel/sched/core.c:6833-6849`](../../linux/kernel/sched/core.c#L6833-L6849) 的注释中画出了这个竞态）。
 - `update_rq_clock()` 在每次调度时只更新一次 rq 时钟，后续 `dequeue_task()` 等调用都带 `*_NOCLOCK` 标志以避免重复更新。
 
 ### 第二步：处理 prev——要不要出队
 
+[`kernel/sched/core.c:6858-6884`](../../linux/kernel/sched/core.c#L6858-L6884)（v6.18.60，节选）
+
 ```c
-// kernel/sched/core.c:6858-6884（v6.18.60，节选）
 	switch_count = &prev->nivcsw;
 
 	/* Task state changes only considers SM_PREEMPT as preemption */
@@ -277,8 +286,9 @@ static void __sched notrace __schedule(int sched_mode)
 
 `try_to_block_task()` 的核心逻辑：
 
+[`kernel/sched/core.c:6546-6589`](../../linux/kernel/sched/core.c#L6546-L6589)（v6.18.60，节选）
+
 ```c
-// kernel/sched/core.c:6546-6589（v6.18.60，节选）
 static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 			      unsigned long *task_state_p, bool should_block)
 {
@@ -309,12 +319,13 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 
 - 如果任务以可被信号打断的状态睡眠且已有挂起信号，就把它改回 `TASK_RUNNING` 并保留在队列中——`schedule()` 返回后由调用者处理信号。
 - `sched_contributes_to_load` 决定这次睡眠是否计入 `nr_uninterruptible`，也就是 `/proc/loadavg` 中 D 状态任务的贡献。`TASK_IDLE`（`TASK_UNINTERRUPTIBLE | TASK_NOLOAD`）正是为了"不可中断但不计入负载"而设计的。
-- `block_task()`（`core.c:2171-2175`）调用 `dequeue_task(rq, p, DEQUEUE_SLEEP | flags)`；只有调度类真正出队时才继续调用 `__block_task()` 把 `p->on_rq` 清 0。公平类可能因延迟出队而返回 false，此时任务保持 `on_rq` 并带着 `sched_delayed` 标记留在队列中（见 3.3 节）。
+- `block_task()`（[`kernel/sched/core.c:2171-2175`](../../linux/kernel/sched/core.c#L2171-L2175)）调用 `dequeue_task(rq, p, DEQUEUE_SLEEP | flags)`；只有调度类真正出队时才继续调用 `__block_task()` 把 `p->on_rq` 清 0。公平类可能因延迟出队而返回 false，此时任务保持 `on_rq` 并带着 `sched_delayed` 标记留在队列中（见 3.3 节）。
 
 `__block_task()` 用 `smp_store_release()` 清除 `on_rq`，此后其他 CPU 上的 `try_to_wake_up()` 可以立即把该任务迁走：
 
+[`kernel/sched/sched.h:2806-2809`](../../linux/kernel/sched/sched.h#L2806-L2809)（v6.18.60）
+
 ```c
-// kernel/sched/sched.h:2806-2809（v6.18.60）
 	 * Callers must ensure to not reference @p after this -- we no longer
 	 * own it.
 	 */
@@ -323,8 +334,9 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 
 ### 第三步：选择 next
 
+[`kernel/sched/core.c:6886-6901`](../../linux/kernel/sched/core.c#L6886-L6901)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:6886-6901（v6.18.60）
 pick_again:
 	assert_balance_callbacks_empty(rq);
 	next = pick_next_task(rq, &rf);
@@ -343,14 +355,15 @@ keep_resched:
 	rq->last_seen_need_resched_ns = 0;
 ```
 
-本书配置开启了 `CONFIG_SCHED_CORE`，因此 `pick_next_task()` 是 `core.c:6066` 处的核心调度版本：它在 SMT 兄弟线程间协调选择，以防止不同信任域的任务同时运行在同一物理核上。但只要当前核未启用核心调度（`sched_core_enabled(rq)` 为假，默认如此），它会直接调用 `__pick_next_task()`。`task_is_blocked()` 与 `find_proxy_task()` 服务于代理执行，在未开启 `CONFIG_SCHED_PROXY_EXEC` 时 `task_is_blocked()` 恒为 false。
+本书配置开启了 `CONFIG_SCHED_CORE`，因此 `pick_next_task()` 是 [`kernel/sched/core.c:6066`](../../linux/kernel/sched/core.c#L6066) 处的核心调度版本：它在 SMT 兄弟线程间协调选择，以防止不同信任域的任务同时运行在同一物理核上。但只要当前核未启用核心调度（`sched_core_enabled(rq)` 为假，默认如此），它会直接调用 `__pick_next_task()`。`task_is_blocked()` 与 `find_proxy_task()` 服务于代理执行，在未开启 `CONFIG_SCHED_PROXY_EXEC` 时 `task_is_blocked()` 恒为 false。
 
 选出 `next` 之后立即清除 `prev` 的 `TIF_NEED_RESCHED` 和 `preempt_count` 中的重调度位——本次调度已经响应了这个请求。
 
 #### __pick_next_task()：按优先级询问调度类
 
+[`kernel/sched/core.c:5973-6024`](../../linux/kernel/sched/core.c#L5973-L6024)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:5973-6024（v6.18.60）
 static inline struct task_struct *
 __pick_next_task(struct rq *rq, struct rq_flags *rf)
 {
@@ -409,16 +422,17 @@ restart:
 
 **慢速路径**：
 
-1. `prev_balance()`（`core.c:5938-5968`）从 `prev` 所属的调度类开始向下调用各类的 `balance()`，让 RT / DL 类有机会在选择前从其他 CPU 拉任务（pull）。之所以必须在 `put_prev_task()` 之前做，是因为 `balance()` 可能释放 rq 锁，此时 `prev` 的状态必须保持一致。
+1. `prev_balance()`（[`kernel/sched/core.c:5938-5968`](../../linux/kernel/sched/core.c#L5938-L5968)）从 `prev` 所属的调度类开始向下调用各类的 `balance()`，让 RT / DL 类有机会在选择前从其他 CPU 拉任务（pull）。之所以必须在 `put_prev_task()` 之前做，是因为 `balance()` 可能释放 rq 锁，此时 `prev` 的状态必须保持一致。
 2. 按优先级遍历调度类，第一个返回非空任务的调度类胜出。对于只实现了 `pick_task()` 的调度类，由 `put_prev_set_next_task()` 完成"`prev` 让出、`next` 就任"的记账。
 3. idle 调度类总能返回本 CPU 的 idle 线程，所以循环一定会终止；走到 `BUG()` 说明 rq 状态已被破坏。
 
-`put_prev_set_next_task()` 在 `prev == next` 时只交接 dl_server 指针、跳过 `put_prev_task()` / `set_next_task()`（`sched.h:2506-2515`），避免了"同一个任务先放回再取出"的无谓开销。
+`put_prev_set_next_task()` 在 `prev == next` 时只交接 dl_server 指针、跳过 `put_prev_task()` / `set_next_task()`（[`kernel/sched/sched.h:2506-2515`](../../linux/kernel/sched/sched.h#L2506-L2515)），避免了"同一个任务先放回再取出"的无谓开销。
 
 ### 第四步：切换或不切换
 
+[`kernel/sched/core.c:6903-6951`](../../linux/kernel/sched/core.c#L6903-L6951)（v6.18.60，节选）
+
 ```c
-// kernel/sched/core.c:6903-6951（v6.18.60，节选）
 	is_switch = prev != next;
 	if (likely(is_switch)) {
 		rq->nr_switches++;
@@ -457,8 +471,9 @@ restart:
 
 ### 准备：prepare_task_switch()
 
+[`kernel/sched/core.c:5135-5147`](../../linux/kernel/sched/core.c#L5135-L5147)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:5135-5147（v6.18.60）
 static inline void
 prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
@@ -474,12 +489,13 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 }
 ```
 
-其中 `prepare_task()` 执行 `WRITE_ONCE(next->on_cpu, 1)`（`core.c:4965`），宣告 `next` 已占用 CPU。`on_cpu` 要等到 `finish_task()` 才对 `prev` 清零，`try_to_wake_up()` 依赖这个标志判断任务是否还在某个 CPU 上"没切换完"（3.4 节）。`fire_sched_out_preempt_notifiers()` 是 KVM 等模块挂接的回调（依赖 `CONFIG_PREEMPT_NOTIFIERS`），用于在 vCPU 线程被换出时保存客户机状态。
+其中 `prepare_task()` 执行 `WRITE_ONCE(next->on_cpu, 1)`（[`kernel/sched/core.c:4965`](../../linux/kernel/sched/core.c#L4965)），宣告 `next` 已占用 CPU。`on_cpu` 要等到 `finish_task()` 才对 `prev` 清零，`try_to_wake_up()` 依赖这个标志判断任务是否还在某个 CPU 上"没切换完"（3.4 节）。`fire_sched_out_preempt_notifiers()` 是 KVM 等模块挂接的回调（依赖 `CONFIG_PREEMPT_NOTIFIERS`），用于在 vCPU 线程被换出时保存客户机状态。
 
 ### 切换地址空间
 
+[`kernel/sched/core.c:5292-5341`](../../linux/kernel/sched/core.c#L5292-L5341)（v6.18.60，节选）
+
 ```c
-// kernel/sched/core.c:5292-5341（v6.18.60，节选）
 static __always_inline struct rq *
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next, struct rq_flags *rf)
@@ -533,8 +549,9 @@ context_switch(struct rq *rq, struct task_struct *prev,
 
 ### 切换寄存器与栈
 
+[`kernel/sched/core.c:5343-5353`](../../linux/kernel/sched/core.c#L5343-L5353)（v6.18.60）
+
 ```c
-// kernel/sched/core.c:5343-5353（v6.18.60）
 	/* switch_mm_cid() requires the memory barriers above. */
 	switch_mm_cid(rq, prev, next);
 
@@ -548,12 +565,13 @@ context_switch(struct rq *rq, struct task_struct *prev,
 }
 ```
 
-注意 rq 锁**跨越了 `switch_to()`**：它由 `prev` 在 `__schedule()` 中获取，却由 `next` 在 `finish_task_switch()` → `finish_lock_switch()` 中释放。`prepare_lock_switch()`（`core.c:5066-5080`）就是为此向 lockdep 声明"锁的持有者要换人了"。
+注意 rq 锁**跨越了 `switch_to()`**：它由 `prev` 在 `__schedule()` 中获取，却由 `next` 在 `finish_task_switch()` → `finish_lock_switch()` 中释放。`prepare_lock_switch()`（[`kernel/sched/core.c:5066-5080`](../../linux/kernel/sched/core.c#L5066-L5080)）就是为此向 lockdep 声明"锁的持有者要换人了"。
 
 x86_64 的 `switch_to()` 是一个简单的宏：
 
+[`arch/x86/include/asm/switch_to.h:49-52`](../../linux/arch/x86/include/asm/switch_to.h#L49-L52)（v6.18.60）
+
 ```c
-// arch/x86/include/asm/switch_to.h:49-52（v6.18.60）
 #define switch_to(prev, next, last)					\
 do {									\
 	((last) = __switch_to_asm((prev), (next)));			\
@@ -562,8 +580,9 @@ do {									\
 
 真正的栈切换在汇编中完成：
 
+[`arch/x86/entry/entry_64.S:177-217`](../../linux/arch/x86/entry/entry_64.S#L177-L217)（v6.18.60）
+
 ```asm
-// arch/x86/entry/entry_64.S:177-217（v6.18.60）
 SYM_FUNC_START(__switch_to_asm)
 	ANNOTATE_NOENDBR
 	/*
@@ -633,8 +652,9 @@ SYM_FUNC_END(__switch_to_asm)
 
 `__switch_to()` 处理 C 层面的其余状态：
 
+[`arch/x86/kernel/process_64.c:611-675`](../../linux/arch/x86/kernel/process_64.c#L611-L675)（v6.18.60，节选）
+
 ```c
-// arch/x86/kernel/process_64.c:611-675（v6.18.60，节选）
 __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 {
 	struct thread_struct *prev = &prev_p->thread;
@@ -659,7 +679,7 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	...
 ```
 
-`__switch_to()` 最后 `return prev_p`（`process_64.c:714`），返回值经 `%rax` 带回，成为 `switch_to()` 宏中的 `last`。
+`__switch_to()` 最后 `return prev_p`（[`arch/x86/kernel/process_64.c:714`](../../linux/arch/x86/kernel/process_64.c#L714)），返回值经 `%rax` 带回，成为 `switch_to()` 宏中的 `last`。
 
 #### 为什么 switch_to 需要第三个参数
 
@@ -667,8 +687,9 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 
 ### 收尾：finish_task_switch()
 
+[`kernel/sched/core.c:5168-5191`](../../linux/kernel/sched/core.c#L5168-L5191)（v6.18.60，节选）
+
 ```c
-// kernel/sched/core.c:5168-5191（v6.18.60，节选）
 static struct rq *finish_task_switch(struct task_struct *prev)
 	__releases(rq->lock)
 {
@@ -697,24 +718,25 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 
 它在 `next` 的上下文中运行，负责收拾 `prev` 留下的现场：
 
-1. `finish_task(prev)` 以 release 语义清零 `prev->on_cpu`（`core.c:4968-4982`），此后 `prev` 可以被其他 CPU 唤醒并运行。**在此之前必须读出 `prev->__state`**，否则 `prev` 可能已在别处运行并改变了状态。
-2. `finish_lock_switch()` 执行挂起的 balance 回调（如 RT 的 push 操作），然后释放 rq 锁并开中断（`core.c:5082-5092`）。
+1. `finish_task(prev)` 以 release 语义清零 `prev->on_cpu`（[`kernel/sched/core.c:4968-4982`](../../linux/kernel/sched/core.c#L4968-L4982)），此后 `prev` 可以被其他 CPU 唤醒并运行。**在此之前必须读出 `prev->__state`**，否则 `prev` 可能已在别处运行并改变了状态。
+2. `finish_lock_switch()` 执行挂起的 balance 回调（如 RT 的 push 操作），然后释放 rq 锁并开中断（[`kernel/sched/core.c:5082-5092`](../../linux/kernel/sched/core.c#L5082-L5092)）。
 3. 若 `rq->prev_mm` 非空（"内核 → 用户"切换），调用 `mmdrop_lazy_tlb_sched()` 释放借用的 mm 引用。
-4. 若 `prev_state == TASK_DEAD`，调用调度类的 `task_dead()`，释放内核栈，并通过 `put_task_struct_rcu_user()` 放掉 "current" 那份引用（`core.c:5245-5253`）。进程无法自己释放正在使用的栈，所以这件事只能交给下一个任务来做。
+4. 若 `prev_state == TASK_DEAD`，调用调度类的 `task_dead()`，释放内核栈，并通过 `put_task_struct_rcu_user()` 放掉 "current" 那份引用（[`kernel/sched/core.c:5245-5253`](../../linux/kernel/sched/core.c#L5245-L5253)）。进程无法自己释放正在使用的栈，所以这件事只能交给下一个任务来做。
 
 ### 新任务的第一次调度
 
-新 fork 的任务从未调用过 `__switch_to_asm()`，它的 `inactive_task_frame` 由 `copy_thread()` 伪造，`ret_addr` 被设为 `ret_from_fork_asm`（`arch/x86/kernel/process.c:186`）。因此 `__switch_to()` 的 `ret` 会跳到 `ret_from_fork_asm`，进而调用 `ret_from_fork()` → `schedule_tail()`：
+新 fork 的任务从未调用过 `__switch_to_asm()`，它的 `inactive_task_frame` 由 `copy_thread()` 伪造，`ret_addr` 被设为 `ret_from_fork_asm`（[`arch/x86/kernel/process.c:186`](../../linux/arch/x86/kernel/process.c#L186)）。因此 `__switch_to()` 的 `ret` 会跳到 `ret_from_fork_asm`，进而调用 `ret_from_fork()` → `schedule_tail()`：
+
+[`arch/x86/kernel/process.c:151-154`](../../linux/arch/x86/kernel/process.c#L151-L154)（v6.18.60）
 
 ```c
-// arch/x86/kernel/process.c:151-154（v6.18.60）
 __visible void ret_from_fork(struct task_struct *prev, struct pt_regs *regs,
 				     int (*fn)(void *), void *fn_arg)
 {
 	schedule_tail(prev);
 ```
 
-`schedule_tail()`（`core.c:5262`）调用 `finish_task_switch(prev)` 完成与普通切换相同的收尾工作，再执行 `preempt_enable()`。新任务的 `preempt_count` 初值为 `FORK_PREEMPT_COUNT`，恰好模拟了"在 `__schedule()` 中持锁"的状态，这就是 `finish_task_switch()` 中断言值为 2 的另一个来源。
+`schedule_tail()`（[`kernel/sched/core.c:5262`](../../linux/kernel/sched/core.c#L5262)）调用 `finish_task_switch(prev)` 完成与普通切换相同的收尾工作，再执行 `preempt_enable()`。新任务的 `preempt_count` 初值为 `FORK_PREEMPT_COUNT`，恰好模拟了"在 `__schedule()` 中持锁"的状态，这就是 `finish_task_switch()` 中断言值为 2 的另一个来源。
 
 ```mermaid
 sequenceDiagram
@@ -764,7 +786,7 @@ sequenceDiagram
    bpftrace -e 'tracepoint:sched:sched_switch { @[args.prev_state] = count(); }'
    ```
 
-   `prev_state` 并非直接取自 `prev->__state`，而是经 `__trace_sched_switch_state()` 转换后的值（`include/trace/events/sched.h:190-214`）：`SM_PREEMPT` 抢占时固定报告为 `TASK_REPORT_MAX`（0x100，即 256，文本输出中显示为 `R+`）；0 表示 `prev` 以 `TASK_RUNNING` 状态、但不是经 `SM_PREEMPT` 让出 CPU（如 `sched_yield()`，或返回用户态时的 `schedule()`）；其余值对应第 2 章介绍的 `TASK_*` 状态位（如 1 为 `S`、2 为 `D`）。
+   `prev_state` 并非直接取自 `prev->__state`，而是经 `__trace_sched_switch_state()` 转换后的值（[`include/trace/events/sched.h:190-214`](../../linux/include/trace/events/sched.h#L190-L214)）：`SM_PREEMPT` 抢占时固定报告为 `TASK_REPORT_MAX`（0x100，即 256，文本输出中显示为 `R+`）；0 表示 `prev` 以 `TASK_RUNNING` 状态、但不是经 `SM_PREEMPT` 让出 CPU（如 `sched_yield()`，或返回用户态时的 `schedule()`）；其余值对应第 2 章介绍的 `TASK_*` 状态位（如 1 为 `S`、2 为 `D`）。
 
 3. 用 ftrace 观察一次完整的调度函数调用路径。`__schedule()` 带有 `notrace` 属性，不能作为跟踪入口，这里改用 `schedule()`；输出中 `__schedule()` 本身不会出现，但它调用的、未被内联的函数（如 `pick_next_task_fair()`）会出现在 `schedule()` 之下：
 
@@ -792,4 +814,4 @@ sequenceDiagram
 - `linux/Documentation/scheduler/sched-arch.rst`：架构相关的调度接口（`switch_to`、idle 轮询等）。
 - `linux/Documentation/scheduler/membarrier.rst`：`__schedule()` 与 `context_switch()` 中内存屏障的由来。
 - `linux/Documentation/trace/ftrace.rst`：function_graph tracer 的使用方法。
-- `linux/kernel/Kconfig.preempt:75-85`：`CONFIG_PREEMPT_LAZY` 的说明，惰性抢占模型的设计目标。
+- [`kernel/Kconfig.preempt:75-85`](../../linux/kernel/Kconfig.preempt#L75-L85)：`CONFIG_PREEMPT_LAZY` 的说明，惰性抢占模型的设计目标。
