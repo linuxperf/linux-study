@@ -58,7 +58,7 @@ book/
 ```markdown
 # 4.3 伙伴系统（Buddy System）
 
-> **本节源码**：`mm/page_alloc.c`、`include/linux/mmzone.h`
+> **本节源码**：[`mm/page_alloc.c`](../../linux/mm/page_alloc.c)、[`include/linux/mmzone.h`](../../linux/include/linux/mmzone.h)
 > **关键函数**：`__alloc_pages_noprof()`、`get_page_from_freelist()`、`__free_one_page()`
 > **前置知识**：4.1 物理内存模型、4.2 zone 与 node
 
@@ -120,11 +120,22 @@ book/
 - 涉及其他版本的行为差异时，明确写出版本号，例如："v6.6 起由 EEVDF 取代 CFS"。
 
 ### 5.2 位置标注
-- 代码块前标注出处，格式为 **`文件路径:起始行-结束行`**（路径相对于 `linux/`）：
+所有源码位置一律写成**指向仓库内 `linux/` 源码的相对路径链接**，读者可在编辑器或 Git 托管平台中直接跳转。
+
+- **链接格式**：`` [`显示路径:行号`](相对路径#L起始-L结束) ``
+  - 显示文字用行内代码，路径相对于 `linux/`，如 `` `kernel/fork.c:2681` ``；
+  - 链接目标是**从当前 Markdown 文件出发**的相对路径：
+    - `book/<章>/<小节>.md` → `../../linux/...`
+    - `book/*.md`（如 `README.md`、`glossary.md`）→ `../linux/...`
+  - 行号锚点：单行用 `#L2681`，区间用 `#L6801-L6814`；只引用文件时不加锚点。
+  - 禁止使用绝对路径（如 `/home/...`）或外部网址（如 GitHub、elixir）代替本地源码链接。
+
+- **代码块出处**：在代码块**上方单独一行**给出链接，并注明版本：
 
   ````markdown
+  [`kernel/sched/core.c:6801-6814`](../../linux/kernel/sched/core.c#L6801-L6814)（v6.18.60）
+
   ```c
-  // kernel/sched/core.c:6801-6814（v6.18.60）
   static void __sched notrace __schedule(int sched_mode)
   {
   	struct task_struct *prev, *next;
@@ -134,7 +145,10 @@ book/
   ```
   ````
 
-- 正文中提到的位置写作 `kernel/fork.c:2681`，便于读者跳转。
+- **正文中提到的位置**同样写成链接：`` [`kernel/fork.c:2681`](../../linux/kernel/fork.c#L2681) ``。
+- **文件头的"本节源码"**只链接到文件，不带行号锚点。
+- 调用链树（5.4 节）位于代码块内，无法使用链接，保持纯文本路径即可。
+- 写完后检查链接目标文件确实存在，且行号与 v6.18.60 源码一致。
 
 ### 5.3 代码裁剪
 - 引用的代码必须忠实于原文。允许的裁剪方式：
@@ -208,7 +222,7 @@ start_kernel()                         init/main.c
 每个小节提交前逐项检查：
 
 - [ ] 标题格式为 `# 章.节 标题`，文件头有"本节源码 / 关键函数 / 前置知识"
-- [ ] 所有代码块都标注了 `路径:行号`，且与 v6.18.60 源码一致
+- [ ] 所有代码块和正文位置都使用指向 `linux/` 的相对路径链接（见 5.2 节），链接有效且行号与 v6.18.60 源码一致
 - [ ] 依赖配置的行为已注明 `CONFIG_XXX`
 - [ ] 术语首次出现时有英文对照，并已登记到术语表
 - [ ] 中英文之间有空格，代码标识符都用了行内代码
