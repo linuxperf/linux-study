@@ -20,6 +20,7 @@
   - [3.9 调度域与负载均衡](03-scheduler/09-load-balance.md)
   - [3.10 组调度与 CPU 带宽控制](03-scheduler/10-group-sched.md)
   - [3.11 sched_ext 可扩展调度器](03-scheduler/11-sched-ext.md)
+  - [3.12 公平调度类：回调实现与唤醒选核](03-scheduler/12-fair-class.md)
 - [第 4 章 内存管理](04-memory/README.md)
   - [4.1 物理内存模型：node、zone、page 与 folio](04-memory/01-physical-model.md)
   - [4.2 内存初始化：从 memblock 到伙伴系统](04-memory/02-init.md)

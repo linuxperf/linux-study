@@ -6,7 +6,7 @@
 
 ## 概述
 
-EEVDF 解决的是"一个 CPU 上谁先运行"，但调度器还要回答另外几个问题：哪个 CPU 更忙、该不该把任务迁走（负载均衡，3.9 节），CPU 该运行在什么频率（schedutil 调频），大小核系统上任务该放到哪种核（EAS）。这些决策都需要一个反映"近期有多忙"的数值。
+EEVDF 解决的是"一个 CPU 上谁先运行"，但调度器还要回答另外几个问题：哪个 CPU 更忙、该不该把任务迁走（负载均衡，3.9 节），CPU 该运行在什么频率（schedutil 调频），大小核系统上任务该放到哪种核（能效感知调度，Energy Aware Scheduling，EAS）。这些决策都需要一个反映"近期有多忙"的数值。
 
 **逐实体负载跟踪**（Per-Entity Load Tracking，PELT，v3.8 引入）为每个调度实体、每个 `cfs_rq` 以及 RT / DL / 中断各维护一组几何衰减平均值：最近 1 ms 的活动权重最高，32 ms 前的活动权重减半，更早的贡献逐渐消失。本节分析 PELT 的数学模型、增量更新算法、频率与算力不变性，以及基于 PELT 的 `util_est` 与 CPU 利用率计算。
 
@@ -427,7 +427,7 @@ cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost)
 |---|---|
 | schedutil 调频（本书配置的默认调频器，`CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y`） | `cpu_util_cfs_boost()` + `avg_rt` + `avg_dl` + `avg_irq`，经 `effective_cpu_util()`（[`kernel/sched/fair.c:8280`](../../linux/kernel/sched/fair.c#L8280) 起）合成 |
 | 负载均衡（3.9 节） | `cpu_load()` = `cfs_rq->avg.load_avg`（[`kernel/sched/fair.c:7374-7377`](../../linux/kernel/sched/fair.c#L7374-L7377)）；`cpu_util_cfs()`；`runnable_avg` |
-| 唤醒选核 `wake_affine_weight()`（3.4 节） | `cpu_load()`、`task_h_load()` |
+| 唤醒选核 `wake_affine_weight()`（[`kernel/sched/fair.c:7528-7569`](../../linux/kernel/sched/fair.c#L7528-L7569)） | `cpu_load()`、`task_h_load()` |
 | CPU 可用算力 `capacity_of()` | 返回 `rq->cpu_capacity`，由 `scale_rt_capacity()`（[`kernel/sched/fair.c:10261-10286`](../../linux/kernel/sched/fair.c#L10261-L10286)）从实际最大算力（已扣除硬件压力）中扣除 `avg_rt` / `avg_dl` / `avg_irq` |
 | EAS、misfit 检测 | `task_util_est()`、`cpu_util()` |
 

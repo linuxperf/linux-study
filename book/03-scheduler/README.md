@@ -7,8 +7,9 @@
 ## 阅读建议
 
 - 3.1、3.2 是全章基础，建议按顺序阅读。
-- 3.3～3.5 构成公平调度的完整生命周期，是本章的重点。
+- 3.3、3.4 构成公平调度的完整生命周期；3.5 介绍与调度类无关的调度时钟、无 tick 模式和抢占模型。三节是本章的重点。
 - 3.6～3.11 相对独立，可按兴趣选读。
+- 3.12 以公平调度类的回调为线索，把 3.3、3.8～3.10 的内容串联起来，并分析唤醒与 fork 时的选核策略，建议在读完这几节后阅读。
 
 ## 本章配置
 
@@ -17,7 +18,7 @@
 | 配置项 | 取值 | 影响 |
 |---|---|---|
 | `CONFIG_SMP` | y | 多核负载均衡、远程唤醒 |
-| `CONFIG_PREEMPT_LAZY` / `CONFIG_PREEMPT_DYNAMIC` | y / y | 惰性抢占模型，可在启动参数中切换 |
+| `CONFIG_PREEMPT` / `CONFIG_PREEMPT_DYNAMIC` / `CONFIG_PREEMPT_RT` | y / y / y | 实时内核，默认 full 抢占模型，可在启动参数或运行时切换为 lazy（3.5 节） |
 | `CONFIG_NO_HZ_FULL` | y | 无 tick 运行 |
 | `CONFIG_HZ` | 1000 | tick 周期 1 ms |
 | `CONFIG_FAIR_GROUP_SCHED` / `CONFIG_CFS_BANDWIDTH` | y / y | 公平类组调度与带宽控制 |
@@ -42,10 +43,13 @@
 | [3.9 调度域与负载均衡](09-load-balance.md) | 已完成 |
 | [3.10 组调度与 CPU 带宽控制](10-group-sched.md) | 已完成 |
 | [3.11 sched_ext 可扩展调度器](11-sched-ext.md) | 已完成 |
+| [3.12 公平调度类：回调实现与唤醒选核](12-fair-class.md) | 已完成 |
 
 ## 待完善
 
-- [ ] 3.1～3.11 的"动手实验"尚未在 dev 虚拟机中实测，需补充真实输出示例（注明内核版本与配置）。
+- [ ] `linux/.config` 为 `CONFIG_PREEMPT=y`、`CONFIG_PREEMPT_RT=y`、`CONFIG_PREEMPT_LAZY` 未开启（3.5 节已据此重写），而 3.2 等节仍写着"本书配置开启了 `CONFIG_PREEMPT_LAZY`""本书配置未开启 `CONFIG_PREEMPT_RT`"，需逐节复核；`CONFIG_SCHED_CLASS_EXT` 在当前 `linux/.config` 中也已为 y，与上表不符；3.3 节"`rq_clock_task()` 不含中断处理时间"在未开启 `CONFIG_IRQ_TIME_ACCOUNTING` 的本书配置下不成立。
+- [ ] 原 3.5 节中各调度类对 `sched_can_stop_tick()` 的具体判据（Deadline、`SCHED_RR` / `SCHED_FIFO`、多个公平任务）已移出，需在 3.3、3.6 节补充（3.7、3.10 节已有相应说明）。
+- [ ] 3.1～3.12 的"动手实验"尚未在 dev 虚拟机中实测，需补充真实输出示例（注明内核版本与配置）。
 - [ ] 3.11 的实验需要开启 `CONFIG_SCHED_CLASS_EXT`（依赖 `CONFIG_DEBUG_INFO_BTF`）的内核，本书默认配置无法直接运行。
-- [ ] 各节 Mermaid 图（图 3-1、3-3、3-5、3-7、3-8、3-10、3-12、3-16、3-17）需在目标渲染器中确认显示效果。
+- [ ] 各节 Mermaid 图（图 3-1、3-3、3-5、3-7、3-8、3-10、3-12、3-16、3-17、3-18、3-20）需在目标渲染器中确认显示效果。
 - [ ] 3.7 引用的 [`kernel/sched/deadline.c:1583-1782`](../../linux/kernel/sched/deadline.c#L1583-L1782) dl_server 状态图注释中的 `dl_defer_idle` 字段在 v6.18.60 结构体中不存在，后续版本若同步修正需更新正文说明。

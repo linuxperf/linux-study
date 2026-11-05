@@ -7,9 +7,13 @@
 | balance 回调 | Balance Callback | 调度类持 rq 锁时登记、在上下文切换完成后释放 rq 锁前执行的推 / 拉迁移操作 | 3.2 |
 | BH 工作队列 | BH Workqueue | 在软中断上下文执行工作项的工作队列（`WQ_BH`，v6.9），用于替代 tasklet | 5.10 |
 | CPU 带宽控制 | CFS Bandwidth Control | 以 quota / period 为任务组设置 CPU 时间上限 | 3.10 |
+| fork / exec 均衡 | Fork / Exec Balancing | 新任务第一次入队前（`WF_FORK`）或 `execve()` 时（`WF_EXEC`）为任务选择 CPU | 3.4 |
 | I/O APIC | I/O Advanced Programmable Interrupt Controller | 把传统中断引脚翻译为中断消息的芯片组中断控制器 | 5.5 |
 | managed 中断 | Managed Interrupt | 亲和性由内核按拓扑计算且不可修改的多队列设备中断 | 5.8 |
+| misfit 任务 | Misfit Task | 非对称算力系统上利用率超出所在 CPU 算力、应迁往更大核的任务 | 3.8 |
 | per-CPU 页缓存 | Per-CPU Pageset，PCP | 每 CPU、每 zone 的小阶空闲页缓存，`struct per_cpu_pages` | 4.3 |
+| steal 时间 | Steal Time | 虚拟机中 vCPU 可运行却被宿主机调度走的时间 | 3.1 |
+| tick 依赖 | Tick Dependency | 阻止 `NO_HZ_FULL` CPU 停 tick 的原因位掩码，如 `TICK_DEP_BIT_SCHED` | 3.5 |
 | 按需分配 | Demand Paging | mmap 只建立 VMA，物理页在首次访问的缺页中分配 | 4.7 |
 | 保护页 | Guard Page | vmalloc 区域末尾不映射的一页，用于捕获越界访问 | 4.6 |
 | 保留模式 | Reservation Mode | 中断分配时只记账、激活时才占用真实向量的向量分配策略 | 5.8 |
@@ -27,38 +31,46 @@
 | 大页 | Huge Page | 以 PMD（2 MB）或 PUD（1 GB）直接映射的页 | 4.13 |
 | 代 | Generation | MGLRU 中按年龄划分的页集合，以 `max_seq`/`min_seq` 编号 | 4.10 |
 | 代理执行 | Proxy Execution | 让持锁任务借用等待者的调度上下文运行（`CONFIG_SCHED_PROXY_EXEC`） | 3.1 |
+| 等待队列 | Wait Queue | 以 `wait_queue_head` 组织的睡眠任务链表，由 `wake_up()` 系列逐个调用唤醒函数 | 3.2 |
 | 调度策略 | Scheduling Policy | `SCHED_NORMAL`、`SCHED_FIFO` 等，用户态可见 | 3.1 |
 | 调度队列 | Dispatch Queue，DSQ | sched_ext 中承载待运行任务的队列 | 3.11 |
 | 调度类 | Scheduling Class | `struct sched_class`，实现某类调度策略的方法集合 | 3.1 |
 | 调度器 | Scheduler | — | 3.1 |
 | 调度实体 | Scheduling Entity | 调度类操作的对象，如 `sched_entity`，可代表任务或任务组 | 3.1 |
+| 调度时钟中断 | Scheduler Tick | 以 `HZ` 频率触发、驱动 `sched_tick()` 的周期性时钟中断，正文简称 tick | 3.1 |
 | 调度域 | Scheduling Domain | 按硬件拓扑组织的 CPU 层级，`struct sched_domain` | 3.9 |
 | 调度组 | Scheduling Group | 调度域内参与负载比较的 CPU 子集，`struct sched_group` | 3.9 |
 | 丢失唤醒 | Lost Wakeup | 等待方检查条件与睡眠之间错过唤醒的竞态 | 3.2 |
+| 动态抢占 | Dynamic Preemption | `CONFIG_PREEMPT_DYNAMIC`，用 static call / static key 在启动或运行时切换抢占模型 | 3.5 |
 | 抖动 | Thrashing | 工作集超过内存，频繁回收与重新读入导致系统几乎停滞 | 4.10 |
 | 读拷贝更新 | Read-Copy Update，RCU | 读者无锁、写者发布新版本并在宽限期后回收旧版本的同步机制 | 7.9 |
 | 读写锁 | Reader-Writer Lock | 允许多个读者或一个写者的自旋锁，`rwlock_t` | 7.5 |
 | 读写信号量 | Reader-Writer Semaphore，rwsem | 可睡眠的读写锁，`struct rw_semaphore` | 7.7 |
 | 多尺寸 THP | Multi-size THP，mTHP | 介于 4 KB 与 2 MB 之间的匿名大 folio（v6.8） | 4.8 |
 | 多代 LRU | Multi-Gen LRU，MGLRU | v6.1 起的多代页面回收算法（`CONFIG_LRU_GEN`） | 4.10 |
-| 惰性抢占 | Lazy Preemption | 对公平任务延迟到返回用户态或下一 tick 才执行的抢占（`CONFIG_PREEMPT_LAZY`） | 3.2 |
+| 惰性抢占 | Lazy Preemption | lazy 抢占模型下以 `TIF_NEED_RESCHED_LAZY` 标记、推迟到返回用户态或下一个 tick 才执行的抢占 | 3.2 |
 | 惰性 TLB | Lazy TLB | 内核线程借用上一任务地址空间而不切换页表 | 3.2 |
 | 返回栈缓冲区 | Return Stack Buffer，RSB | CPU 预测 `ret` 目标地址的硬件栈，上下文切换时需填充以缓解推测执行攻击 | 3.2 |
 | 反向映射 | Reverse Mapping，rmap | 由物理页找到所有映射它的页表项 | 4.9 |
+| 非对称算力 | Asymmetric CPU Capacity | 各 CPU 最大算力不同的系统，如大小核 | 3.12 |
 | 非自愿上下文切换 | Involuntary Context Switch | 因抢占发生的切换，计入 `nivcsw` | 3.2 |
 | 分层中断域 | Hierarchical IRQ Domain | 以父子关系串联多级中断控制器的 `irq_domain` 结构 | 5.6 |
 | 复合页 | Compound Page | 多个连续页组成的整体，由头页与尾页构成 | 4.1 |
 | 负载均衡 | Load Balancing | 在 CPU 之间迁移任务以纠正负载不均 | 3.9 |
+| 负载均值 | Load Average | `/proc/loadavg` 中可运行与不可中断睡眠任务数的 1、5、15 分钟指数平均 | 3.5 |
+| 高精度定时器 | High-Resolution Timer，hrtimer | 纳秒精度的内核定时器，模拟的周期 tick 与 hrtick 都基于它实现 | 3.2 |
 | 工作队列 | Workqueue | 在内核线程中执行可睡眠延迟工作的机制 | 4.3 |
 | 工作项 | Work Item | 提交给工作队列的函数及其数据，`struct work_struct` | 5.12 |
 | 故障 / 陷阱 / 终止 | Fault / Trap / Abort | 按返回地址与可恢复性划分的三类异常 | 5.1 |
 | 规范地址 | Canonical Address | 高位为最高有效位符号扩展的 x86_64 虚拟地址 | 4.6 |
+| 过度利用 | Overutilized | EAS 中有 CPU 利用率超出其算力的状态，此时唤醒放置交还给负载均衡 | 3.12 |
 | 合格 | Eligible | EEVDF 中 lag ≥ 0（`vruntime ≤ V`）的实体才可被选中 | 3.3 |
 | 核心调度 | Core Scheduling | 控制 SMT 兄弟线程上可同时运行的任务（`CONFIG_SCHED_CORE`） | 3.1 |
 | 恒定带宽服务器 | Constant Bandwidth Server，CBS | 限制每个 Deadline 实体带宽的预算机制 | 3.7 |
 | 后备存储 | Backing Store | 页内容的持久化位置：文件页为文件，匿名页为交换空间 | 4.11 |
 | 互斥锁 | Mutex | 可睡眠的互斥锁，`struct mutex`，支持乐观自旋 | 7.6 |
 | 唤醒队列 | Wake List | `TTWU_QUEUE` 机制下挂在目标 CPU 上、经 IPI 处理的待唤醒任务链表 | 3.4 |
+| 唤醒亲和 | Wake Affine | 唤醒时在唤醒者所在 CPU 与任务原 CPU 之间选定搜索空闲 CPU 的区域 | 3.12 |
 | 回收 | Reclaim | 释放已用页以补充空闲内存，执行者为 kswapd 与直接回收 | 4.4 |
 | 伙伴系统 | Buddy System | 以 2 的幂次块管理空闲物理页的分配器 | 4.1 |
 | 获取 / 释放 | Acquire / Release | 单向内存序：获取之后的访问不提前，释放之前的访问不推后 | 7.3 |
@@ -77,6 +89,7 @@
 | 静止状态 | Quiescent State | RCU 术语，CPU 不处于读临界区的时刻 | 3.2 |
 | 救援线程 | Rescuer | `WQ_MEM_RECLAIM` 工作队列专属的 worker，保证内存回收路径前进 | 5.12 |
 | 局部向量表 | Local Vector Table，LVT | 本地 APIC 中为定时器、性能计数器等本地中断源配置向量的寄存器组 | 5.5 |
+| 空闲核 | Idle Core | 所有 SMT 兄弟线程都空闲的物理核 | 3.12 |
 | 宽限期 | Grace Period | 所有 CPU 都至少经历一次静止状态的时间段 | 7.9 |
 | 扩展静止状态 | Extended Quiescent State，EQS | CPU 处于 idle 或 NO_HZ_FULL 用户态，RCU 不关注它 | 7.10 |
 | 老化 | Aging | MGLRU 中新建一代并提升近期访问页的过程 | 4.10 |
@@ -94,12 +107,12 @@
 | 内存模型 | Memory Model | 规定并发访问可观察结果的规则；内核使用 Linux 内核内存模型（LKMM） | 7.3 |
 | 内存屏障 | Memory Barrier | 约束编译器与 CPU 对内存访问重排的指令或原语 | 7.3 |
 | 内存域 | Zone | 节点内按地址范围划分的区域，如 `ZONE_DMA32` | 4.1 |
-| 能效感知调度 | Energy Aware Scheduling，EAS | 在非对称算力平台上按能耗选择 CPU | 3.4 |
+| 能效感知调度 | Energy Aware Scheduling，EAS | 在非对称算力平台上按能耗选择 CPU | 3.8 |
 | 票号锁 | Ticket Lock | 按取号顺序获取的公平自旋锁，x86 上已被 qspinlock 取代 | 7.4 |
 | 迁移类型 | Migrate Type | 按页块记录的可移动性分类（不可移动、可移动、可回收等） | 4.1 |
 | 迁移项 | Migration Entry | 页迁移期间替代 PTE 的特殊不存在项 | 4.11 |
 | 抢占 | Preemption | 在任务未主动让出时强制切换到其他任务 | 3.1 |
-| 抢占模型 | Preemption Model | none / voluntary / full / lazy，决定内核态何时可被抢占 | 3.5 |
+| 抢占模型 | Preemption Model | none / voluntary / full / lazy，决定哪些抢占点生效、惰性请求设置哪个标志位 | 3.5 |
 | 抢占点 | Preemption Point | 检查重调度标志并可能进入调度器的位置，如 `preempt_enable()`、中断返回、返回用户态 | 3.2 |
 | 强制线程化 | Forced Threading | 把普通中断处理函数放到中断线程中执行（`threadirqs`） | 5.7 |
 | 亲和性范围 | Affinity Scope | unbound 工作队列按 CPU 拓扑划分 pod 的粒度（v6.5） | 5.12 |
@@ -118,6 +131,7 @@
 | 上下文切换 | Context Switch | — | 3.1 |
 | 时间片 | Slice | EEVDF 中任务每次请求的运行长度，`se->slice` | 3.3 |
 | 时间片保护 | Run to Parity | `RUN_TO_PARITY`，选中后在保护期内不被轻易切走 | 3.3 |
+| 实时内核 | Real-Time Kernel，PREEMPT_RT | 开启 `CONFIG_PREEMPT_RT` 的内核：`spinlock_t` 等换成基于 rt_mutex 的可睡眠锁，中断强制线程化 | 3.2 |
 | 首次适配 | First Fit | 在空闲区间中选择第一个足够大的区间 | 4.6 |
 | 数据竞争 | Data Race | 至少一方为普通写的并发访问，LKMM 中行为未定义 | 7.3 |
 | 双重故障 | Double Fault，#DF | 投递异常过程中再次发生异常，x86_64 上常由栈溢出引起 | 5.1 |
@@ -134,15 +148,19 @@
 | 推 / 拉 | Push / Pull | 实时与 Deadline 类在 CPU 间主动迁移任务的两种操作 | 3.6 |
 | 外部碎片 | External Fragmentation | 空闲页总量足够但缺少连续块 | 4.12 |
 | 完全公平调度器 | Completely Fair Scheduler，CFS | v2.6.23～v6.5 的公平调度算法 | 3.3 |
+| 完全抢占 | Full Preemption | full 抢占模型：`preempt_count` 为 0 的内核代码随时可被抢占（`CONFIG_PREEMPT`） | 3.5 |
 | 未接受内存 | Unaccepted Memory | 机密虚拟机中须显式接受后才能使用的内存 | 4.2 |
 | 伪共享 | False Sharing | 不同 CPU 频繁写入同一缓存行中的不同数据，导致该缓存行在 CPU 间反复迁移 | 3.1 |
+| 伪唤醒 | Spurious Wakeup | 被唤醒时等待条件并不成立的唤醒，等待方须在循环中重新检查条件 | 3.2 |
 | 伪中断 | Spurious Interrupt | 本地 APIC 在竞态下投递的无对应中断源的中断，向量 `0xff` | 5.1 |
+| 无 tick 模式 | Dynticks，NO_HZ | 不需要时停掉周期性 tick：空闲时停（`NO_HZ_IDLE`），或单任务运行时也停（`NO_HZ_FULL`） | 3.5 |
 | 稀疏内存模型 | SPARSEMEM | 按 section 分配 `struct page` 的物理内存模型 | 4.1 |
 | 线程化中断 | Threaded IRQ | 主处理函数唤醒专属内核线程执行主体工作的中断处理方式 | 5.7 |
 | 向量 | Vector | x86 标识中断与异常的 0～255 编号，用于索引 IDT | 5.1 |
 | 消息信号中断 | Message Signaled Interrupts，MSI / MSI-X | 设备通过写特定地址触发中断的机制 | 5.5 |
 | 写时复制 | Copy-On-Write，COW | 共享只读页，写入时再复制 | 4.9 |
 | 信号量 | Semaphore | 允许至多 N 个持有者的睡眠锁，`struct semaphore` | 7.7 |
+| 性能域 | Performance Domain | 共享同一频率的一组 CPU，EAS 以它为单位估算能耗 | 3.12 |
 | 修正唤醒规则 | Revised Wakeup Rule | 受约束 Deadline 任务唤醒时削减预算而非重开周期 | 3.7 |
 | 虚拟截止时间 | Virtual Deadline | `vruntime + slice / weight` | 3.3 |
 | 虚拟内存区域 | Virtual Memory Area，VMA | 进程地址空间中属性相同的一段区间，`vm_area_struct` | 4.7 |
@@ -186,6 +204,7 @@
 | 准入控制 | Admission Control | 设置 Deadline 参数时检查总带宽是否超限 | 3.7 |
 | 自动 NUMA 平衡 | Automatic NUMA Balancing | 以 PROTNONE 缺页采样访问，把页迁到访问者所在节点（`CONFIG_NUMA_BALANCING`） | 4.12 |
 | 自旋锁 | Spinlock | 获取失败时原地循环等待的锁，`spinlock_t` / `raw_spinlock_t` | 7.4 |
+| 自愿抢占 | Voluntary Preemption | voluntary 抢占模型：内核态只在 `cond_resched()`、`might_sleep()` 等显式抢占点让出 CPU | 3.5 |
 | 自愿上下文切换 | Voluntary Context Switch | 任务主动睡眠引起的切换，计入 `nvcsw` | 3.2 |
 | 组调度 | Group Scheduling | 以任务组为单位分配 CPU（`CONFIG_FAIR_GROUP_SCHED`） | 3.10 |
 | 组合树 | Combining Tree | Tree RCU 中汇总静止状态报告的 `rcu_node` 层级结构 | 7.10 |
@@ -195,4 +214,4 @@
 
 ## 不翻译的术语
 
-`EEVDF`、`CFS`、`PELT`、`RCU`、`per-CPU`、`softirq`、`tasklet`、`slab`、`page cache`、`vruntime`、`lag`、`next buddy`、`nice`、`idle`、`dl_server`、`sched_ext`、`uclamp`、`PSI`、`folio`、`memblock`、`vmemmap`、`vmalloc`、`SLUB`、`kswapd`、`kcompactd`、`khugepaged`、`shrinker`、`zswap`、`zram`、`anon_vma`、`lruvec`、`hugetlbfs`、`GFP`、`qspinlock`、`qrwlock`、`seqcount`、`mutex`、`rwsem`、`rt_mutex`、`OSQ`、`futex`、`SRCU`、`lockdep`、`irq_work`、`kworker`、`ksoftirqd`、`NAPI`、`x2APIC`、`hwirq`
+`EEVDF`、`CFS`、`PELT`、`RCU`、`per-CPU`、`softirq`、`tasklet`、`slab`、`page cache`、`vruntime`、`lag`、`next buddy`、`nice`、`idle`、`dl_server`、`sched_ext`、`uclamp`、`PSI`、`folio`、`memblock`、`vmemmap`、`vmalloc`、`SLUB`、`kswapd`、`kcompactd`、`khugepaged`、`shrinker`、`zswap`、`zram`、`anon_vma`、`lruvec`、`hugetlbfs`、`GFP`、`qspinlock`、`qrwlock`、`seqcount`、`mutex`、`rwsem`、`rt_mutex`、`OSQ`、`futex`、`SRCU`、`lockdep`、`irq_work`、`wake_q`、`kworker`、`ksoftirqd`、`NAPI`、`x2APIC`、`hwirq`、`tick`、`hrtick`、`static call`、`static key`、`housekeeping`

@@ -126,7 +126,7 @@ static struct sched_domain_topology_level x86_topology[] = {
 - **均衡间隔**：以毫秒计，初始等于域内 CPU 数（`sd_weight`），在 `[min_interval, max_interval]` 内自适应：均衡成功则重置为最小值，持续平衡则逐步加倍（`sched_balance_rq()` 末尾）。CPU 忙时还要乘以 `busy_factor`（16），所以忙碌 CPU 的高层均衡相当稀疏。
 - **`imbalance_pct`**：只有最忙组比本地组负载高出该百分比才迁移。SMT 层为 110，其余默认 117（[`kernel/sched/topology.c:1692-1697`](../../linux/kernel/sched/topology.c#L1692-L1697)）。
 - **`cache_nice_tries`**：均衡失败这么多次以后，才允许迁移缓存热的任务。共享 LLC 与普通层为 1，NUMA 层为 2。
-- **`SD_BALANCE_WAKE` 默认关闭**：这正是 3.4 节"普通唤醒不走调度域慢速路径"的原因。
+- **`SD_BALANCE_WAKE` 默认关闭**：因此公平类的普通唤醒（`WF_TTWU`）通常不会进入沿调度域寻找最空闲 CPU 的慢速路径，只有 fork / exec 才会（[`kernel/sched/fair.c:8787-8795`](../../linux/kernel/sched/fair.c#L8787-L8795)）。
 - **NUMA 层**：设置 `SD_SERIALIZE`（全系统同时只允许一个 CPU 在 NUMA 层均衡），距离过远时还会关闭 fork / exec 均衡与亲和唤醒（[`kernel/sched/topology.c:1700-1709`](../../linux/kernel/sched/topology.c#L1700-L1709)）。
 
 ### root domain
