@@ -808,6 +808,13 @@ try_to_wake_up()                                 kernel/sched/core.c
     ├── wakeup_preempt() → class->wakeup_preempt() 或 resched_curr()
     └── class->task_woken()
 
+wake_up_new_task()                               kernel/sched/core.c
+├── select_task_rq() → class->select_task_rq()
+├── activate_task()
+│   └── enqueue_task() → class->enqueue_task()
+├── wakeup_preempt() → class->wakeup_preempt() 或 resched_curr()
+└── class->task_woken()
+
 __schedule()                                     kernel/sched/core.c
 ├── try_to_block_task() → block_task()
 │   └── dequeue_task() → class->dequeue_task()
@@ -832,7 +839,7 @@ __sched_setscheduler() / set_user_nice()         kernel/sched/syscalls.c
 └── check_class_changed() → switched_from() / switched_to() / prio_changed()
 ```
 
-唤醒（3.4 节）、`__schedule()`（3.2 节）、时钟中断（3.5 节）各有专门的小节，下面聚焦这些路径共用的部分：锁、入队出队、跨类选择、唤醒抢占和属性修改。
+唤醒与新任务首次入队（3.4 节）、`__schedule()`（3.2 节）、时钟中断（3.5 节）各有专门的小节，下面聚焦这些路径共用的部分：锁、入队出队、跨类选择、唤醒抢占和属性修改。
 
 ### 串行化规则：pi_lock 与 rq->lock
 
