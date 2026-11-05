@@ -14,45 +14,41 @@ Linux 的做法是**机制与策略分离**。核心层（`kernel/sched/core.c`�
 
 本节先介绍框架的数据结构——调度策略与优先级、调度类、运行队列、调度实体、权重，再分析核心层如何通过一组包装函数驱动调度类：加锁、入队出队、选择任务、唤醒抢占和修改调度属性。`__schedule()` 与上下文切换本身留给 3.2 节。
 
+图 3-1 从上到下分四层：外部入口决定**何时**进入调度器；核心层按固定步骤执行与策略无关的机制，框内的编号即执行顺序；核心层通过 `struct sched_class` 的函数指针把具体决策交给调度类；每个调度类管理 `struct rq` 中属于自己的那部分子队列。
+
 ```mermaid
 flowchart TB
-    subgraph api["外部入口"]
-        SYS["sched_setattr() / setpriority() 等系统调用"]
-        WAKE["try_to_wake_up() / wake_up_new_task()"]
-        TICK["sched_tick()"]
-        SCHED["__schedule()"]
+    subgraph entry["外部入口：何时进入调度器"]
+        WAKE["唤醒任务<br/>try_to_wake_up()<br/>wake_up_new_task()"]
+        SCHED["让出 CPU<br/>__schedule()"]
+        TICK["时钟中断<br/>sched_tick()"]
+        ATTR["修改调度属性<br/>sched_setattr() / setpriority() 等"]
     end
-    subgraph core["核心层（core.c / syscalls.c）"]
-        LOCK["task_rq_lock() / rq_lock()"]
-        ACT["activate_task() / deactivate_task()"]
-        CHG["sched_change_begin() / sched_change_end()"]
-        PICK["__pick_next_task()"]
-        PRE["wakeup_preempt()"]
+    subgraph core["核心层 core.c / syscalls.c：机制（编号为执行顺序）"]
+        P1["① activate_task()：入队<br/>② wakeup_preempt()：判断是否抢占当前任务"]
+        P2["① try_to_block_task()：要睡眠则出队<br/>② pick_next_task()：选出下一个任务"]
+        P3["调用当前任务所属调度类的 task_tick()"]
+        P4["① task_rq_lock()：加锁<br/>② sched_change_begin()：出队<br/>③ 修改 policy / prio / sched_class<br/>④ sched_change_end()：重新入队"]
     end
-    subgraph classes["调度类（自上而下优先级递减）"]
+    subgraph classes["调度类 struct sched_class：策略（从左到右优先级递减）"]
         STOP["stop_sched_class"]
         DL["dl_sched_class"]
         RT["rt_sched_class"]
         FAIR["fair_sched_class"]
         IDLE["idle_sched_class"]
-        STOP ~~~ DL ~~~ RT ~~~ FAIR ~~~ IDLE
     end
-    subgraph rq["per-CPU struct rq"]
-        PSTOP["rq->stop"]
-        DLRQ["rq->dl（dl_rq）"]
-        RTRQ["rq->rt（rt_rq）"]
-        CFSRQ["rq->cfs（cfs_rq）"]
-        PIDLE["rq->idle"]
+    subgraph rq["per-CPU struct rq：各调度类的子队列"]
+        PSTOP["rq->stop<br/>（单个任务指针）"]
+        DLRQ["rq->dl<br/>（dl_rq）"]
+        RTRQ["rq->rt<br/>（rt_rq）"]
+        CFSRQ["rq->cfs<br/>（cfs_rq）"]
+        PIDLE["rq->idle<br/>（单个任务指针）"]
     end
-    SYS --> LOCK --> CHG
-    WAKE --> ACT
-    WAKE --> PRE
-    SCHED --> PICK
-    TICK -- "task_tick()" --> classes
-    ACT -- "enqueue_task() / dequeue_task()" --> classes
-    CHG --> classes
-    PICK -- "pick_task()" --> classes
-    PRE -- "wakeup_preempt()" --> classes
+    WAKE --> P1
+    SCHED --> P2
+    TICK --> P3
+    ATTR --> P4
+    core -- "经函数指针调用：enqueue_task / dequeue_task / pick_task / task_tick / wakeup_preempt 等" --> classes
     STOP --> PSTOP
     DL --> DLRQ
     RT --> RTRQ
@@ -60,7 +56,7 @@ flowchart TB
     IDLE --> PIDLE
 ```
 
-*图 3-1：调度器的分层结构：核心层通过调度类方法操作各类子队列（`ext_sched_class` 依赖 `CONFIG_SCHED_CLASS_EXT`，本书配置未开启，图中省略）*
+*图 3-1：调度器的分层结构。核心层每个框内的编号表示同一路径上的调用顺序，各步骤由核心层依次调用，彼此之间不是调用关系；选任务时核心层按调度类优先级从高到低逐个询问（`ext_sched_class` 依赖 `CONFIG_SCHED_CLASS_EXT`，本书配置未开启，图中省略）*
 
 ## 核心数据结构
 
