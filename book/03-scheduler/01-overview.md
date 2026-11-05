@@ -809,12 +809,14 @@ void set_load_weight(struct task_struct *p, bool update_load)
 
 ```
 try_to_wake_up()                                 kernel/sched/core.c
+├── ttwu_runnable()                              （任务仍在队列上时直接完成唤醒）
 ├── select_task_rq() → class->select_task_rq()
-└── ttwu_do_activate()
-    ├── activate_task()
-    │   └── enqueue_task() → class->enqueue_task()
-    ├── wakeup_preempt() → class->wakeup_preempt() 或 resched_curr()
-    └── class->task_woken()
+└── ttwu_queue()
+    └── ttwu_do_activate()                       （或经 ttwu_queue_wakelist() 交给目标 CPU）
+        ├── activate_task()
+        │   └── enqueue_task() → class->enqueue_task()
+        ├── wakeup_preempt() → class->wakeup_preempt() 或 resched_curr()
+        └── class->task_woken()
 
 wake_up_new_task()                               kernel/sched/core.c
 ├── select_task_rq() → class->select_task_rq()
@@ -827,25 +829,41 @@ __schedule()                                     kernel/sched/core.c
 ├── try_to_block_task() → block_task()
 │   └── dequeue_task() → class->dequeue_task()
 └── pick_next_task() → __pick_next_task()
+    ├── pick_next_task_fair()                    kernel/sched/fair.c（快速路径）
     ├── prev_balance() → class->balance()
-    └── class->pick_task()
-        └── put_prev_set_next_task()             kernel/sched/sched.h
-            ├── prev->sched_class->put_prev_task()
-            └── next->sched_class->set_next_task()
+    ├── class->pick_next_task()                  （仅公平类实现）
+    ├── class->pick_task()                       （其余调度类）
+    └── put_prev_set_next_task()                 kernel/sched/sched.h
+        ├── prev->sched_class->put_prev_task()
+        └── next->sched_class->set_next_task()
 
 sched_tick() → donor->sched_class->task_tick()   kernel/sched/core.c
 
-__sched_setscheduler() / set_user_nice()         kernel/sched/syscalls.c
+__sched_setscheduler()                           kernel/sched/syscalls.c
 ├── task_rq_lock()                               kernel/sched/core.c
-├── sched_change_begin()
+├── sched_change_begin()                         kernel/sched/core.c
 │   ├── dequeue_task() → class->dequeue_task()
 │   └── put_prev_task() → class->put_prev_task()
 ├── 修改 policy / prio / sched_class / se.load
-├── sched_change_end()
+├── check_class_changing() → class->switching_to()
+├── sched_change_end()                           kernel/sched/core.c
 │   ├── enqueue_task() → class->enqueue_task()
 │   └── set_next_task() → class->set_next_task()
 └── check_class_changed() → switched_from() / switched_to() / prio_changed()
+
+set_user_nice()                                  kernel/sched/syscalls.c
+├── task_rq_lock()                               kernel/sched/core.c
+├── sched_change_begin()                         （同上）
+├── 修改 static_prio / se.load / prio
+├── sched_change_end()                           （同上）
+└── class->prio_changed()
 ```
+
+几点说明：
+
+- `__pick_next_task()` 中的各分支是并列关系，不是嵌套调用：全是公平任务时走快速路径 `pick_next_task_fair()`；否则先 `prev_balance()`，再按优先级逐类询问。`class->pick_next_task()` 与快速路径选到公平任务时，在 `pick_next_task_fair()` 内部完成 `put_prev_set_next_task()`；只实现了 `pick_task()` 的调度类（以及快速路径回退到 idle 任务时），由 `__pick_next_task()` 在选出任务后调用 `put_prev_set_next_task()`（[`kernel/sched/core.c:5990-6020`](../../linux/kernel/sched/core.c#L5990-L6020)）。
+- 本书配置开启了 `CONFIG_SCHED_CORE`，此时 `pick_next_task()` 是核心调度版本，未对该 `rq` 启用核心调度时直接调用 `__pick_next_task()`（[`kernel/sched/core.c:6077-6078`](../../linux/kernel/sched/core.c#L6077-L6078)）。
+- `set_user_nice()` 不改变调度类，因此不经过 `check_class_changed()`，而是在 `sched_change` 块结束后直接调用 `prio_changed()`（[`kernel/sched/syscalls.c:103`](../../linux/kernel/sched/syscalls.c#L103)）。
 
 唤醒与新任务首次入队（3.4 节）、`__schedule()`（3.2 节）、时钟中断（3.5 节）各有专门的小节，下面聚焦这些路径共用的部分：锁、入队出队、跨类选择、唤醒抢占和属性修改。
 
