@@ -91,7 +91,7 @@ flowchart TB
 
 - 值 4 预留给从未实现的 `SCHED_ISO`。
 - 策略值可以与 `SCHED_RESET_ON_FORK`（[`include/uapi/linux/sched.h:124`](../../linux/include/uapi/linux/sched.h#L124)）按位或，使子进程在 `fork()` 时退回 `SCHED_NORMAL`（负的 nice 值也重置为 0）；`sched_fork()` 中的处理见 [`kernel/sched/core.c:4715-4734`](../../linux/kernel/sched/core.c#L4715-L4734)。
-- `SCHED_IDLE` 策略与 `idle_sched_class` 毫无关系：前者是公平调度类中权重最低的普通任务，后者只服务每个 CPU 上的 idle 线程（`swapper/N`）。
+- `SCHED_IDLE` 策略与 `idle_sched_class` 毫无关系：前者是公平调度类中权重最低的普通任务，后者只服务每个 CPU 上的 idle 线程（`swapper/N`，名字由 `init_idle()` 设置，见 [`kernel/sched/core.c:8040`](../../linux/kernel/sched/core.c#L8040)）。
 - 内核用 `idle_policy()`、`fair_policy()`、`rt_policy()`、`dl_policy()` 判断策略（[`kernel/sched/sched.h:187-214`](../../linux/kernel/sched/sched.h#L187-L214)）。注意 `fair_policy()` 只包括 `SCHED_NORMAL` 和 `SCHED_BATCH`，不包括 `SCHED_IDLE`，尽管三者都归公平调度类管理。
 - 本书配置中 `CONFIG_SCHED_CLASS_EXT` 未开启，`SCHED_EXT` 相关代码不参与编译，本节不再展开（见 3.11 节）。
 
@@ -311,7 +311,11 @@ struct sched_class {
 
 ### 两个最简单的调度类：stop 与 idle
 
-在深入复杂的公平类之前，先看看接口的最小实现。stop 调度类只服务每 CPU 一个的 stopper 线程（`migration/N`），用于任务迁移、CPU 热插拔、`stop_machine()` 等必须"立即独占 CPU"的场景：
+在深入复杂的公平类之前，先看看接口的最小实现。stop 调度类只服务每 CPU 一个的 stopper 线程（`migration/N`），用于任务迁移、CPU 热插拔、`stop_machine()` 等必须"立即独占 CPU"的场景。
+
+stopper 线程由 `cpu_stop_init()` 在 `early_initcall` 阶段通过 `smpboot_register_percpu_thread()` 为每个 CPU 创建，线程名模板为 `"migration/%u"`（[`kernel/stop_machine.c:559-585`](../../linux/kernel/stop_machine.c#L559-L585)）；创建回调 `cpu_stop_create()` 调用 `sched_set_stop_task()`，把线程切到 stop 类并记入 `rq->stop`（[`kernel/stop_machine.c:539-542`](../../linux/kernel/stop_machine.c#L539-L542)、[`kernel/sched/core.c:3644`](../../linux/kernel/sched/core.c#L3644)）。调用者通过 `cpu_stop_queue_work()` 把工作挂到目标 CPU 的 `stopper->works` 链表并唤醒其 stopper 线程（[`kernel/stop_machine.c:91-111`](../../linux/kernel/stop_machine.c#L91-L111)），线程主体 `cpu_stopper_thread()` 逐个取出工作，在 `in_atomic()` 为真的状态下执行回调，回调不得睡眠（[`kernel/stop_machine.c:487-525`](../../linux/kernel/stop_machine.c#L487-L525)）。
+
+stop 类的入队、出队与选择方法如下：
 
 [`kernel/sched/stop_task.c:35-54`](../../linux/kernel/sched/stop_task.c#L35-L54)（v6.18.60）
 
@@ -382,6 +386,10 @@ struct task_struct *pick_task_idle(struct rq *rq)
 ```
 
 idle 线程从不入队，也不计入 `nr_running`；`dequeue_task_idle()` 被调用意味着有人在 idle 线程里睡眠，会打印 `"bad: scheduling from the idle thread!"`（[`kernel/sched/idle.c:506-514`](../../linux/kernel/sched/idle.c#L506-L514)）。
+
+idle 线程有两个来源。引导 CPU 的 idle 线程就是 0 号进程本身，由 `sched_init()` 调用 `init_idle()` 转换而来（见后文"初始化"）；其余 CPU 的 idle 线程由 `smp_init()` 调用 `idle_threads_init()`，再经 `idle_init()` 调用 `fork_idle()` 创建（[`kernel/smpboot.c:48-74`](../../linux/kernel/smpboot.c#L48-L74)、[`kernel/fork.c:2524-2542`](../../linux/kernel/fork.c#L2524-L2542)），`fork_idle()` 同样以 `init_idle()` 收尾。`init_idle()` 负责设置 `rq->idle`、`idle_sched_class` 和 `swapper/N` 线程名（[`kernel/sched/core.c:7983-8041`](../../linux/kernel/sched/core.c#L7983-L8041)）。
+
+idle 线程运行的是 `cpu_startup_entry()` 中的无限循环（[`kernel/sched/idle.c:443-450`](../../linux/kernel/sched/idle.c#L443-L450)）：每轮 `do_idle()` 在 `need_resched()` 为假时让 CPU 进入低功耗状态，一旦有任务需要运行就调用 `schedule_idle()` 让出 CPU（[`kernel/sched/idle.c:276-383`](../../linux/kernel/sched/idle.c#L276-L383)）。引导 CPU 在 `rest_init()` 末尾进入该循环（[`init/main.c:718`](../../linux/init/main.c#L718)），x86 的其他 CPU 在 `start_secondary()` 末尾进入（[`arch/x86/kernel/smpboot.c:315`](../../linux/arch/x86/kernel/smpboot.c#L315)）。
 
 相比之下，公平调度类（[`kernel/sched/fair.c:14112-14159`](../../linux/kernel/sched/fair.c#L14112-L14159)）实现了表中几乎所有方法，并且是唯一实现 `pick_next_task()` 快速路径的调度类。
 
