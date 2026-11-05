@@ -35,9 +35,32 @@
   - [4.12 页迁移、内存规整与 OOM Killer](04-memory/12-compaction-oom.md)
   - [4.13 大页：hugetlbfs 与透明大页](04-memory/13-hugepage.md)
   - [4.14 内存控制组（memcg）](04-memory/14-memcg.md)
-- 第 5 章 中断与异常（规划中）
+- [第 5 章 中断与异常](05-interrupt/README.md)
+  - [5.1 x86_64 中断与异常体系：向量、IDT 与中断栈](05-interrupt/01-x86-idt.md)
+  - [5.2 中断入口与出口：idtentry 与 irqentry 框架](05-interrupt/02-entry.md)
+  - [5.3 CPU 异常处理：陷阱、故障与异常修复](05-interrupt/03-exceptions.md)
+  - [5.4 NMI 与机器检查](05-interrupt/04-nmi.md)
+  - [5.5 中断控制器：Local APIC、I/O APIC 与 MSI](05-interrupt/05-apic.md)
+  - [5.6 通用中断层：irq_desc、irq_chip 与 irq_domain](05-interrupt/06-irq-core.md)
+  - [5.7 中断申请、流控处理与线程化中断](05-interrupt/07-request-thread.md)
+  - [5.8 中断向量分配与亲和性](05-interrupt/08-vector-affinity.md)
+  - [5.9 软中断](05-interrupt/09-softirq.md)
+  - [5.10 tasklet 与 BH 工作队列](05-interrupt/10-tasklet-bh-wq.md)
+  - [5.11 处理器间中断与 irq_work](05-interrupt/11-ipi-irq-work.md)
+  - [5.12 工作队列](05-interrupt/12-workqueue.md)
 - 第 6 章 系统调用（规划中）
-- 第 7 章 同步与锁（规划中）
+- [第 7 章 同步与锁](07-sync/README.md)
+  - [7.1 并发来源与执行上下文](07-sync/01-context.md)
+  - [7.2 原子操作、位操作与引用计数](07-sync/02-atomic.md)
+  - [7.3 内存屏障与 Linux 内核内存模型](07-sync/03-memory-model.md)
+  - [7.4 自旋锁与 qspinlock](07-sync/04-spinlock.md)
+  - [7.5 读写锁与顺序锁](07-sync/05-rwlock-seqlock.md)
+  - [7.6 互斥锁与乐观自旋](07-sync/06-mutex.md)
+  - [7.7 信号量与读写信号量](07-sync/07-rwsem.md)
+  - [7.8 rt_mutex、优先级继承与 futex](07-sync/08-rtmutex-futex.md)
+  - [7.9 RCU 原理与使用](07-sync/09-rcu-basics.md)
+  - [7.10 Tree RCU：宽限期检测与回调处理](07-sync/10-tree-rcu.md)
+  - [7.11 lockdep 与锁调试](07-sync/11-lockdep.md)
 - 第 8 章 时间与定时器（规划中）
 - 第 9 章 虚拟文件系统（规划中）
 - 第 10 章 块设备层（规划中）
