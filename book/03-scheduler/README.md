@@ -47,8 +47,9 @@
 
 ## 待完善
 
-- [ ] `linux/.config` 为 `CONFIG_PREEMPT=y`、`CONFIG_PREEMPT_RT=y`、`CONFIG_PREEMPT_LAZY` 未开启（3.5 节已据此重写），而 3.2 等节仍写着"本书配置开启了 `CONFIG_PREEMPT_LAZY`""本书配置未开启 `CONFIG_PREEMPT_RT`"，需逐节复核；`CONFIG_SCHED_CLASS_EXT` 在当前 `linux/.config` 中也已为 y，与上表不符；3.3 节"`rq_clock_task()` 不含中断处理时间"在未开启 `CONFIG_IRQ_TIME_ACCOUNTING` 的本书配置下不成立。
+- [ ] 当前 `linux/.config` 为 `CONFIG_PREEMPT_LAZY=y`，`CONFIG_PREEMPT`、`CONFIG_PREEMPT_RT`、`CONFIG_SCHED_CLASS_EXT` 均未开启。3.2 节已按此复核；上方"本章配置"表中抢占一行（y / y / y）与 3.5 节仍按 `CONFIG_PREEMPT=y`、`CONFIG_PREEMPT_RT=y` 编写，其余各节也需逐节复核；3.3 节"`rq_clock_task()` 不含中断处理时间"在未开启 `CONFIG_IRQ_TIME_ACCOUNTING` 的本书配置下不成立。
 - [ ] 原 3.5 节中各调度类对 `sched_can_stop_tick()` 的具体判据（Deadline、`SCHED_RR` / `SCHED_FIFO`、多个公平任务）已移出，需在 3.3、3.6 节补充（3.7、3.10 节已有相应说明）。
+- [ ] 按 AGENTS.md 3.1 节要求，3.3～3.12 尚缺"可观测性"一节（3.2 已补充，3.1 为概述小节可省略）。
 - [ ] 3.1～3.12 的"动手实验"尚未在 dev 虚拟机中实测，需补充真实输出示例（注明内核版本与配置）。
 - [ ] 3.11 的实验需要开启 `CONFIG_SCHED_CLASS_EXT`（依赖 `CONFIG_DEBUG_INFO_BTF`）的内核，本书默认配置无法直接运行。
 - [ ] 各节 Mermaid 图（图 3-1、3-3、3-5、3-7、3-8、3-10、3-12、3-16、3-17、3-18、3-20）需在目标渲染器中确认显示效果。

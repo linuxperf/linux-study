@@ -1,8 +1,8 @@
 # 3.2 主调度函数与上下文切换
 
-> **本节源码**：[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`kernel/sched/fair.c`](../../linux/kernel/sched/fair.c)、[`kernel/entry/common.c`](../../linux/kernel/entry/common.c)、[`include/linux/preempt.h`](../../linux/include/linux/preempt.h)、[`arch/x86/include/asm/preempt.h`](../../linux/arch/x86/include/asm/preempt.h)、[`arch/x86/include/asm/switch_to.h`](../../linux/arch/x86/include/asm/switch_to.h)、[`arch/x86/entry/entry_64.S`](../../linux/arch/x86/entry/entry_64.S)、[`arch/x86/kernel/process_64.c`](../../linux/arch/x86/kernel/process_64.c)、[`arch/x86/kernel/process.c`](../../linux/arch/x86/kernel/process.c)、[`arch/x86/mm/tlb.c`](../../linux/arch/x86/mm/tlb.c)
+> **本节源码**：[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`kernel/sched/fair.c`](../../linux/kernel/sched/fair.c)、[`kernel/entry/common.c`](../../linux/kernel/entry/common.c)、[`include/linux/preempt.h`](../../linux/include/linux/preempt.h)、[`arch/x86/include/asm/preempt.h`](../../linux/arch/x86/include/asm/preempt.h)、[`arch/x86/include/asm/switch_to.h`](../../linux/arch/x86/include/asm/switch_to.h)、[`arch/x86/entry/entry_64.S`](../../linux/arch/x86/entry/entry_64.S)、[`arch/x86/kernel/process_64.c`](../../linux/arch/x86/kernel/process_64.c)、[`arch/x86/kernel/process.c`](../../linux/arch/x86/kernel/process.c)、[`arch/x86/mm/tlb.c`](../../linux/arch/x86/mm/tlb.c)、[`include/trace/events/sched.h`](../../linux/include/trace/events/sched.h)
 > **关键函数**：`resched_curr()`、`schedule()`、`preempt_schedule_irq()`、`__schedule()`、`try_to_block_task()`、`__pick_next_task()`、`put_prev_set_next_task()`、`context_switch()`、`switch_mm_irqs_off()`、`__switch_to_asm()`、`__switch_to()`、`finish_task_switch()`
-> **前置知识**：3.1 调度器框架（调度类、运行队列、`on_rq` 与 `block_task()`）
+> **前置知识**：3.1 调度器框架（调度类、运行队列、`on_rq` 与 `block_task()`）、7.1 并发来源与执行上下文（`preempt_count`）
 
 ## 概述
 
@@ -28,8 +28,8 @@
 | 模式 | 含义 | 入口 |
 |---|---|---|
 | `SM_IDLE` | idle 线程发起调度，运行队列为空时可走快速路径 | `schedule_idle()` |
-| `SM_NONE` | 普通调用，任务可能要睡眠 | `schedule()`、`do_task_dead()` |
-| `SM_PREEMPT` | 抢占：当前任务仍然可运行，只是被要求让出 CPU | `preempt_schedule()`、`preempt_schedule_irq()`、`__cond_resched()` |
+| `SM_NONE` | 普通调用，任务可能要睡眠 | `schedule()`、`do_task_dead()`、`rt_mutex_schedule()` |
+| `SM_PREEMPT` | 抢占：当前任务仍然可运行，只是被要求让出 CPU | `preempt_schedule()`、`preempt_schedule_notrace()`、`preempt_schedule_irq()`、`__cond_resched()` |
 | `SM_RTLOCK_WAIT` | 在 PREEMPT_RT 的"睡眠自旋锁"上阻塞（依赖 `CONFIG_PREEMPT_RT`，本书配置未开启） | `schedule_rtlock()` |
 
 ### task_struct 中的相关字段
@@ -214,7 +214,7 @@ static void __resched_curr(struct rq *rq, int tif)
 - **本 CPU**：设置 TIF 标志；若是 `TIF_NEED_RESCHED`，同步清除 `__preempt_count` 中的取反位，使下一个 `preempt_enable()` 能立即察觉。
 - **远程 CPU**：`set_nr_and_not_polling()` 用一次 `fetch_or` 原子地设置标志并读回旧值（[`kernel/sched/core.c:980-983`](../../linux/kernel/sched/core.c#L980-L983)）。如果目标 CPU 的 idle 线程正在轮询（`TIF_POLLING_NRFLAG`），设置标志就足以让它退出轮询，省掉 IPI；否则发送重调度 IPI。惰性请求即使发往远程 CPU 也不发 IPI，等对方自己在返回用户态或 tick 时发现。
 
-重调度 IPI 的处理函数 `sysvec_reschedule_ipi()`（[`arch/x86/kernel/smp.c:248-255`](../../linux/arch/x86/kernel/smp.c#L248-L255)）几乎什么都不做：真正的调度发生在中断**返回**路径的抢占点上，IPI 的作用只是让目标 CPU 尽快经过一次这样的抢占点。
+远程路径只设置了目标任务的 TIF 标志，目标 CPU 上 `__preempt_count` 的取反位并没有变化。重调度 IPI 的处理函数 `sysvec_reschedule_ipi()`（[`arch/x86/kernel/smp.c:248-255`](../../linux/arch/x86/kernel/smp.c#L248-L255)）除了应答中断、累加 `/proc/interrupts` 中 `RES` 行的计数，只调用 `scheduler_ipi()`（[`include/linux/sched.h:2011-2019`](../../linux/include/linux/sched.h#L2011-L2019)），由 `preempt_fold_need_resched()` 把 `TIF_NEED_RESCHED` 折叠进本 CPU 的 `__preempt_count`（[`include/linux/preempt.h:313-317`](../../linux/include/linux/preempt.h#L313-L317)）。处理函数本身并不调度：真正的调度发生在中断**返回**路径的抢占点上，IPI 的作用是让目标 CPU 尽快经过一次这样的抢占点，同时让此后的 `preempt_enable()` 也能察觉请求。走免 IPI 路径的轮询 idle 线程得不到这次折叠，所以 `do_idle()` 退出轮询后要自己调用 `preempt_set_need_resched()` 补上（[`kernel/sched/idle.c:356-363`](../../linux/kernel/sched/idle.c#L356-L363)）。
 
 `resched_curr()` 传入 `TIF_NEED_RESCHED`；公平类使用的 `resched_curr_lazy()` 则由当前抢占模型决定设置哪一位：
 
@@ -235,7 +235,7 @@ void resched_curr_lazy(struct rq *rq)
 }
 ```
 
-本书配置开启了 `CONFIG_PREEMPT_LAZY` 与 `CONFIG_PREEMPT_DYNAMIC`，`dynamic_preempt_lazy()` 读取一个 static key，在 lazy 模型下为真。抢占模型的细节见 3.5 节。
+本书配置开启了 `CONFIG_PREEMPT_LAZY` 与 `CONFIG_PREEMPT_DYNAMIC`，`dynamic_preempt_lazy()` 读取一个 static key，在 lazy 模型下为真，而 lazy 正是本书配置启动时的默认模型（[`kernel/sched/core.c:7766-7782`](../../linux/kernel/sched/core.c#L7766-L7782)）。抢占模型的细节见 3.5 节。
 
 #### 响应请求：抢占点
 
@@ -290,6 +290,8 @@ void raw_irqentry_exit_cond_resched(void)
 `need_resched()` 只测试 `TIF_NEED_RESCHED`（[`include/linux/sched.h:2231-2234`](../../linux/include/linux/sched.h#L2231-L2234)），而返回用户态的路径还额外测试 `_TIF_NEED_RESCHED_LAZY`。前两类抢占点对惰性请求"视而不见"，这正是惰性抢占的实现基础：公平任务之间的抢占被推迟到返回用户态或下一个 tick，减少对持锁内核代码的打断。
 
 注意返回用户态时调用的是 `schedule()` 而不是 `preempt_schedule()`。此时任务状态为 `TASK_RUNNING`，`__schedule()` 不会让它出队，效果与抢占相同，但计入的是 `nivcsw`（见"关键细节"）。
+
+前两类抢占点还受运行时抢占模型控制（`CONFIG_PREEMPT_DYNAMIC`）：none / voluntary 模型下，`preempt_schedule` 与 `irqentry_exit_cond_resched` 两个 static call 被置空，内核态只在 `cond_resched()` 等显式位置让出 CPU；full / lazy 模型下二者生效，`cond_resched()` 反而变为空操作（[`kernel/sched/core.c:7597-7636`](../../linux/kernel/sched/core.c#L7597-L7636) 的对照表）。返回用户态这一类抢占点在所有模型下都生效。
 
 #### 入口函数
 
@@ -363,7 +365,7 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 
 ### __schedule() 逐段分析
 
-`__schedule()` 中有一个名为 `preempt` 的局部变量，前后取值口径不同：开头为 `sched_mode > SM_NONE`，把 `SM_RTLOCK_WAIT` 也算作抢占，供 `schedule_debug()` 和 RCU 使用；加锁之后被改为 `sched_mode == SM_PREEMPT`，用于决定任务是否出队以及 `sched_switch` 跟踪点的输出。
+`__schedule()` 中有一个名为 `preempt` 的局部变量，前后取值口径不同：开头为 `sched_mode > SM_NONE`，把 `SM_RTLOCK_WAIT` 也算作抢占，供 `schedule_debug()` 和 RCU 使用；加锁之后被改为 `sched_mode == SM_PREEMPT`，用于决定任务是否出队以及 `sched_switch` 跟踪点（Tracepoint）的输出。
 
 #### 第一步：调试检查与 RCU
 
@@ -439,7 +441,7 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 这里决定 `prev` 的命运，共三种情况：
 
 1. **idle 快速路径**：从 idle 循环进入且运行队列为空，直接 `next = prev`，跳过整个选择过程。这种情况并不少见：向正在轮询的 idle CPU 投递跨核函数调用时，内核会改为设置它的 `TIF_NEED_RESCHED` 以省掉 IPI（[`kernel/sched/core.c:3844-3852`](../../linux/kernel/sched/core.c#L3844-L3852)），idle 线程因此退出轮询并调用 `schedule_idle()`，但并没有新任务入队。
-2. **被抢占**（`SM_PREEMPT`）：无论 `prev->__state` 是什么都**不出队**。一个任务可能刚执行完 `set_current_state(TASK_UNINTERRUPTIBLE)`、还没来得及检查等待条件就被抢占。如果此时让它出队，它就失去了检查条件的机会；倖若条件早已满足、唤醒方也已经发过唤醒，就再没有人会唤醒它。抢占时保持在队列上，任务稍后被再次选中、继续检查条件，再由自己的 `schedule()` 调用按正常流程睡眠。
+2. **被抢占**（`SM_PREEMPT`）：无论 `prev->__state` 是什么都**不出队**。一个任务可能刚执行完 `set_current_state(TASK_UNINTERRUPTIBLE)`、还没来得及检查等待条件就被抢占。如果此时让它出队，它就失去了检查条件的机会；倘若条件早已满足、唤醒方也已经发过唤醒，就再没有人会唤醒它。抢占时保持在队列上，任务稍后被再次选中、继续检查条件，再由自己的 `schedule()` 调用按正常流程睡眠。
 3. **主动睡眠**（`prev_state` 非 0）：调用 `try_to_block_task()` 尝试出队，并把计数器切换为 `nvcsw`。
 
 `prev_state` 只读一次（`READ_ONCE`），与唤醒路径形成控制依赖，见 [`kernel/sched/core.c:6576-6585`](../../linux/kernel/sched/core.c#L6576-L6585) 的注释。
@@ -480,7 +482,7 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 - **特殊状态**：`__TASK_STOPPED`、`__TASK_TRACED`、`TASK_PARKED`、`TASK_DEAD`、`TASK_FROZEN` 属于特殊状态（[`include/linux/sched.h:160-162`](../../linux/include/linux/sched.h#L160-L162)）。公平类的延迟出队依赖"伪唤醒"来回收延迟实体，而这些状态不能容忍伪唤醒，所以 `DEQUEUE_SPECIAL` 会强制立即出队（[`kernel/sched/fair.c:5570-5575`](../../linux/kernel/sched/fair.c#L5570-L5575)）。
 - `should_block` 为假只发生在代理执行中（任务阻塞在 mutex 上，留在队列中以便被选作 donor），本书配置下恒为真。
 
-`block_task()` 调用 `dequeue_task(rq, p, DEQUEUE_SLEEP | flags)`，只有调度类真正出队时才调用 `__block_task()`（[`kernel/sched/sched.h:2769-2810`](../../linux/kernel/sched/sched.h#L2769-L2810)），后者更新 `nr_uninterruptible`、`nr_iowait`，最后清零 `on_rq`：
+`block_task()`（[`kernel/sched/core.c:2171-2175`](../../linux/kernel/sched/core.c#L2171-L2175)）调用 `dequeue_task(rq, p, DEQUEUE_SLEEP | flags)`，只有调度类真正出队时才调用 `__block_task()`（[`kernel/sched/sched.h:2769-2810`](../../linux/kernel/sched/sched.h#L2769-L2810)），后者更新 `nr_uninterruptible`、`nr_iowait`，最后清零 `on_rq`：
 
 [`kernel/sched/sched.h:2806-2809`](../../linux/kernel/sched/sched.h#L2806-L2809)（v6.18.60）
 
@@ -491,7 +493,7 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 	smp_store_release(&p->on_rq, 0);
 ```
 
-这次 release 写一旦完成，其他 CPU 上的 `try_to_wake_up()` 就可以把该任务迁到别处，因此此后本 CPU 不能再通过 rq 锁来保护它。不过 `prev` 此时仍在本 CPU 上运行（`on_cpu == 1`），真正在别处运行还要等 `finish_task_switch()`。公平类的 `dequeue_task()` 可能因延迟出队返回 false，此时任务保持 `on_rq`、带着 `sched_delayed` 标记留在队列中，等它在后续某次选择中被选中时才真正出队（3.3 节）。
+这次 release 写一旦完成，其他 CPU 上的 `try_to_wake_up()` 就可以把该任务迁到别处，因此此后本 CPU 不能再通过 rq 锁来保护它。不过 `prev` 此时仍在本 CPU 上运行（`on_cpu == 1`），真正在别处运行还要等 `finish_task_switch()`。公平类的 `dequeue_task()` 可能因延迟出队返回 false，此时任务保持 `on_rq`、带着 `sched_delayed` 标记留在队列中：之后它若被选中，才真正出队并执行 `__block_task()`；若在此之前就被唤醒，则在唤醒路径中清除延迟标记，直接恢复为普通的可运行状态（3.3、3.4 节）。
 
 #### 第四步：选择 next
 
@@ -519,6 +521,8 @@ keep_resched:
 本书配置开启了 `CONFIG_SCHED_CORE`，`pick_next_task()` 是核心调度版本（[`kernel/sched/core.c:6066`](../../linux/kernel/sched/core.c#L6066)），在 SMT 兄弟之间协调选择，避免不同信任域的任务同时运行在同一物理核上。但只要系统中还没有任务通过 `prctl(PR_SCHED_CORE)` 设置 cookie，核心调度就处于关闭状态（`sched_core_enabled()` 为假，[`kernel/sched/sched.h:1383-1386`](../../linux/kernel/sched/sched.h#L1383-L1386)），它直接转调 `__pick_next_task()`（[`kernel/sched/core.c:6077-6078`](../../linux/kernel/sched/core.c#L6077-L6078)）。`rq_set_donor()`、`task_is_blocked()`、`find_proxy_task()` 服务于代理执行，本书配置下前者为空操作、`task_is_blocked()` 恒为假（[`kernel/sched/sched.h:2304-2310`](../../linux/kernel/sched/sched.h#L2304-L2310)）。
 
 选出 `next` 后，立即清除 `prev` 的 `TIF_NEED_RESCHED` 与 `TIF_NEED_RESCHED_LAZY`（[`include/linux/sched.h:2066-2070`](../../linux/include/linux/sched.h#L2066-L2070)），以及本 CPU `__preempt_count` 中的重调度位：本次调度已经响应了请求。
+
+随后清零的 `rq->last_seen_need_resched_ns` 服务于调度延迟告警：开启 `LATENCY_WARN` 特性时，tick 中的 `cpu_resched_latency()` 记下第一次观察到 `need_resched()` 的时刻，超过 `latency_warn_ms` 仍未调度就打印警告（[`kernel/sched/core.c:5548-5577`](../../linux/kernel/sched/core.c#L5548-L5577)）。每次经过这里都把时间戳清零，重新计时（见"可观测性"）。
 
 #### 选择 next：公平类快速路径
 
@@ -784,7 +788,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	}
 ```
 
-`arch_start_context_switch()` 在半虚拟化环境中开启批处理模式（`CONFIG_PARAVIRT_XXL`），把页表切换与后续操作合并成一次 hypercall，与 `__switch_to()` 中的 `arch_end_context_switch()` 配对。
+`arch_start_context_switch()` 是半虚拟化钩子（`CONFIG_PARAVIRT_XXL`），裸机上是空操作（[`arch/x86/kernel/paravirt.c:158`](../../linux/arch/x86/kernel/paravirt.c#L158)）。在 Xen PV 客户机中，它进入惰性 CPU 模式（[`arch/x86/xen/enlighten_pv.c:423-432`](../../linux/arch/x86/xen/enlighten_pv.c#L423-L432)），随后的 CR3 写入、`load_TLS()` 等特权操作被攒成一批，到 `__switch_to()` 中的 `arch_end_context_switch()` 再一次性提交，即源码注释所说的"把页表重载与切换后端合并为一次 hypercall"。
 
 内核线程没有自己的用户地址空间（`mm == NULL`），只访问内核地址，而所有进程页表的内核部分都相同。所以切换到内核线程时不必换页表，直接"借用"上一个任务正在使用的 `active_mm`，这就是**惰性 TLB**（Lazy TLB）。源码注释列出了四种组合：
 
@@ -795,13 +799,13 @@ context_switch(struct rq *rq, struct task_struct *prev,
 | 内核 → 用户 | `switch_mm_irqs_off()` | 借来的 mm 记入 `rq->prev_mm`，在 `finish_task_switch()` 中释放引用 |
 | 用户 → 用户 | `switch_mm_irqs_off()` | 正常切换；同一进程的两个线程间则无需重载 CR3 |
 
-借用的引用之所以推迟到 `finish_task_switch()` 释放，是因为 `mmdrop` 可能触发 mm 的释放，不宜在持有 rq 锁时进行。`lru_gen_use_mm()` 告诉多代 LRU 这个 mm 最近被使用过，页面回收时值得扫描其页表（`CONFIG_LRU_GEN`，4.10 节）。
+借用的引用推迟到 `finish_task_switch()` 释放有两个原因。一是引用归零时 `mmdrop` 会释放整个 mm，代价较高，放在释放 rq 锁之后可以缩短持锁时间。二是 `mmdrop_lazy_tlb_sched()` 隐含的完整内存屏障正好满足 `membarrier()` 对"用户 → 内核线程 → 用户"这类不经过 `switch_mm()` 的切换的要求（[`kernel/sched/core.c:5228-5239`](../../linux/kernel/sched/core.c#L5228-L5239) 的注释）。`lru_gen_use_mm()` 告诉多代 LRU 这个 mm 最近被使用过，页面回收时值得扫描其页表（`CONFIG_LRU_GEN`，4.10 节）。
 
 x86 的 `switch_mm_irqs_off()`（[`arch/x86/mm/tlb.c:782-971`](../../linux/arch/x86/mm/tlb.c#L782-L971)）有几处值得注意：
 
 - 它忽略第一个参数，而是从 per-CPU 的 `cpu_tlbstate.loaded_mm` 读取本 CPU 真正加载的 mm（[`arch/x86/mm/tlb.c:785`](../../linux/arch/x86/mm/tlb.c#L785)）。
 - **新旧 mm 相同**（[`arch/x86/mm/tlb.c:840`](../../linux/arch/x86/mm/tlb.c#L840)）：同一进程的线程间切换，或"用户 → 内核 → 同一用户进程"。若中间没有经过惰性 TLB 状态，直接返回（[`arch/x86/mm/tlb.c:880-881`](../../linux/arch/x86/mm/tlb.c#L880-L881)）；否则比较 TLB 代数 `tlb_gen`，只有借用期间错过了 TLB 刷新才需要重新加载。
-- **新旧 mm 不同**：先由 `cond_mitigation()` 按缓解策略决定是否执行 IBPB，阻止一个进程通过分支预测器攻击另一个进程（[`arch/x86/mm/tlb.c:665-726`](../../linux/arch/x86/mm/tlb.c#L665-L726)）；再由 `choose_new_asid()` 为新 mm 挑选一个**进程上下文标识符**（Process-Context Identifier，PCID）。如果这个 mm 最近在本 CPU 上用过且 TLB 未过期，加载 CR3 时可以保留其 TLB 项，不必全部刷新。
+- **新旧 mm 不同**：先由 `cond_mitigation()` 按缓解策略决定是否执行 IBPB，阻止一个进程通过分支预测器攻击另一个进程（[`arch/x86/mm/tlb.c:665-726`](../../linux/arch/x86/mm/tlb.c#L665-L726)）；再由 `choose_new_asid()` 为新 mm 挑选一个**进程上下文标识符**（Process-Context Identifier，PCID）。如果这个 mm 最近在本 CPU 上用过且 TLB 未过期，加载 CR3 时可以保留其 TLB 项，不必全部刷新。每个 CPU 只为最近使用的 `TLB_NR_DYN_ASIDS`（6）个 mm 保留 PCID（[`arch/x86/include/asm/tlbflush.h:66`](../../linux/arch/x86/include/asm/tlbflush.h#L66)）；CPU 不支持 PCID 时，每次切换地址空间都要整体刷新 TLB（[`arch/x86/mm/tlb.c:229-233`](../../linux/arch/x86/mm/tlb.c#L229-L233)）。
 
 TLB 刷新协议（`tlb_gen`、跨 CPU 刷新 IPI）本身超出本节范围，跨 CPU 刷新的 IPI 路径见 5.11 节。
 
@@ -823,7 +827,7 @@ TLB 刷新协议（`tlb_gen`、跨 CPU 刷新 IPI）本身超出本节范围，�
 }
 ```
 
-`switch_mm_cid()` 维护 rseq 的 per-mm CPU 编号（`CONFIG_SCHED_MM_CID`）。注意 rq 锁**跨越了 `switch_to()`**：它由 `prev` 在 `__schedule()` 中获取，却由 `next` 在 `finish_task_switch()` 中释放。`prepare_lock_switch()`（[`kernel/sched/core.c:5065-5080`](../../linux/kernel/sched/core.c#L5065-L5080)）为此提前向 lockdep 声明释放，`finish_lock_switch()` 再在 `next` 一侧重新声明获取。
+`switch_mm_cid()` 维护经 rseq 暴露给用户态的 per-mm 并发 ID（`mm_cid`，`CONFIG_SCHED_MM_CID`）。注意 rq 锁**跨越了 `switch_to()`**：它由 `prev` 在 `__schedule()` 中获取，却由 `next` 在 `finish_task_switch()` 中释放。`prepare_lock_switch()`（[`kernel/sched/core.c:5065-5080`](../../linux/kernel/sched/core.c#L5065-L5080)）为此提前向 lockdep 声明释放，`finish_lock_switch()` 再在 `next` 一侧重新声明获取。
 
 x86_64 的 `switch_to()` 只是一个宏：
 
@@ -960,10 +964,10 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 - **FPU**：`switch_fpu()` 只**保存** `prev` 的 FPU/SIMD 寄存器，并给 `prev` 设置 `TIF_NEED_FPU_LOAD`（[`arch/x86/include/asm/fpu/sched.h:32-53`](../../linux/arch/x86/include/asm/fpu/sched.h#L32-L53)），不在此时加载 `next` 的状态。`next` 的 FPU 寄存器推迟到返回用户态时才恢复（[`arch/x86/include/asm/entry-common.h:56-57`](../../linux/arch/x86/include/asm/entry-common.h#L56-L57)）。内核线程不使用用户 FPU 状态，在两个用户任务之间切过一串内核线程时，这样能省下多次无用的保存和恢复；如果任务切回时仍在同一 CPU 上且寄存器内容未被他人覆盖，甚至可以完全跳过恢复。
 - **段与 TLS**：保存 `prev` 的 FS/GS 选择子与基址，加载 `next` 的 TLS 描述符和 FS/GS 基址。用户态线程局部存储（TLS）就依赖 FS 基址。
 - **PKRU**：切换内存保护键权限寄存器（`CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS`）。
-- **`current`**：x86 的 `current` 读取 per-CPU 变量 `current_task`（[`arch/x86/include/asm/current.h:20-26`](../../linux/arch/x86/include/asm/current.h#L20-L26)），直到这里才被改为 `next`。`cpu_current_top_of_stack` 供入口代码从跳板栈切换到任务栈时使用（5.2 节）。`update_task_stack()` 在 x86_64 上只对 Xen PV 有实际动作，因为 TSS 的 `sp0` 固定指向 per-CPU 的入口跳板栈（[`arch/x86/include/asm/switch_to.h:69-79`](../../linux/arch/x86/include/asm/switch_to.h#L69-L79)）。
+- **`current`**：x86 的 `current` 读取 per-CPU 变量 `current_task`（[`arch/x86/include/asm/current.h:20-26`](../../linux/arch/x86/include/asm/current.h#L20-L26)），直到这里才被改为 `next`。`cpu_current_top_of_stack` 供入口代码从跳板栈切换到任务栈时使用（5.2 节）。`update_task_stack()` 在 x86_64 上只对 Xen PV 有实际动作，因为 TSS 的 `sp0` 固定指向 per-CPU 的入口跳板栈（[`arch/x86/include/asm/switch_to.h:69-79`](../../linux/arch/x86/include/asm/switch_to.h#L69-L79)）。启用 FRED 时（`CONFIG_X86_FRED`，且 CPU 支持），来自用户态的事件由硬件直接切到 `MSR_IA32_FRED_RSP0` 指定的任务栈，这个 MSR 同样不在切换时更新，而是推迟到返回用户态前由 `fred_update_rsp0()` 按需写入（[`arch/x86/include/asm/fred.h:99-107`](../../linux/arch/x86/include/asm/fred.h#L99-L107)，调用点见 [`arch/x86/include/asm/entry-common.h:68`](../../linux/arch/x86/include/asm/entry-common.h#L68)）。
 - **其他**：`switch_to_extra()` 在任一任务带有特殊标志时调用 `__switch_to_xtra()`，处理 I/O 位图、调试寄存器、推测执行缓解（如 STIBP）等（[`arch/x86/kernel/process.h:13-39`](../../linux/arch/x86/kernel/process.h#L13-L39)）。
 
-`__switch_to()` 带有 `__notrace_funcgraph` 属性，不被 function graph tracer 跟踪：它由 `prev` 一侧的 `jmp` 进入，`ret` 却返回到 `next` 的调用点，函数中途 `current` 也发生了变化，跟踪器无法把它的入口与返回配对。
+`__switch_to()` 带有 `__notrace_funcgraph` 属性，开启 `CONFIG_FUNCTION_GRAPH_TRACER` 时它等同于 `notrace`（[`include/linux/ftrace.h:1251`](../../linux/include/linux/ftrace.h#L1251)），function 与 function_graph tracer 都不跟踪它。这样做是因为它由 `prev` 一侧的 `jmp` 进入，`ret` 却返回到 `next` 的调用点，函数中途 `current` 也发生了变化，跟踪器无法把它的入口与返回配对。
 
 最后 `return prev_p`，返回值经 `%rax` 带回，成为 `switch_to()` 宏的第三个参数 `last`。
 
@@ -1041,7 +1045,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 ```
 
 4. 若 `rq->prev_mm` 非空（"内核 → 用户"切换），释放借用的 mm 引用。
-5. 若 `prev` 已死亡，调用调度类的 `task_dead()`（v6.18 中只有公平类实现了它：死亡任务若仍处于延迟出队状态，就在这里完成出队），释放内核栈，并通过 `put_task_struct_rcu_user()` 放掉 "current" 那份引用。任务无法释放自己正在使用的栈，这件事只能由下一个任务代劳。
+5. 若 `prev` 已死亡，调用调度类的 `task_dead()`（v6.18 中只有公平类实现了它，[`kernel/sched/fair.c:8841-8858`](../../linux/kernel/sched/fair.c#L8841-L8858)：死亡任务若仍处于延迟出队状态，就在这里完成出队，并把它的 PELT 负载从所在 `cfs_rq` 中移除，3.8 节），释放内核栈，并通过 `put_task_struct_rcu_user()` 放掉 "current" 那份引用。任务无法释放自己正在使用的栈，这件事只能由下一个任务代劳。
 
 切换过程中，几个"谁在运行"的标志并不是同时改变的：
 
@@ -1083,7 +1087,7 @@ static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
 }
 ```
 
-此时 `prev` 和 `next` 的交接已经完成，回调可以自由地释放、重新获取 rq 锁。v6.18 中登记回调的有 RT 类的 `push_rt_tasks()` / `pull_rt_task()`（[`kernel/sched/rt.c:389-394`](../../linux/kernel/sched/rt.c#L389-L394)）、Deadline 类的 `push_dl_tasks()` / `pull_dl_task()`（[`kernel/sched/deadline.c:644-649`](../../linux/kernel/sched/deadline.c#L644-L649)）以及核心调度的 `sched_core_balance()`。`__schedule()` 在选择之前用 `assert_balance_callbacks_empty()` 确认链表为空，即没有遗留的回调。
+此时 `prev` 和 `next` 的交接已经完成，回调可以自由地释放、重新获取 rq 锁。v6.18 中登记回调的有 RT 类的 `push_rt_tasks()` / `pull_rt_task()`（[`kernel/sched/rt.c:389-394`](../../linux/kernel/sched/rt.c#L389-L394)）、Deadline 类的 `push_dl_tasks()` / `pull_dl_task()`（[`kernel/sched/deadline.c:644-649`](../../linux/kernel/sched/deadline.c#L644-L649)）以及核心调度的 `sched_core_balance()`（[`kernel/sched/core.c:6400`](../../linux/kernel/sched/core.c#L6400)）；开启 `CONFIG_SCHED_CLASS_EXT` 时 sched_ext 也会登记，本书配置未开启。`__schedule()` 在选择之前用 `assert_balance_callbacks_empty()` 确认没有遗留的回调（下文的 `balance_push_callback` 除外），但这项检查只在 `CONFIG_PROVE_LOCKING` 下生效（[`kernel/sched/sched.h:1790-1795`](../../linux/kernel/sched/sched.h#L1790-L1795)），本书配置未开启。
 
 CPU 下线时使用的 `balance_push_callback` 是一个特例：CPU 即将下线时，它被直接挂到 `rq->balance_callback` 上并一直保留，使该 CPU 上的每次 `__schedule()` 都把可迁移的任务推离（[`kernel/sched/core.c:5003-5017`](../../linux/kernel/sched/core.c#L5003-L5017)）。
 
@@ -1099,7 +1103,7 @@ CPU 下线时使用的 `balance_push_callback` 是一个特例：CPU 即将下�
 	p->thread.sp = (unsigned long) fork_frame;
 ```
 
-`fork_frame` 由 `inactive_task_frame` 和紧随其后的 `pt_regs` 组成（[`arch/x86/include/asm/switch_to.h:44-47`](../../linux/arch/x86/include/asm/switch_to.h#L44-L47)），位于新任务内核栈的顶端。对内核线程，`kthread_frame_init()` 还把线程函数和参数分别放进帧中的 `bx` 与 `r12` 槽位（[`arch/x86/include/asm/switch_to.h:81-90`](../../linux/arch/x86/include/asm/switch_to.h#L81-L90)）；用户进程的 `bx` 为 0。
+`fork_frame` 由 `inactive_task_frame` 和紧随其后的 `pt_regs` 组成（[`arch/x86/include/asm/switch_to.h:44-47`](../../linux/arch/x86/include/asm/switch_to.h#L44-L47)），位于新任务内核栈的顶端。对内核线程，以及创建时带有 `args->fn` 的用户态工作线程（如 io_uring 的 io-wq worker），`kthread_frame_init()` 还把线程函数和参数分别放进帧中的 `bx` 与 `r12` 槽位（[`arch/x86/include/asm/switch_to.h:81-90`](../../linux/arch/x86/include/asm/switch_to.h#L81-L90)、[`arch/x86/kernel/process.c:248-263`](../../linux/arch/x86/kernel/process.c#L248-L263)）；普通用户进程的 `bx` 为 0（[`arch/x86/kernel/process.c:242`](../../linux/arch/x86/kernel/process.c#L242)）。
 
 于是新任务第一次被选中时，`__switch_to_asm()` 弹出这些伪造的值，`__switch_to()` 的 `ret` 跳到 `ret_from_fork_asm`：
 
@@ -1195,6 +1199,59 @@ x86 不随任务保存抢占计数，依赖"切换时计数恒为 2"的不变式
 
 `__switch_to_asm()` 中的 RSB 填充、`switch_mm_irqs_off()` 中的条件 IBPB、`__switch_to_xtra()` 中的 STIBP 切换，以及返回用户态时的缓冲区清除，都是 2018 年以来为应对推测执行漏洞加入的。它们是近年上下文切换成本上升的主要原因，具体启用哪些取决于 CPU 型号与启动参数（如 `spectre_v2=`、`mitigations=`）。
 
+## 可观测性
+
+本节的机制可以从跟踪点、/proc 与 /sys 接口、动态探针三个层面观察。下文列出的入口在本书配置下均可用，例外处单独注明；具体操作见"动手实验"。
+
+### 跟踪点
+
+| 跟踪点 | 触发位置 | 观察内容 |
+|---|---|---|
+| `sched:sched_switch` | `__schedule()` 调用 `context_switch()` 之前（[`kernel/sched/core.c:6941`](../../linux/kernel/sched/core.c#L6941)） | 每次真正的切换记录一条：`prev_comm` / `prev_pid` / `prev_prio` / `prev_state` 与 `next_*`（字段定义见 [`include/trace/events/sched.h:220-267`](../../linux/include/trace/events/sched.h#L220-L267)）。`prev == next` 时不触发；`prev_state` 的编码见实验 2 |
+| `sched:sched_wake_idle_without_ipi` | `__resched_curr()`（[`kernel/sched/core.c:1145`](../../linux/kernel/sched/core.c#L1145)）、`call_function_single_prep_ipi()`（[`kernel/sched/core.c:3847`](../../linux/kernel/sched/core.c#L3847)）等 | 目标 CPU 的 idle 线程正在轮询，只设置标志、省掉一次 IPI |
+| `irq_vectors:reschedule_entry` / `reschedule_exit` | `sysvec_reschedule_ipi()`（[`arch/x86/kernel/smp.c:251-254`](../../linux/arch/x86/kernel/smp.c#L251-L254)） | 重调度 IPI 在目标 CPU 上的处理区间 |
+| `tlb:tlb_flush` | `switch_mm_irqs_off()` 加载 CR3 处（[`arch/x86/mm/tlb.c:952`](../../linux/arch/x86/mm/tlb.c#L952)、[`arch/x86/mm/tlb.c:957`](../../linux/arch/x86/mm/tlb.c#L957)） | `reason` 为 `flush on task switch`（枚举值 0）时，`pages:-1` 表示随 CR3 加载整体刷新该 PCID 的 TLB，`pages:0` 表示 PCID 中的 TLB 项仍可复用。新旧 mm 相同且中间未经过惰性 TLB 状态时不加载 CR3，也就不触发 |
+| `x86_fpu:x86_fpu_regs_deactivated` / `x86_fpu_regs_activated` | `switch_fpu()` 保存 `prev` 的 FPU 状态（[`arch/x86/include/asm/fpu/sched.h:51`](../../linux/arch/x86/include/asm/fpu/sched.h#L51)）/ `fpregs_restore_userregs()` 重新加载后经 `fpregs_activate()` 触发（[`arch/x86/kernel/fpu/context.h:47-51`](../../linux/arch/x86/kernel/fpu/context.h#L47-L51)） | 前者在换出寄存器内容有效的用户任务时触发，后者只在返回用户态且寄存器内容确已失效时触发，二者的差额大致反映惰性恢复省下的加载次数 |
+| `rcu:rcu_utilization` | `rcu_note_context_switch()` 首尾（[`kernel/rcu/tree_plugin.h:330`](../../linux/kernel/rcu/tree_plugin.h#L330)、[`kernel/rcu/tree_plugin.h:372`](../../linux/kernel/rcu/tree_plugin.h#L372)） | 事件字符串为 `Start context switch` / `End context switch` |
+
+`__schedule()` 中还有三个**裸跟踪点**（Bare Tracepoint）。它们用 `DECLARE_TRACE()` 定义（[`include/trace/events/sched.h:882-897`](../../linux/include/trace/events/sched.h#L882-L897)），不导出到 tracefs（[`include/trace/events/sched.h:829-832`](../../linux/include/trace/events/sched.h#L829-L832)），只能由内核模块或 BPF raw tracepoint 挂接：
+
+- `sched_entry_tp(preempt)`：进入 `__schedule()` 时触发，参数表示是否为 `SM_PREEMPT`（[`kernel/sched/core.c:6817`](../../linux/kernel/sched/core.c#L6817)）。
+- `sched_exit_tp(is_switch)`：离开 `__schedule()` 时触发（[`kernel/sched/core.c:6950`](../../linux/kernel/sched/core.c#L6950)），新任务则在 `schedule_tail()` 中补发一次（[`kernel/sched/core.c:5280`](../../linux/kernel/sched/core.c#L5280)）。发生切换时，这一点已经在 `next` 的上下文中执行，因此进出事件应按 CPU 而不是按任务配对，两者之差就是该 CPU 在调度器中停留的时间。
+- `sched_set_need_resched_tp(tsk, cpu, tif)`：设置重调度标志时触发（[`kernel/sched/core.c:1133`](../../linux/kernel/sched/core.c#L1133)、[`kernel/sched/core.c:1151`](../../linux/kernel/sched/core.c#L1151)），用法见 3.5 节实验。
+
+内核中这三个跟踪点的使用者是**运行时验证**（Runtime Verification，RV）的调度器监视器，它们用自动机模型在线检查调度器的行为规约，例如 scpd 监视器要求进入调度器时抢占已经关闭，snep 监视器要求调度过程中不重新打开抢占（[`Documentation/trace/rv/monitor_sched.rst`](../../linux/Documentation/trace/rv/monitor_sched.rst)）。本书配置开启了 `CONFIG_RV`，但未开启这组监视器（`CONFIG_RV_MON_SCHED`）。
+
+### /proc 与 /sys 接口
+
+| 接口 | 内容 | 源码中的来源 |
+|---|---|---|
+| `/proc/<pid>/status` 的 `voluntary_ctxt_switches` / `nonvoluntary_ctxt_switches` | 任务的自愿 / 非自愿切换次数 | `nvcsw` / `nivcsw`，由 `task_context_switch_counts()` 输出（[`fs/proc/array.c:396-402`](../../linux/fs/proc/array.c#L396-L402)），在 `__schedule()` 的 `++*switch_count` 处递增 |
+| `/proc/<pid>/sched` 的 `nr_switches`、`nr_voluntary_switches`、`nr_involuntary_switches` | 同上，第一项为后两项之和 | `proc_sched_show_task()`（[`kernel/sched/debug.c:1228-1230`](../../linux/kernel/sched/debug.c#L1228-L1230)） |
+| `/proc/<pid>/schedstat` | 累计运行时间、在队列中等待的时间 `run_delay`（均为 ns）、被调度上 CPU 的次数 `pcount` | `proc_pid_schedstat()`（[`fs/proc/base.c:508-520`](../../linux/fs/proc/base.c#L508-L520)）；后两项由 `prepare_task_switch()` 中的 `sched_info_switch()` 更新（`CONFIG_SCHED_INFO`） |
+| `/proc/stat` 的 `ctxt` | 开机以来全系统的切换次数 | `nr_context_switches()` 对各 CPU 的 `rq->nr_switches` 求和（[`kernel/sched/core.c:5395-5404`](../../linux/kernel/sched/core.c#L5395-L5404)、[`fs/proc/stat.c:174-179`](../../linux/fs/proc/stat.c#L174-L179)） |
+| `/proc/schedstat` 的 `cpuN` 行 | 第 3、4 个数为 `sched_count`、`sched_goidle`，最后三个数为 `rq_cpu_time`、`run_delay`、`pcount` | `show_schedstat()`（[`kernel/sched/stats.c:124-130`](../../linux/kernel/sched/stats.c#L124-L130)）。`sched_count` 在 `schedule_debug()` 中递增，`sched_goidle` 在选中 idle 线程时递增（[`kernel/sched/idle.c:486`](../../linux/kernel/sched/idle.c#L486)），二者只在开启 schedstats 后计数（`sysctl kernel.sched_schedstats=1` 或启动参数 `schedstats=enable`，默认关闭，[`kernel/sched/core.c:4574`](../../linux/kernel/sched/core.c#L4574)）；后三项由 `sched_info` 维护，不受此开关影响 |
+| `/proc/interrupts` 的 `RES` 行 | 每个 CPU 收到的重调度 IPI 数 | `irq_resched_count`，在 `sysvec_reschedule_ipi()` 中递增（[`arch/x86/kernel/smp.c:252`](../../linux/arch/x86/kernel/smp.c#L252)、[`arch/x86/kernel/irq.c:106-109`](../../linux/arch/x86/kernel/irq.c#L106-L109)） |
+| `/proc/<pid>/wchan`、`/proc/<pid>/stack` | 睡眠任务停在哪个函数、内核栈回溯 | 从 `thread.sp` 处的 `inactive_task_frame` 开始展开，见实验 5 |
+| `/sys/kernel/debug/sched/preempt` | 当前抢占模型（带括号者），可写入以切换 | `sched_dynamic_write()` / `sched_dynamic_show()`（[`kernel/sched/debug.c:220-266`](../../linux/kernel/sched/debug.c#L220-L266)，`CONFIG_PREEMPT_DYNAMIC`） |
+| `/sys/kernel/debug/sched/debug` | 每个 CPU 的 `.nr_switches`、`.curr->pid` 等 | `print_cpu()`（[`kernel/sched/debug.c:954-958`](../../linux/kernel/sched/debug.c#L954-L958)） |
+| `/sys/kernel/debug/sched/features` 中的 `LATENCY_WARN`，配合 `latency_warn_ms` | 设置 `TIF_NEED_RESCHED` 后迟迟不调度时在内核日志中告警 | `cpu_resched_latency()`（[`kernel/sched/core.c:5548-5577`](../../linux/kernel/sched/core.c#L5548-L5577)）以 `rq->last_seen_need_resched_ns` 计时，`__schedule()` 选出 `next` 后将其清零（[`kernel/sched/core.c:6901`](../../linux/kernel/sched/core.c#L6901)）；该特性默认关闭（[`kernel/sched/features.h:131`](../../linux/kernel/sched/features.h#L131)） |
+| `/sys/devices/system/cpu/vulnerabilities/spectre_v2` | `IBPB: conditional`、`STIBP: ...`、`RSB filling` 等字样 | `spectre_v2_show_state()`（[`arch/x86/kernel/cpu/bugs.c:3597-3616`](../../linux/arch/x86/kernel/cpu/bugs.c#L3597-L3616)），分别对应 `cond_mitigation()`、`switch_to_extra()` 与 `__switch_to_asm()` 中 `FILL_RETURN_BUFFER` 三处切换开销 |
+
+### 动态探针
+
+- `__schedule()`、`preempt_schedule()`、`preempt_schedule_common()` 带 `notrace`，不出现在 function / function_graph tracer 中，也不能用 fentry 挂钩；`preempt_schedule()` 还以 `NOKPROBE_SYMBOL` 拒绝 kprobe（[`kernel/sched/core.c:7148`](../../linux/kernel/sched/core.c#L7148)）。观察调度器的进出应优先使用上面的跟踪点。
+- `context_switch()` 是 `__always_inline`，`prepare_task_switch()` 是 `static inline`，`switch_to()` 是宏，都没有独立符号；`__switch_to()` 在本书配置下等同于 `notrace`（见上文）。
+- 适合挂探针的是 `schedule()`、`preempt_schedule_irq()`、`pick_next_task_fair()`、`switch_mm_irqs_off()`、`schedule_tail()` 等全局函数。`finish_task_switch()`、`try_to_block_task()` 等 static 函数可能被内联，或带上 `.isra.0` 之类的编译器后缀，挂探针前先在 `/sys/kernel/tracing/available_filter_functions` 中确认。
+- 本书配置未开启 `CONFIG_DEBUG_INFO_BTF`，bpftrace 的 fentry / fexit 探针不可用，裸跟踪点的参数也只能按位置用 `arg0`、`arg1` 访问。
+
+### 调试选项
+
+- `CONFIG_SCHED_STACK_END_CHECK`（开启）：`schedule_debug()` 在每次调度时检查 `prev` 的栈尾魔数，发现越界直接 panic。
+- `CONFIG_DEBUG_PREEMPT`（未开启）：开启后"scheduling while atomic"报告会附带最近一次关抢占的位置（[`kernel/sched/core.c:5894-5897`](../../linux/kernel/sched/core.c#L5894-L5897)）。
+- `CONFIG_DEBUG_ATOMIC_SLEEP`（未开启）：在 `might_sleep()` 等位置提前发现"在原子上下文中可能睡眠"，不必等到真正进入 `schedule()`。
+- `CONFIG_PROVE_LOCKING`（未开启）：启用 lockdep，使 `prepare_lock_switch()` / `finish_lock_switch()` 中 rq 锁的交接声明与 `assert_balance_callbacks_empty()` 生效。
+
 ## 动手实验
 
 以下实验在 **dev 虚拟机** 中进行，标注了所需权限。
@@ -1221,7 +1278,7 @@ x86 不随任务保存抢占计数，依赖"切换时计数恒为 2"的不变式
    bpftrace -e 'tracepoint:sched:sched_switch { @[args.prev_state] = count(); }'
    ```
 
-   `prev_state` 并非直接取自 `prev->__state`，而是经 `__trace_sched_switch_state()` 转换后的值（[`include/trace/events/sched.h:190-214`](../../linux/include/trace/events/sched.h#L190-L214)）：`SM_PREEMPT` 抢占时固定为 `TASK_REPORT_MAX`（0x100，即 256，文本输出中显示为 `R+`）；0 表示以 `TASK_RUNNING` 状态让出 CPU，但不是 `SM_PREEMPT`，如 `sched_yield()` 或返回用户态时的 `schedule()`；1、2 分别对应 `S`、`D`；`TASK_IDLE` 睡眠的内核线程报告为 0x80（显示为 `I`）。
+   `prev_state` 并非直接取自 `prev->__state`，而是经 `__trace_sched_switch_state()` 转换后的值（[`include/trace/events/sched.h:190-214`](../../linux/include/trace/events/sched.h#L190-L214)）：`SM_PREEMPT` 抢占时固定为 `TASK_REPORT_MAX`（0x100，即 256，文本输出中显示为 `R+`）；0 表示以 `TASK_RUNNING` 状态让出 CPU，但不是 `SM_PREEMPT`，如 `sched_yield()`、返回用户态时的 `schedule()`，以及因挂起信号而放弃睡眠的情况（`try_to_block_task()` 会把 `prev_state` 改为 `TASK_RUNNING`）；1、2 分别对应 `S`、`D`；`TASK_IDLE` 睡眠的内核线程报告为 0x80（显示为 `I`）。
 
 3. **对比进程切换与线程切换的开销**：
 
@@ -1246,7 +1303,7 @@ x86 不随任务保存抢占计数，依赖"切换时计数恒为 2"的不变式
    echo nop > current_tracer
    ```
 
-   `__schedule()` 带有 `notrace` 属性，不会出现在输出中，但它调用的、未被内联的函数（如 `pick_next_task_fair()`、`finish_task_switch()`）会直接挂在 `schedule()` 之下；`__switch_to()` 带 `__notrace_funcgraph`，同样不会出现。
+   `__schedule()` 带有 `notrace` 属性，不会出现在输出中，但它调用的、未被内联的函数（如 `rcu_note_context_switch()`、`pick_next_task_fair()`；`finish_task_switch()` 等 static 函数是否出现取决于编译器是否把它内联）会直接挂在 `schedule()` 之下；`__switch_to()` 带 `__notrace_funcgraph`，同样不会出现。
 
 5. **查看睡眠任务停在哪里**：
 
@@ -1258,6 +1315,31 @@ x86 不随任务保存抢占计数，依赖"切换时计数恒为 2"的不变式
 
    两者都从被换出任务 `thread.sp` 处的 `inactive_task_frame` 开始展开栈，其 `ret_addr` 指向 `__schedule()` 内部。但它们都会跳过 `.sched.text` 段中的函数（带 `__sched` 标记的 `schedule()`、`__schedule()`、`do_nanosleep()` 等，判断函数为 [`kernel/sched/core.c:8624-8629`](../../linux/kernel/sched/core.c#L8624-L8629) 的 `in_sched_functions()`）：`stack` 经 `stack_trace_save_tsk()` 过滤（[`kernel/stacktrace.c:97-102`](../../linux/kernel/stacktrace.c#L97-L102)），`wchan` 只报告第一个非调度函数（[`arch/x86/kernel/process.c:1040-1061`](../../linux/arch/x86/kernel/process.c#L1040-L1061)）。
 
+6. **观察切换时的 TLB 刷新与 FPU 惰性恢复**：
+
+   ```bash
+   # 虚拟机，root
+   grep -m1 -o -w pcid /proc/cpuinfo        # 无输出说明（虚拟）CPU 不支持 PCID
+   cat /sys/devices/system/cpu/vulnerabilities/spectre_v2   # 切换路径上启用了哪些缓解
+   bpftrace -e '
+   tracepoint:tlb:tlb_flush /args.reason == 0/ { @tlb[args.pages == 0 ? "reuse" : "flush"] = count(); }
+   tracepoint:x86_fpu:x86_fpu_regs_deactivated { @fpu["save"] = count(); }
+   tracepoint:x86_fpu:x86_fpu_regs_activated   { @fpu["restore"] = count(); }
+   interval:s:5 { exit(); }'
+   ```
+
+   `reason == 0` 即 `TLB_FLUSH_ON_TASK_SWITCH`。在运行 `perf bench sched pipe`（进程模式）的同时观察，通常以 `reuse` 为主：两个进程各自占用一个 PCID，来回切换时 TLB 项得以保留。若 CPU 不支持 PCID，则只有 `flush`。`save` 与 `restore` 的差额大致是惰性恢复省下的 FPU 加载次数。
+
+7. **观察重调度 IPI 与免 IPI 唤醒**：
+
+   ```bash
+   # 虚拟机，root
+   grep RES /proc/interrupts
+   perf stat -a -e irq_vectors:reschedule_entry -e sched:sched_wake_idle_without_ipi -- sleep 5
+   ```
+
+   两个计数大致对应远程重调度请求的两种结果（`__resched_curr()`、`wake_up_idle_cpu()` 等）：目标 CPU 不在轮询时发送 IPI，正在轮询的 idle CPU 则只需设置标志。二者的比例取决于 idle 的实现：以 `hlt` 进入空闲的 CPU 会先清除 `TIF_POLLING_NRFLAG`（[`kernel/sched/idle.c:116`](../../linux/kernel/sched/idle.c#L116)），只能靠 IPI 唤醒；以 MWAIT 进入空闲时则保持该标志并监视 `thread_info->flags`，写入标志即可唤醒（[`arch/x86/include/asm/mwait.h:116-134`](../../linux/arch/x86/include/asm/mwait.h#L116-L134)）。虚拟机通常不向客户机提供 MWAIT，多为前一种情况。
+
 ## 小结
 
 - 所有调度路径都汇入 `__schedule(sched_mode)`：主动睡眠用 `SM_NONE`，抢占用 `SM_PREEMPT`，idle 用 `SM_IDLE`。调用前抢占计数必须恰好为 1。
@@ -1266,6 +1348,7 @@ x86 不随任务保存抢占计数，依赖"切换时计数恒为 2"的不变式
 - `context_switch()` 先切换记账状态，再切换地址空间（内核线程借用 `active_mm`，x86 用 PCID 减少 TLB 刷新），最后由 `__switch_to_asm()` 换栈、`__switch_to()` 切换 FPU、TLS 和 `current`。真正的任务切换就是一条对 `%rsp` 的 `movq`。
 - rq 锁由 `prev` 获取、由 `next` 释放；`finish_task_switch()` 先读 `prev->__state` 再清零 `prev->on_cpu`，然后执行 balance 回调、释放锁、归还借用的 mm、回收已死亡任务的栈。
 - 新任务的 `inactive_task_frame` 由 `copy_thread()` 伪造，第一次被调度时从 `ret_from_fork_asm` 进入 `schedule_tail()`，以与普通切换相同的方式完成收尾。
+- 观察切换以 `sched:sched_switch` 跟踪点和 `nvcsw` / `nivcsw`、`rq->nr_switches` 等计数为主；`__schedule()` 带 `notrace`，不能用 function tracer 或 fentry 挂钩，观察进出调度器可用裸跟踪点 `sched_entry_tp` / `sched_exit_tp`，且应按 CPU 配对。
 
 ## 参考
 
@@ -1274,4 +1357,8 @@ x86 不随任务保存抢占计数，依赖"切换时计数恒为 2"的不变式
 - [`Documentation/scheduler/sched-stats.rst`](../../linux/Documentation/scheduler/sched-stats.rst)：`/proc/<pid>/schedstat` 与 `sched_info` 统计。
 - [`Documentation/arch/x86/kernel-stacks.rst`](../../linux/Documentation/arch/x86/kernel-stacks.rst)：x86_64 的任务栈、中断栈与入口栈。
 - [`Documentation/trace/ftrace.rst`](../../linux/Documentation/trace/ftrace.rst)：function_graph tracer 的使用方法。
+- [`Documentation/trace/events.rst`](../../linux/Documentation/trace/events.rst)：跟踪点事件的启用、过滤与格式。
+- [`Documentation/trace/rv/monitor_sched.rst`](../../linux/Documentation/trace/rv/monitor_sched.rst)：基于 `sched_entry_tp` 等裸跟踪点的调度器运行时验证监视器。
+- [`Documentation/filesystems/proc.rst`](../../linux/Documentation/filesystems/proc.rst)：`/proc/<pid>/status` 中 `voluntary_ctxt_switches` 等字段的说明。
+- [`Documentation/admin-guide/hw-vuln/spectre.rst`](../../linux/Documentation/admin-guide/hw-vuln/spectre.rst)：IBPB、STIBP、RSB 填充等缓解措施及 `spectre_v2` 状态文件的含义。
 - [`kernel/Kconfig.preempt:75-85`](../../linux/kernel/Kconfig.preempt#L75-L85)：`CONFIG_PREEMPT_LAZY` 的说明，惰性抢占模型的设计目标。

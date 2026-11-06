@@ -71,6 +71,7 @@
 | 辅助时钟 | Auxiliary Clock | 自 `CLOCK_AUX` 起、各有独立 timekeeper 的可设置与调频的 POSIX 时钟（`CONFIG_POSIX_AUX_CLOCKS`，v6.17） | 8.1 |
 | 高精度定时器 | High-Resolution Timer，hrtimer | 纳秒精度的内核定时器，模拟的周期 tick 与 hrtick 都基于它实现 | 3.2 |
 | 高精度事件定时器 | High Precision Event Timer，HPET | 芯片组中的 MMIO 定时器，含一个自由运行的主计数器与若干比较器 | 8.1 |
+| 跟踪点 | Tracepoint | 源码中预置的静态探测点，可经 tracefs、perf、BPF 挂接 | 3.2 |
 | 工作队列 | Workqueue | 在内核线程中执行可睡眠延迟工作的机制 | 4.3 |
 | 工作项 | Work Item | 提交给工作队列的函数及其数据，`struct work_struct` | 5.12 |
 | 故障 / 陷阱 / 终止 | Fault / Trap / Abort | 按返回地址与可恢复性划分的三类异常 | 5.1 |
@@ -112,6 +113,7 @@
 | 灵活返回与事件投递 | Flexible Return and Event Delivery，FRED | 取代 IDT 事件投递与 IRET 的新架构（`CONFIG_X86_FRED`，v6.9） | 5.1 |
 | 零松弛 | Zero-Laxity | 延迟 dl_server 的激活时刻 `deadline − runtime`，即再推迟就无法在截止时间前用完预算 | 3.7 |
 | 零页 | Zero Page | 全局共享的全零只读页，匿名读缺页映射到它 | 4.8 |
+| 裸跟踪点 | Bare Tracepoint | 用 `DECLARE_TRACE()` 定义、不导出到 tracefs 的跟踪点，只能由内核模块或 BPF raw tracepoint 挂接 | 3.2 |
 | 流控处理函数 | Flow Handler | 按触发方式完成应答、屏蔽、EOI 的中断处理函数，`desc->handle_irq` | 5.6 |
 | 门描述符 | Gate Descriptor | IDT 中的 16 字节表项，记录入口地址、IST 下标与 DPL | 5.1 |
 | 末级缓存 | Last Level Cache，LLC | 一组 CPU 共享的最后一级缓存，调度器以此划分 `sd_llc` 域 | 3.4 |
@@ -215,6 +217,7 @@
 | 原子操作 | Atomic Operation | 对其他 CPU 不可分割的读改写操作 | 7.2 |
 | 原子上下文 | Atomic Context | 不允许睡眠的执行环境：持自旋锁、关抢占、中断等 | 7.1 |
 | 运行队列 | Runqueue，rq | 每 CPU 一个的 `struct rq` | 3.1 |
+| 运行时验证 | Runtime Verification，RV | 用自动机等模型在线检查内核事件序列是否符合规约的机制（`CONFIG_RV`） | 3.2 |
 | 增强红黑树 | Augmented RB-tree | 节点额外维护子树聚合信息的红黑树 | 3.3 |
 | 直接回收 | Direct Reclaim | 分配者在慢速路径中自行回收内存 | 4.4 |
 | 直接映射区 | Direct Map | 线性映射全部物理内存的内核虚拟地址区域，起始于 `PAGE_OFFSET` | 4.1 |
