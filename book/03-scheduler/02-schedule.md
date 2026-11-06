@@ -72,13 +72,46 @@
 
 ### 重调度标志与 x86 的 preempt_count
 
-"当前任务应当让出 CPU"这一请求记录在 `thread_info->flags` 中（[`include/asm-generic/thread_info_tif.h:21-31`](../../linux/include/asm-generic/thread_info_tif.h#L21-L31)）：
+调度器认定"当前任务应当让出 CPU"的那一刻，往往不能立即切换：这个决定可能是在中断处理函数里做出的，可能来自另一个 CPU，当前任务也可能正处在关抢占的临界区中。因此内核把抢占拆成两步：先**登记请求**，即给当前任务设置重调度标志；等它运行到可以安全切换的位置，即**抢占点**，再**响应请求**。本小节说明请求记录在哪里，以及 x86 如何把"检查有没有请求"做到只需一条指令。请求的发起与响应流程见下文"调度的触发"。
 
-- `TIF_NEED_RESCHED`：需要尽快重新调度，所有抢占点都会响应；
-- `TIF_NEED_RESCHED_LAZY`：惰性重调度请求，只在返回用户态时响应，或在下一个 tick 被升级为前者（`CONFIG_PREEMPT_LAZY`，3.5 节）；
-- `TIF_POLLING_NRFLAG`：idle 线程正在轮询 `TIF_NEED_RESCHED`，设置标志即可唤醒它，无需发 IPI。
+#### 请求记在哪里：TIF 标志
 
-x86 还把 `TIF_NEED_RESCHED` 的一个副本**取反**后折叠进 per-CPU 的 `__preempt_count` 最高位：
+请求记录在任务的 `thread_info->flags` 中。这是一个按位使用的标志字，与调度有关的是下面三位（[`include/asm-generic/thread_info_tif.h:21-31`](../../linux/include/asm-generic/thread_info_tif.h#L21-L31)）：
+
+| 标志 | 含义 | 在哪里被响应 |
+|---|---|---|
+| `TIF_NEED_RESCHED` | 需要尽快重新调度 | 所有抢占点：`preempt_enable()`、中断返回内核态、返回用户态 |
+| `TIF_NEED_RESCHED_LAZY` | 惰性请求，允许推迟（`CONFIG_PREEMPT_LAZY`，3.5 节） | 只在返回用户态时响应；到下一个 tick 仍未响应，则升级为 `TIF_NEED_RESCHED` |
+| `TIF_POLLING_NRFLAG` | 不是请求，而是 idle 线程的状态：它正在循环检查 `TIF_NEED_RESCHED` | 其他 CPU 据此判断：只需设置标志就能让它退出空闲，不必发送 IPI |
+
+请求总是设置在目标 CPU 当前运行的任务（`rq->curr`）上；调度器响应请求、选出下一个任务后，再把它从被换下的任务上清除。
+
+#### 抢占要同时满足两个条件
+
+一次抢占真正发生，需要同时满足：
+
+1. **需要调度**：当前任务设置了 `TIF_NEED_RESCHED`；
+2. **允许调度**：抢占计数 `preempt_count` 为 0，即当前不在关抢占的临界区、软中断或硬中断中（各计数域的编码见 7.1 节）。
+
+`preempt_enable()` 是检查这两个条件最频繁的地方，每次释放自旋锁都会调用它（[`include/linux/spinlock_api_smp.h:139-144`](../../linux/include/linux/spinlock_api_smp.h#L139-L144)）。按字面实现，它要先把计数减 1、判断是否为 0，再读取 TIF 标志做第二次判断。不针对体系结构优化的通用实现就是这样写的：
+
+[`include/asm-generic/preempt.h:62-70`](../../linux/include/asm-generic/preempt.h#L62-L70)（v6.18.60）
+
+```c
+static __always_inline bool __preempt_count_dec_and_test(void)
+{
+	/*
+	 * Because of load-store architectures cannot do per-cpu atomic
+	 * operations; we cannot use PREEMPT_NEED_RESCHED because it might get
+	 * lost.
+	 */
+	return !--*preempt_count_ptr() && tif_need_resched();
+}
+```
+
+#### x86 的做法：把两个条件合成一个数
+
+x86 把"需要调度"也放进抢占计数。x86 的抢占计数是一个 per-CPU 的 32 位整数 `__preempt_count`，低位是各计数域，最高位（bit 31）存放 `TIF_NEED_RESCHED` 的一个副本：
 
 [`arch/x86/include/asm/preempt.h:12-19`](../../linux/arch/x86/include/asm/preempt.h#L12-L19)（v6.18.60）
 
@@ -93,9 +126,83 @@ x86 还把 `TIF_NEED_RESCHED` 的一个副本**取反**后折叠进 per-CPU 的 
 #define PREEMPT_ENABLED	(0 + PREEMPT_NEED_RESCHED)
 ```
 
-"不需要重调度"时这一位为 1，`set_preempt_need_resched()` 把它**清零**，`clear_preempt_need_resched()` 把它置 1（[`arch/x86/include/asm/preempt.h:59-67`](../../linux/arch/x86/include/asm/preempt.h#L59-L67)）。于是整个 32 位值为 0 恰好等价于"抢占计数为 0 且需要重调度"，`preempt_enable()` 只需一条 `decl` 指令并检查 ZF 标志（[`arch/x86/include/asm/preempt.h:93-97`](../../linux/arch/x86/include/asm/preempt.h#L93-L97)）。`preempt_count` 各计数域的编码见 7.1 节。
+关键在于这一位**取反**存放：1 表示"不需要调度"，0 表示"需要调度"。因此 `set_preempt_need_resched()`（登记请求）是**清除**这一位，`clear_preempt_need_resched()`（撤销请求）是**设置**这一位（[`arch/x86/include/asm/preempt.h:59-67`](../../linux/arch/x86/include/asm/preempt.h#L59-L67)）。没有任何请求、也没有关抢占时，整个值是 `0x80000000`，这就是 `PREEMPT_ENABLED`。
 
-一个容易忽略的事实是：x86 的抢占计数是 **per-CPU 的，不随任务保存**。通用实现在 `fork` 时把每个新任务的计数初始化为 `FORK_PREEMPT_COUNT`（[`include/asm-generic/preempt.h:27-29`](../../linux/include/asm-generic/preempt.h#L27-L29)），x86 的 `init_task_preempt_count()` 则是空操作（[`arch/x86/include/asm/preempt.h:44`](../../linux/arch/x86/include/asm/preempt.h#L44)）。这之所以成立，是因为每一次上下文切换都发生在抢占计数恰好为 2 的位置，换入的任务"继承"的正是它自己被换出时的值。`finish_task_switch()` 会检查这个不变式（见下文）。
+把两个条件的四种组合列出来：
+
+| 抢占计数 | 需要调度 | bit 31 | `__preempt_count` | 能否抢占 |
+|---|---|---|---|---|
+| 0 | 否 | 1 | `0x80000000` | 否：没有请求 |
+| 0 | 是 | 0 | `0x00000000` | **能** |
+| 1 | 否 | 1 | `0x80000001` | 否 |
+| 1 | 是 | 0 | `0x00000001` | 否：仍在临界区内 |
+
+只有"能抢占"这一行的值为 0。两个条件的检查于是合并为一个："整个 32 位值是否为 0"。`preempt_enable()` 要做的"减 1 再判断"，正好用一条 `decl` 指令完成：`decl` 在减 1 的同时设置零标志 ZF，随后的条件跳转只看 ZF（宏参数 `e` 即"等于 0"）：
+
+[`arch/x86/include/asm/preempt.h:88-97`](../../linux/arch/x86/include/asm/preempt.h#L88-L97)（v6.18.60）
+
+```c
+/*
+ * Because we keep PREEMPT_NEED_RESCHED set when we do _not_ need to reschedule
+ * a decrement which hits zero means we have no preempt_count and should
+ * reschedule.
+ */
+static __always_inline bool __preempt_count_dec_and_test(void)
+{
+	return GEN_UNARY_RMWcc("decl", __my_cpu_var(__preempt_count), e,
+			       __percpu_arg([var]));
+}
+```
+
+取反是这个技巧成立的前提。假如按常规用 1 表示"需要调度"，"可以抢占"对应的值就是 `0x80000000`，减 1 之后还得再比较一次，判断省不掉。取反之后，"需要调度"与"计数为 0"都表现为"相应的位全为 0"，两者同时成立时整个数恰好为 0。
+
+下面用一个例子把过程串起来。任务在 CPU 0 上运行，先进入一段关抢占的临界区，期间本 CPU 的中断处理函数唤醒了一个要在本 CPU 上运行、优先级更高的实时任务：
+
+| 步骤 | 发生的事 | `__preempt_count` |
+|---|---|---|
+| 1 | 初始：没有关抢占，没有请求 | `0x80000000` |
+| 2 | `preempt_disable()`：计数加 1 | `0x80000001` |
+| 3 | 中断处理函数唤醒实时任务，`resched_curr()` 设置 `TIF_NEED_RESCHED`，并调用 `set_preempt_need_resched()` 清除 bit 31 | `0x00000001` |
+| 4 | 中断返回：计数不为 0，不能抢占，回到临界区继续执行 | `0x00000001` |
+| 5 | `preempt_enable()`：`decl` 后结果为 0，调用 `__preempt_schedule()` 进入调度器 | `0x00000000` |
+| 6 | 调度器入口再次关抢占并获取 rq 锁，选出下一个任务后调用 `clear_preempt_need_resched()`，bit 31 恢复为 1 | `0x80000002` |
+
+第 6 步中计数部分为 2，来源见本小节最后一部分。
+
+#### 正本与副本的同步
+
+这样一来，x86 上的"需要调度"有两份记录：任务 `thread_info->flags` 中的 `TIF_NEED_RESCHED` 是正本，所有体系结构都有；`__preempt_count` 的 bit 31 是 x86 为 `preempt_enable()` 准备的副本，只反映**本 CPU** 当前任务的情况。内核在以下位置让副本跟上正本：
+
+| 场景 | 副本如何更新 |
+|---|---|
+| 本 CPU 发起请求 | `__resched_curr()` 设置 TIF 标志后，立即调用 `set_preempt_need_resched()` |
+| 其他 CPU 发起请求 | 对方只能设置 TIF 标志，再发送重调度 IPI；本 CPU 在 IPI 处理中由 `scheduler_ipi()` 把 TIF 标志"折叠"进 bit 31 |
+| 轮询中的 idle 线程被设置标志唤醒（没有 IPI） | `do_idle()` 退出轮询后自己调用 `preempt_set_need_resched()` 补上 |
+| 调度器响应了请求 | `__schedule()` 选出下一个任务后，同时清除 TIF 标志与 bit 31 |
+
+各场景的代码见下文"调度的触发"与"`__schedule()` 逐段分析"。另有两点需要注意：
+
+- 只有 `TIF_NEED_RESCHED` 会被折叠，`TIF_NEED_RESCHED_LAZY` 不会。`preempt_enable()` 因此看不到惰性请求，这是惰性抢占能把抢占推迟到返回用户态的原因之一（3.5 节）。
+- 其他代码通过 `preempt_count()` 读取抢占计数，它会屏蔽 bit 31（[`arch/x86/include/asm/preempt.h:21-28`](../../linux/arch/x86/include/asm/preempt.h#L21-L28)），所以 `in_atomic()` 等判断不受这一技巧影响。
+
+为什么通用实现不这样做？上面通用代码的注释给出了原因：在 load-store 架构上，"减 1"要拆成读、改、写三条指令。如果中断恰好在读与写之间到来，并清除了 bit 31 来登记请求，随后的写回会用旧值把它覆盖，请求就丢了。x86 的 `decl`、`andl`、`orl` 可以直接对 per-CPU 内存执行读改写，一条指令完成，中断只能发生在指令之间，不存在这个窗口。
+
+#### 抢占计数不随任务保存
+
+最后一个容易让人困惑的地方：x86 的 `__preempt_count` 是 **per-CPU 变量**，属于 CPU 而不属于任务，上下文切换时既不保存也不恢复。通用实现把计数放在每个任务自己的 `thread_info->preempt_count` 中（[`include/asm-generic/preempt.h:9-17`](../../linux/include/asm-generic/preempt.h#L9-L17)），随任务切换是自然的事。x86 放在 per-CPU 变量中，`preempt_enable()` 用一条带 `%gs` 段前缀的指令就能完成读改写，不必先取得 `current` 再访问它的 `thread_info`。
+
+不保存也不会出错，是因为所有任务都在同一种位置被切换出去，而在这个位置上，计数总是 2：
+
+| 时刻 | 计数 | 来源 |
+|---|---|---|
+| 进入调度入口，如 `schedule()` 中的 `__schedule_loop()`（[`kernel/sched/core.c:7016-7023`](../../linux/kernel/sched/core.c#L7016-L7023)） | 1 | 入口自己的 `preempt_disable()` |
+| `__schedule()` 获取 rq 锁（[`kernel/sched/core.c:6850`](../../linux/kernel/sched/core.c#L6850)）直到切换发生 | 2 | 获取自旋锁会再关一次抢占 |
+| 切换后在 `finish_task_switch()` 中释放 rq 锁（[`kernel/sched/core.c:5209`](../../linux/kernel/sched/core.c#L5209)） | 1 | |
+| 回到调度入口，`sched_preempt_enable_no_resched()` | 0 | |
+
+设 CPU 0 从任务 A 切换到任务 B。切换时计数为 2，这个 2 原样留给了 B。而 B 上一次被切换出去时，计数同样是 2，因为它也是从这个位置离开的。所以 B 恢复运行时看到的，正是自己离开时的值；接下来它沿上表后两行把计数降回 0。bit 31 在切换前已经被调度器置 1（步骤 6），B 从"没有请求"的状态开始。
+
+新建任务从来没有被切换出去过，怎样满足这个条件？通用实现在 fork 时把新任务的计数直接初始化为 `FORK_PREEMPT_COUNT`，即计数为 2（[`include/linux/preempt.h:67-76`](../../linux/include/linux/preempt.h#L67-L76)、[`include/asm-generic/preempt.h:27-29`](../../linux/include/asm-generic/preempt.h#L27-L29)）。x86 的 `init_task_preempt_count()` 则是空操作（[`arch/x86/include/asm/preempt.h:44`](../../linux/arch/x86/include/asm/preempt.h#L44)）：新任务第一次运行时，per-CPU 计数里已经是前一个任务留下的 2。`finish_task_switch()` 开头检查这个不变式，发现计数不是 2 就告警并修正（[`kernel/sched/core.c:5175-5189`](../../linux/kernel/sched/core.c#L5175-L5189)，见下文"新任务的第一次调度"与"关键细节"）。
 
 ### inactive_task_frame
 

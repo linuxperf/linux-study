@@ -1,4 +1,4 @@
-# 3.5 调度时钟与抢占模型
+# 3.5 调度时钟、无 tick 模式与抢占模型
 
 > **本节源码**：[`kernel/sched/core.c`](../../linux/kernel/sched/core.c)、[`kernel/sched/sched.h`](../../linux/kernel/sched/sched.h)、[`kernel/sched/clock.c`](../../linux/kernel/sched/clock.c)、[`kernel/time/timer.c`](../../linux/kernel/time/timer.c)、[`kernel/time/tick-sched.c`](../../linux/kernel/time/tick-sched.c)、[`kernel/entry/common.c`](../../linux/kernel/entry/common.c)、[`include/linux/sched.h`](../../linux/include/linux/sched.h)、[`include/linux/kernel.h`](../../linux/include/linux/kernel.h)、[`kernel/Kconfig.preempt`](../../linux/kernel/Kconfig.preempt)、[`arch/x86/include/asm/preempt.h`](../../linux/arch/x86/include/asm/preempt.h)、[`arch/x86/kernel/static_call.c`](../../linux/arch/x86/kernel/static_call.c)
 > **关键函数**：`sched_clock_cpu()`、`update_rq_clock()`、`update_rq_clock_task()`、`sched_tick()`、`hrtick_start()`、`hrtick()`、`sched_update_tick_dependency()`、`sched_tick_remote()`、`resched_curr_lazy()`、`__cond_resched()`、`__sched_dynamic_update()`、`preempt_dynamic_init()`
@@ -14,13 +14,17 @@
 
 | 配置项 | 取值 | 影响 |
 |---|---|---|
-| `CONFIG_HZ` | 1000 | tick 周期 1 ms |
-| `CONFIG_HIGH_RES_TIMERS` / `CONFIG_SCHED_HRTICK` | y / y | tick 由高精度定时器模拟；可使用 hrtick |
-| `CONFIG_NO_HZ_FULL` | y | 支持全无 tick 模式，需启动参数 `nohz_full=` 指定 CPU |
-| `CONFIG_PREEMPT` / `CONFIG_PREEMPT_DYNAMIC` | y / y | 默认 full 模型，可在启动参数或运行时切换 |
-| `CONFIG_PREEMPT_RT` | y | 实时内核，none / voluntary 模型不可选 |
-| `CONFIG_PREEMPT_LAZY` | n | lazy 不是默认模型，但 `PREEMPT_DYNAMIC` 下仍可切换到 lazy |
+| `CONFIG_HZ` | 1000 | 周期 tick 的目标间隔为 1 ms，不是每个任务的固定时间片 |
+| `CONFIG_HIGH_RES_TIMERS` / `CONFIG_SCHED_HRTICK` | y / y | 进入高精度模式后用 hrtimer 模拟 tick；hrtick 还需运行时特性位 |
+| `CONFIG_NO_HZ_FULL` / `CONFIG_NO_HZ_COMMON` | y / y | 支持空闲停 tick；运行中停 tick 还需 `nohz_full=` 指定 CPU |
+| `CONFIG_PREEMPT_LAZY` / `CONFIG_PREEMPT_DYNAMIC` | y / y | 无 `preempt=` 覆盖时默认 lazy；本 x86_64 内核可切换四种模型 |
+| `CONFIG_PREEMPT` / `CONFIG_PREEMPT_RT` | n / n | full 不是编译默认值；当前不是 RT 内核 |
+| `CONFIG_PREEMPT_BUILD` / `CONFIG_PREEMPTION` / `CONFIG_PREEMPT_RCU` | y / y / y | 仍编译内核抢占路径与可抢占 RCU，不能由 `CONFIG_PREEMPT=n` 推断不可抢占 |
 | `CONFIG_IRQ_TIME_ACCOUNTING` / `CONFIG_PARAVIRT_TIME_ACCOUNTING` | n / n | `clock_task` 不扣除中断时间与 steal 时间 |
+| `CONFIG_VIRT_CPU_ACCOUNTING_GEN` | y | vtime 生效的 CPU 用上下文边界记账，不能把所有 CPU 时间统计都理解为 tick 采样 |
+| `CONFIG_DEBUG_FS` / `CONFIG_EVENT_TRACING` / `CONFIG_BPF_EVENTS` | y / y / y | 支持下文的 debugfs、事件跟踪与 BPF 观测 |
+
+上述取值分别见 [`.config:103-155`](../../linux/.config#L103-L155)、[`.config:172-182`](../../linux/.config#L172-L182)、[`.config:416`](../../linux/.config#L416)、[`.config:523-528`](../../linux/.config#L523-L528)、[`.config:12731-12735`](../../linux/.config#L12731-L12735)、[`.config:12937-12974`](../../linux/.config#L12937-L12974)。`CONFIG_NO_HZ_IDLE` 虽未选中，但 `CONFIG_NO_HZ_FULL` 同样提供空闲停 tick；不指定 `nohz_full=` 并不等于关闭空闲停 tick。
 
 ## 核心数据结构
 
@@ -48,7 +52,7 @@
 	int ticks_without_resched;		// [注] 此后又经过了多少个 tick
 ```
 
-- `clock`、`clock_task`、`clock_pelt` 由同一次 `update_rq_clock()` 推进；源码用 `____cacheline_aligned` 让几个时钟落在同一缓存行（3.1 节）。
+- `clock`、`clock_task`、`clock_pelt` 在一次成功的 `update_rq_clock()` 中依次更新，但不保证增量相同：`clock_task` 可扣除中断与 steal 时间，`clock_pelt` 还受频率、算力与空闲状态影响（3.8 节）。`____cacheline_aligned` 从 `clock_task` 开始对齐后续时钟字段，不能据此声称它前面的 `clock` 也在同一缓存行。
 - `clock_pelt_idle`、`clock_idle`、`lost_idle_time` 供 PELT 在 CPU 空闲前后同步时钟（3.8 节）。
 - 其余与本节有关的字段：`prev_irq_time` / `prev_steal_time_rq` 记录上次已扣除的中断时间与 steal 时间（分别依赖 `CONFIG_IRQ_TIME_ACCOUNTING` 与 `CONFIG_PARAVIRT_TIME_ACCOUNTING`，[`kernel/sched/sched.h:1248-1257`](../../linux/kernel/sched/sched.h#L1248-L1257)）；`calc_load_update` 是下一次为 `/proc/loadavg` 采样的 jiffies（[`kernel/sched/sched.h:1259-1261`](../../linux/kernel/sched/sched.h#L1259-L1261)）；`hrtick_csd`、`hrtick_timer`、`hrtick_time` 实现 hrtick（[`kernel/sched/sched.h:1263-1267`](../../linux/kernel/sched/sched.h#L1263-L1267)）。
 
@@ -84,7 +88,7 @@
 #endif
 ```
 
-x86 定义了 `HAVE_TIF_NEED_RESCHED_LAZY`（[`arch/x86/include/asm/thread_info.h:85`](../../linux/arch/x86/include/asm/thread_info.h#L85)）。3.2 节已经介绍过两者在设置方式上的差别：`TIF_NEED_RESCHED` 在本 CPU 设置时会同步清除 `__preempt_count` 中的取反位，远程设置时（目标 CPU 没有在轮询）会发 IPI；`TIF_NEED_RESCHED_LAZY` 两件事都不做。`__schedule()` 选出下一个任务后，`clear_tsk_need_resched()` 一并清除这两个位（[`include/linux/sched.h:2066-2070`](../../linux/include/linux/sched.h#L2066-L2070)）。本节后半部分说明惰性位在哪些抢占点被响应、何时被升级。
+x86 定义了 `HAVE_TIF_NEED_RESCHED_LAZY`（[`arch/x86/include/asm/thread_info.h:85`](../../linux/arch/x86/include/asm/thread_info.h#L85)）。3.2 节已经介绍过 `__resched_curr()` 设置两者时的差别：在本 CPU 设置 `TIF_NEED_RESCHED` 时会同步清除 `__preempt_count` 中的取反位，远程设置时（目标 CPU 没有在轮询）会发 IPI；设置 `TIF_NEED_RESCHED_LAZY` 时两件事都不做。`__schedule()` 选出下一个任务后，`clear_tsk_need_resched()` 一并清除这两个位（[`include/linux/sched.h:2066-2070`](../../linux/include/linux/sched.h#L2066-L2070)）。本节后半部分说明惰性位在哪些抢占点被响应、何时被升级。
 
 ### 抢占模型的状态
 
@@ -119,7 +123,7 @@ sysvec_apic_timer_interrupt()                   arch/x86/kernel/apic/apic.c
             │   ├── tick_sched_do_timer()                                 // 负责计时的 CPU 推进 jiffies
             │   └── tick_sched_handle()
             │       └── update_process_times()  kernel/time/timer.c
-            │           ├── account_process_tick()                        // 用户态 / 内核态时间采样
+            │           ├── account_process_tick()                        // CPU 时间记账；vtime 生效时可直接返回
             │           ├── run_local_timers()
             │           ├── rcu_sched_clock_irq()
             │           └── sched_tick()        kernel/sched/core.c
@@ -131,7 +135,7 @@ sysvec_apic_timer_interrupt()                   arch/x86/kernel/apic/apic.c
             └── hrtick()                        kernel/sched/core.c      // 可选：调度类预约的精确 tick
                 └── donor->sched_class->task_tick(rq, curr, 1)
 
-sched_tick_remote()                             kernel/sched/core.c      // NO_HZ_FULL：housekeeping CPU 上每秒一次
+sched_tick_remote()                             kernel/sched/core.c      // NO_HZ_FULL：housekeeping CPU 上约每秒一次
 └── curr->sched_class->task_tick(rq, curr, 0)
 ```
 
@@ -177,10 +181,10 @@ notrace u64 sched_clock_cpu(int cpu)
 }
 ```
 
-x86 选择了 `CONFIG_HAVE_UNSTABLE_SCHED_CLOCK`（[`arch/x86/Kconfig:300`](../../linux/arch/x86/Kconfig#L300)）：底层的 `sched_clock()` 通常读 TSC 并换算为纳秒（KVM 客户机中可能被替换为 kvm-clock，[`arch/x86/kernel/kvmclock.c:99`](../../linux/arch/x86/kernel/kvmclock.c#L99)），而 TSC 未必在所有 CPU 间同步、也未必恒速。因此分两种情况：
+x86 选择了 `CONFIG_HAVE_UNSTABLE_SCHED_CLOCK`（[`arch/x86/Kconfig:300`](../../linux/arch/x86/Kconfig#L300)）：底层的 `sched_clock()` 通常读 TSC 并换算为纳秒（[`arch/x86/kernel/tsc.c:236-245`](../../linux/arch/x86/kernel/tsc.c#L236-L245)、[`arch/x86/kernel/tsc.c:284-291`](../../linux/arch/x86/kernel/tsc.c#L284-L291)；KVM 客户机中可能被替换为 kvm-clock，[`arch/x86/kernel/kvmclock.c:99`](../../linux/arch/x86/kernel/kvmclock.c#L99)），而 TSC 未必在所有 CPU 间同步、也未必恒速。因此分两种情况：
 
 - **稳定**（`sched_clock_stable()` 为真）：直接返回 `sched_clock()` 加一个全局偏移，这是常见情况。
-- **不稳定**（例如 TSC 被判定不可靠后调用了 `clear_sched_clock_stable()`，[`arch/x86/kernel/tsc.c:1144`](../../linux/arch/x86/kernel/tsc.c#L1144)）：每个 CPU 维护一份 `sched_clock_data`，以上一次 tick 时记录的 GTOD 时间为基准、加上 `sched_clock()` 的增量，再把结果钳制在"不小于基准与上次读数、不大于基准加一个 `TICK_NSEC`"的窗口内（`sched_clock_local()`，[`kernel/sched/clock.c:266-297`](../../linux/kernel/sched/clock.c#L266-L297)），既保证单调，又过滤掉离谱的 TSC 跳变。`sched_tick()` 开头调用的 `sched_clock_tick()`（[`kernel/sched/clock.c:415-430`](../../linux/kernel/sched/clock.c#L415-L430)）就是在刷新这个基准。
+- **不稳定**（例如 TSC 被判定不可靠后调用了 `clear_sched_clock_stable()`，[`arch/x86/kernel/tsc.c:1144`](../../linux/arch/x86/kernel/tsc.c#L1144)）：每个 CPU 维护一份 `sched_clock_data`，以上一次 tick 时记录的 GTOD 时间为基准、加上 `sched_clock()` 的增量，再把结果钳制在下界 `max(gtod, old_clock)`、上界 `max(old_clock, gtod + TICK_NSEC)` 的窗口内（`gtod` 已包含 `__gtod_offset`）（`sched_clock_local()`，[`kernel/sched/clock.c:266-297`](../../linux/kernel/sched/clock.c#L266-L297)），既保证单调，又过滤掉离谱的 TSC 跳变。`sched_tick()` 开头调用的 `sched_clock_tick()`（[`kernel/sched/clock.c:415-430`](../../linux/kernel/sched/clock.c#L415-L430)）就是在刷新这个基准。
 
 文件开头的注释明确警告：对不同 CPU 的读数相互比较时，"时间可能倒流"（[`kernel/sched/clock.c:21-24`](../../linux/kernel/sched/clock.c#L21-L24)）。rq 时钟只保证在同一个 rq 上单调。
 
@@ -242,7 +246,8 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
 	}
 #endif
 #ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
-	...	/* [注] 同理扣除 paravirt_steal_clock() 报告的 steal 时间 */
+	...
+	/* [注] 省略：同理扣除 paravirt_steal_clock() 报告的 steal 时间 */
 #endif
 
 	rq->clock_task += delta;
@@ -255,7 +260,7 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
 }
 ```
 
-`clock_task` 的设计目的是把"不属于任何任务"的时间剔除出去：硬中断与软中断处理时间（`CONFIG_IRQ_TIME_ACCOUNTING`），以及虚拟机中 vCPU 可运行却被宿主机调度走的 steal 时间（`CONFIG_PARAVIRT_TIME_ACCOUNTING`）。中断时间只在中断退出时累计，若上一次时钟更新恰好发生在中断内部，`irq_delta` 可能大于本次 `delta`，源码把它截断到 `delta`，以保证 `clock_task` 单调（注释见 [`kernel/sched/core.c:799-813`](../../linux/kernel/sched/core.c#L799-L813)）。
+`clock_task` 的设计目的是把不应归属于当前任务的时间剔除出去：硬中断及非 ksoftirqd 上下文的软中断时间（`CONFIG_IRQ_TIME_ACCOUNTING`），以及虚拟机中 vCPU 可运行却被宿主机调度走的 steal 时间（`CONFIG_PARAVIRT_TIME_ACCOUNTING`）。`irqtime_account_irq()` 明确保留 ksoftirqd 自己消耗的软中断时间，不把它从任务运行时间中扣掉（[`kernel/sched/cputime.c:56-81`](../../linux/kernel/sched/cputime.c#L56-L81)）。中断时间与 rq 时钟并非在完全相同的时间点采样；若上一次时钟更新恰好发生在中断内部，`irq_delta` 可能大于本次 `delta`，源码把它截断到 `delta`，以保证 `clock_task` 单调（注释见 [`kernel/sched/core.c:799-813`](../../linux/kernel/sched/core.c#L799-L813)）。
 
 **本书配置中这两项扣除都未开启**，`clock_task` 与 `clock` 同步前进，中断处理时间会算到被打断的任务头上；`CONFIG_HAVE_SCHED_AVG_IRQ` 依赖这两项之一（[`init/Kconfig:603-606`](../../linux/init/Kconfig#L603-L606)），同样未开启。函数最后调用 `update_rq_clock_pelt()` 推进 `clock_pelt`（3.8 节）。
 
@@ -317,7 +322,7 @@ void update_process_times(int user_tick)
 }
 ```
 
-时钟事件设备、jiffies 与时间轮的细节见 8.6、8.7、8.10 节，这里只需记住：`sched_tick()` 以 `HZ` 频率、在硬中断上下文中、关中断执行。
+时钟事件设备、jiffies 与时间轮的细节见 8.6、8.7、8.10 节。**周期 tick 运行时**，`sched_tick()` 以 `HZ` 为目标频率，在硬中断上下文中、关中断执行；NO_HZ 停 tick、长时间关中断、虚拟机被宿主机停调等情况都使实际调用间隔偏离 `1 / HZ`。当前还开启了 `CONFIG_VIRT_CPU_ACCOUNTING_GEN`，因此上面的 `account_process_tick()` 不一定执行采样记账，vtime 生效时会直接返回（[`kernel/sched/cputime.c:475-484`](../../linux/kernel/sched/cputime.c#L475-L484)）。它与 `task_tick()` 根据 rq 时钟记账是不同层次的机制。
 
 这一点在 `PREEMPT_RT` 下同样成立。实时内核把未显式标记 `HRTIMER_MODE_HARD` 的高精度定时器一律推迟到软中断上下文执行（[`kernel/time/hrtimer.c:1620-1627`](../../linux/kernel/time/hrtimer.c#L1620-L1627)），而模拟 tick 的定时器以 `HRTIMER_MODE_ABS_HARD` 创建（[`kernel/time/tick-sched.c:1576`](../../linux/kernel/time/tick-sched.c#L1576)），下文的 hrtick 也使用 `_HARD` 模式。
 
@@ -357,7 +362,7 @@ void sched_tick(void)
 	donor->sched_class->task_tick(rq, donor, 0);
 ```
 
-1. **频率采样**。x86 的 `arch_scale_freq_tick()` 读取 `APERF` / `MPERF` 两个 MSR，计算自上次 tick 以来的实际频率比例（[`arch/x86/kernel/cpu/aperfmperf.c:474-497`](../../linux/arch/x86/kernel/cpu/aperfmperf.c#L474-L497)），供 PELT 做频率不变性缩放（3.8 节）。它只在 housekeeping CPU 上执行，`nohz_full=` 指定的 CPU 不属于 `HK_TYPE_KERNEL_NOISE`，因此被跳过。
+1. **频率采样**。x86 的 `arch_scale_freq_tick()` 在 CPU 支持 `X86_FEATURE_APERFMPERF` 时读取 `APERF` / `MPERF` 两个 MSR，并在频率不变性缩放生效时计算自上次 tick 以来的实际频率比例（[`arch/x86/kernel/cpu/aperfmperf.c:474-497`](../../linux/arch/x86/kernel/cpu/aperfmperf.c#L474-L497)），供 PELT 做频率不变性缩放（3.8 节）。它只在 housekeeping CPU 上执行，`nohz_full=` 指定的 CPU 不属于 `HK_TYPE_KERNEL_NOISE`，因此被跳过。
 2. **刷新 sched_clock 基准**，见上文。
 3. **加锁并更新 rq 时钟**。此时已处于关中断的硬中断上下文，用 `rq_lock()` 即可。`psi_account_irqtime()` 依赖 `CONFIG_IRQ_TIME_ACCOUNTING`，本书配置下为空函数（[`kernel/sched/stats.h:113-118`](../../linux/kernel/sched/stats.h#L113-L118)）；`update_hw_load_avg()` 依赖 `CONFIG_SCHED_HW_PRESSURE`，x86 不选择该项（[`init/Kconfig:608-613`](../../linux/init/Kconfig#L608-L613)），同样为空。
 4. **升级惰性请求**（仅 lazy 模型），见下文"惰性抢占"。
@@ -369,7 +374,7 @@ void sched_tick(void)
 |---|---|---|---|
 | `sched_tick()` | 本 CPU，每个 tick 的硬中断 | `rq->donor` | 0 |
 | `hrtick()` | 本 CPU，hrtick 到期的硬中断 | `rq->curr`（按 `rq->donor` 的调度类分派） | 1 |
-| `sched_tick_remote()` | housekeeping CPU 上的工作项，每秒一次 | `rq->curr` | 0 |
+| `sched_tick_remote()` | housekeeping CPU 上的工作项，约每秒一次 | `rq->curr` | 0 |
 
 `queued` 为 1 表示这次调用来自调度类自己预约的 hrtick，如何解释它由调度类决定。
 
@@ -412,7 +417,7 @@ void sched_tick(void)
 
 ### hrtick：调度类预约的精确 tick
 
-tick 的粒度是 1 ms，而调度类管理的时间片或运行预算可能在两次 tick 之间到期，最晚要等到下一个 tick 才被发现。`CONFIG_SCHED_HRTICK` 为此提供了一个每 rq 一个的单次高精度定时器：调度类算出"还剩多久到期"，调用 `hrtick_start()` 预约，到期时得到一次额外的 `task_tick()` 调用。
+本书周期 tick 的目标间隔是 1 ms，而调度类管理的时间片或运行预算可能在两次 tick 之间到期；若没有其他检查机会，就要等到下一次实际到达的 tick 才被发现。`CONFIG_SCHED_HRTICK` 为此提供了一个每 rq 一个的单次高精度定时器：调度类算出"还剩多久到期"，调用 `hrtick_start()` 预约，到期时得到一次额外的 `task_tick()` 调用。
 
 [`kernel/sched/core.c:927-943`](../../linux/kernel/sched/core.c#L927-L943)（v6.18.60）
 
@@ -467,7 +472,7 @@ hrtick 有三道开关：
 - 运行条件 `hrtick_enabled()`：CPU 处于 active 状态，且高精度定时器确实工作在高精度模式（[`kernel/sched/sched.h:2846-2851`](../../linux/kernel/sched/sched.h#L2846-L2851)）；
 - 调度特性位 `HRTICK` 与 `HRTICK_DL`，各自控制一类调度类能否使用 hrtick，**两者默认都为 false**（[`kernel/sched/features.h:66-67`](../../linux/kernel/sched/features.h#L66-L67)）。
 
-因此默认情况下没有任何调度类会预约 hrtick。打开特性位后，`__schedule()` 每次切换前都要用 `hrtick_clear()` 取消尚未到期的定时器（[`kernel/sched/core.c:6825-6826`](../../linux/kernel/sched/core.c#L6825-L6826)，3.2 节），CPU 下线时 `sched_cpu_dying()` 也会取消它（[`kernel/sched/core.c:8582`](../../linux/kernel/sched/core.c#L8582)）。精度的代价是调度路径上频繁地启动、取消高精度定时器。
+因此在未修改特性位的启动状态下，公平类与 Deadline 类都不会预约 hrtick（两道检查见 [`kernel/sched/sched.h:2853-2865`](../../linux/kernel/sched/sched.h#L2853-L2865)）。hrtick **不会替代周期 tick，也不保证到期立即切换**：它只调用 `task_tick()`；公平类的 hrtick 路径仍调用 `resched_curr_lazy()`，在 lazy 模型下仍可能只留下惰性请求（[`kernel/sched/fair.c:5732-5755`](../../linux/kernel/sched/fair.c#L5732-L5755)）。打开特性位后，`__schedule()` 每次切换前都要用 `hrtick_clear()` 取消尚未到期的定时器（[`kernel/sched/core.c:6825-6826`](../../linux/kernel/sched/core.c#L6825-L6826)，3.2 节），CPU 下线时 `sched_cpu_dying()` 也会取消它（[`kernel/sched/core.c:8582`](../../linux/kernel/sched/core.c#L8582)）。精度的代价是调度路径上频繁地启动、取消高精度定时器。
 
 ### 停止 tick：NO_HZ
 
@@ -475,13 +480,13 @@ tick 是周期性的兜底检查，当它无事可做时就是纯开销：空闲
 
 #### 空闲时停 tick
 
-`CONFIG_NO_HZ_COMMON`（由 `CONFIG_NO_HZ_FULL` 选中）下，idle 循环 `do_idle()` 进入时调用 `tick_nohz_idle_enter()`（[`kernel/sched/idle.c:296`](../../linux/kernel/sched/idle.c#L296)），随后根据 cpuidle 的判断调用 `tick_nohz_idle_stop_tick()`（[`kernel/sched/idle.c:163-169`](../../linux/kernel/sched/idle.c#L163-L169)）。后者在 `need_resched()` 为假等条件满足时，把下一次 tick 推迟到下一个定时器事件；第一次停 tick 时还调用 `nohz_balance_enter_idle()`，把本 CPU 登记为 nohz 空闲 CPU（[`kernel/time/tick-sched.c:1205-1239`](../../linux/kernel/time/tick-sched.c#L1205-L1239)）。退出 idle 循环时，`tick_nohz_idle_exit()` 恢复 tick（[`kernel/sched/idle.c:364`](../../linux/kernel/sched/idle.c#L364)）。
+`CONFIG_NO_HZ_COMMON`（由 `CONFIG_NO_HZ_FULL` 选中）下，idle 循环 `do_idle()` 进入时调用 `tick_nohz_idle_enter()`（[`kernel/sched/idle.c:296`](../../linux/kernel/sched/idle.c#L296)），随后根据 cpuidle 的判断调用 `tick_nohz_idle_stop_tick()`（[`kernel/sched/idle.c:163-169`](../../linux/kernel/sched/idle.c#L163-L169)）。后者在 `need_resched()` 为假等条件满足时，把下一次 tick 推迟到下一个定时器事件；第一次停 tick 时还调用 `nohz_balance_enter_idle()`，把本 CPU 登记为 nohz 空闲 CPU（[`kernel/time/tick-sched.c:1205-1239`](../../linux/kernel/time/tick-sched.c#L1205-L1239)）。退出 idle 循环时会调用 `tick_nohz_idle_exit()`（[`kernel/sched/idle.c:364`](../../linux/kernel/sched/idle.c#L364)）：普通 CPU 恢复周期 tick，`nohz_full` CPU 则重新检查依赖，允许继续保持停 tick 状态（[`kernel/time/tick-sched.c:1422-1430`](../../linux/kernel/time/tick-sched.c#L1422-L1430)）。
 
 对调度器来说，空闲 CPU 本就没有任务需要复查。但 `sched_tick()` 的两项副作用不能丢：一是周期性负载均衡，二是衰减 blocked 负载。它们都由忙碌 CPU 发起的 nohz idle 均衡代为完成（3.8、3.9 节）。
 
 #### 运行时停 tick：NO_HZ_FULL
 
-启动参数 `nohz_full=<cpulist>` 指定的 CPU 即使有任务在运行，也可以停掉 tick（这些 CPU 同时被移出 housekeeping 集合，RCU 回调也被卸载到其他 CPU，见 [`Documentation/admin-guide/kernel-parameters.txt:4316-4327`](../../linux/Documentation/admin-guide/kernel-parameters.txt#L4316-L4327)）。能否停由 tick 子系统的 `can_stop_full_tick()` 决定，它依次检查全局、本 CPU、当前任务、当前进程四个**tick 依赖**（Tick Dependency）掩码，任何一个非零都不能停（[`kernel/time/tick-sched.c:358-378`](../../linux/kernel/time/tick-sched.c#L358-L378)）。每一位代表一个需要 tick 的子系统：
+启动参数 `nohz_full=<cpulist>` 指定的 CPU 即使有任务在运行，也可以停掉 tick（这些 CPU 同时被移出 `HK_TYPE_KERNEL_NOISE` 对应的 housekeeping 集合，RCU 回调也被卸载到其他 CPU，见 [`Documentation/admin-guide/kernel-parameters.txt:4316-4327`](../../linux/Documentation/admin-guide/kernel-parameters.txt#L4316-L4327)）。停 tick 的依赖检查由 tick 子系统的 `can_stop_full_tick()` 完成：它依次检查全局、本 CPU、当前任务、当前进程四个**tick 依赖**（Tick Dependency）掩码，任何一个非零都不能停（[`kernel/time/tick-sched.c:358-378`](../../linux/kernel/time/tick-sched.c#L358-L378)）。每一位代表一个需要 tick 的子系统：
 
 [`include/linux/tick.h:109-116`](../../linux/include/linux/tick.h#L109-L116)（v6.18.60）
 
@@ -495,6 +500,8 @@ enum tick_dep_bits {
 	TICK_DEP_BIT_RCU_EXP		= 5
 };
 ```
+
+四个掩码全为 0 只是必要条件：`tick_nohz_next_event()` 还要检查 RCU、架构、irq_work、到期的本地定时器软中断及下一事件时间，可能继续保留 tick（[`kernel/time/tick-sched.c:893-974`](../../linux/kernel/time/tick-sched.c#L893-L974)）。所谓“停 tick”是停止周期性检查，不是禁止所有定时器中断。
 
 调度器负责维护本 CPU 掩码中的 `TICK_DEP_BIT_SCHED`：
 
@@ -515,9 +522,21 @@ static inline void sched_update_tick_dependency(struct rq *rq)
 }
 ```
 
-它在 `add_nr_running()` 与 `sub_nr_running()` 末尾被调用（[`kernel/sched/sched.h:2743-2767`](../../linux/kernel/sched/sched.h#L2743-L2767)）。各调度类入队、出队时都通过这两个函数修改 `rq->nr_running`，所以运行队列的构成一变，调度器就重新评估一次 tick 依赖。非 `nohz_full` CPU 上它在第一个判断处就返回。
+它在 `add_nr_running()` 与 `sub_nr_running()` 末尾被调用（[`kernel/sched/sched.h:2743-2767`](../../linux/kernel/sched/sched.h#L2743-L2767)），在更新 `rq->nr_running` 后重新评估依赖。非 `nohz_full` CPU 上它在第一个判断处就返回。**可运行任务数并不是唯一判据**，也不能把“只有一个任务”直接等同于“可以停 tick”。
 
-判断交给 `sched_can_stop_tick()`（[`kernel/sched/core.c:1350-1401`](../../linux/kernel/sched/core.c#L1350-L1401)）。它回答的问题是：运行队列上是否还有任务要靠 tick 实施强制抢占或预算控制。例如同一 CPU 上有多个需要轮转时间片的任务时，就必须保留 tick。具体判据由各调度类的策略决定，在 3.6、3.7、3.10、3.11 节分别说明。
+`sched_can_stop_tick()` 按以下顺序判断；遇到能作出结论的分支就返回（[`kernel/sched/core.c:1350-1401`](../../linux/kernel/sched/core.c#L1350-L1401)）：
+
+| 按顺序检查的条件 | 调度器是否允许停 tick | 原因 |
+|---|---|---|
+| `rq->dl.dl_nr_running != 0` | 否 | 即使只有一个 Deadline 任务也保留 tick |
+| 存在 `SCHED_RR` 任务 | 仅 `rr_nr_running == 1` 时允许 | 多个 RR 任务需要周期时间片轮转；源码按 RR 总数判断，不比较优先级 |
+| 没有 RR，但存在 `SCHED_FIFO` 任务 | 是 | FIFO 不靠时间片强制轮转；即使还有低优先级公平任务，也在此返回 |
+| 前述条件均不满足，且 sched_ext 不允许停 | 否 | 由 `scx_can_stop_tick()` 判断；依赖 `CONFIG_SCHED_CLASS_EXT`，当前未编译 |
+| `rq->cfs.h_nr_queued > 1` | 否 | 多个排队公平任务需要强制重调度；这里检查的是排队计数，不是简单的 `rq->nr_running` |
+| `__need_bw_check()` 成立，且当前公平任务受带宽限制 | 否 | 单个任务也需周期检查 quota（依赖 `CONFIG_CFS_BANDWIDTH=y`） |
+| 其余情况 | 是 | 没有上述调度器依赖，但其他子系统仍可阻止停 tick |
+
+带宽检查还不能只放在任务数变化处：新任务刚入队时可能尚未成为 `rq->curr`，所以公平类在选择下一个任务时通过 `sched_fair_update_stop_tick()` 再检查一次，必要时补设 `TICK_DEP_BIT_SCHED`（[`kernel/sched/fair.c:6865-6888`](../../linux/kernel/sched/fair.c#L6865-L6888)）。这解释了为什么单个受限公平任务不能长期无 tick 运行。各调度类的预算与轮转机制见 3.6、3.7、3.10、3.11 节。
 
 设置依赖位后，tick 怎样重新启动：
 
@@ -541,7 +560,7 @@ add_nr_running()                                kernel/sched/sched.h     // 任�
 
 #### 远程 tick：sched_tick_remote()
 
-tick 停掉后，当前任务的运行时间、PELT 负载、全局负载均值都不再更新，长期不更新会让这些统计严重失真。内核的折中是让 housekeeping CPU 每秒代为执行一次 tick：
+tick 停掉后，调度、唤醒等事件路径仍会更新运行时间与负载；但一个长期独占 CPU、又不进入这些路径的任务会失去周期性记账机会。内核让 housekeeping CPU 大约每秒代为执行一次精简的远程 tick，保持调度器统计较新；这不是在远端重放完整的 `sched_tick()`：
 
 [`kernel/sched/core.c:5686-5738`](../../linux/kernel/sched/core.c#L5686-L5738)（v6.18.60，节选）
 
@@ -581,9 +600,10 @@ static void sched_tick_remote(struct work_struct *work)
 }
 ```
 
-- 每个 `nohz_full` CPU 对应一个 `struct tick_work`，它的延迟工作项挂在 `system_unbound_wq` 上，间隔为 `HZ` 个 jiffies，即 1 秒。unbound 工作队列的 worker 默认被限制在 housekeeping CPU 上（[`kernel/workqueue.c:7885`](../../linux/kernel/workqueue.c#L7885)），所以代执行的 tick 不会再打扰隔离 CPU。
-- 只有目标 CPU 的 tick 确实已停时才代为执行。取远程 rq 的锁、更新时钟、调用 `task_tick()`，再更新全局负载。`se.exec_start` 是当前任务本次开始计时的时刻，各调度类共用；距今超过 3 秒说明记账长期停滞，于是告警。
+- 每个 `nohz_full` CPU 对应一个 `struct tick_work`，它的延迟工作项挂在 `system_unbound_wq` 上，每次执行完再延迟 `HZ` 个 jiffies 排队，目标间隔为 1 秒，不是硬实时周期。unbound 工作队列的 worker 默认被限制在 housekeeping CPU 上（[`kernel/workqueue.c:7885`](../../linux/kernel/workqueue.c#L7885)），因此这个工作项不必在隔离 CPU 本地周期执行；远程取 rq 锁仍会产生共享数据交互。
+- 仅在观测到目标 CPU 的 tick 已停、且取锁后确认 CPU 在线时才代为执行。取远程 rq 的锁、更新时钟、调用 `task_tick()`，再更新全局负载。`se.exec_start` 是执行时间记账的起点，会在记账时推进，并不只在切入任务时设置；距今超过 3 秒说明记账长期停滞，于是告警。
 - 源码注释说明了两点取舍（[`kernel/sched/core.c:5694-5700`](../../linux/kernel/sched/core.c#L5694-L5700)、[`kernel/sched/core.c:5728-5733`](../../linux/kernel/sched/core.c#L5728-L5733)）：判断 tick 是否已停本身存在竞争，但少一次或多一次 tick 无关紧要，因为 tick 更新统计、检查时间片的方式与它何时运行无关；1 Hz 的频率足够低，不会造成负担，又足以让调度器内部统计大致保持最新。
+- 远程 tick 不执行本地 tick 的 lazy 升级、perf、kworker 检查和周期负载均衡触发；它提供的是调度类记账与检查及全局负载更新，不是把所有周期工作都搬到远端。
 - `state` 字段配合 CPU 热插拔：`sched_cpu_starting()` 中的 `sched_tick_start()` 把它置为 RUNNING 并首次排队（[`kernel/sched/core.c:5740-5758`](../../linux/kernel/sched/core.c#L5740-L5758)），`sched_cpu_dying()` 中的 `sched_tick_stop()` 只把它改为 OFFLINING 而不取消工作项（[`kernel/sched/core.c:5761-5776`](../../linux/kernel/sched/core.c#L5761-L5776)），由工作项自己把状态减到 OFFLINE 并停止重新排队。状态图见 [`kernel/sched/core.c:5661-5682`](../../linux/kernel/sched/core.c#L5661-L5682)。
 
 ### 抢占模型
@@ -594,18 +614,18 @@ static void sched_tick_remote(struct work_struct *work)
 
 | 模型 | `preempt_enable()` 与中断返回内核态 | `cond_resched()` | `might_resched()` | `resched_curr_lazy()` 设置 | 本书配置 |
 |---|---|---|---|---|---|
-| none | 不抢占 | 有效 | 空 | `TIF_NEED_RESCHED` | 不可选 |
-| voluntary | 不抢占 | 有效 | 有效 | `TIF_NEED_RESCHED` | 不可选 |
-| full | 抢占 | 空 | 空 | `TIF_NEED_RESCHED` | 默认 |
-| lazy | 抢占 | 空 | 空 | `TIF_NEED_RESCHED_LAZY` | 可选 |
+| none | 不抢占 | 有效 | 空 | `TIF_NEED_RESCHED` | 可选 |
+| voluntary | 不抢占 | 有效 | 有效 | `TIF_NEED_RESCHED` | 可选 |
+| full | 响应立即请求 | 空 | 空 | `TIF_NEED_RESCHED` | 可选 |
+| lazy | 响应立即请求 | 空 | 空 | `TIF_NEED_RESCHED_LAZY` | 默认 |
 
 - **返回用户态**（以及 KVM 进入客户机前的 `xfer_to_guest_mode_work()`，[`kernel/entry/virt.c:13-14`](../../linux/kernel/entry/virt.c#L13-L14)）在所有模型下都检查两个重调度位。用户态代码在任何模型下都能被抢占，模型只影响**内核态**代码何时让出 CPU。
 - **none**：内核态只在显式调用 `schedule()` 或 `cond_resched()` 时让出 CPU，长时间运行的内核循环必须自己插入 `cond_resched()`。
 - **voluntary**：在 none 的基础上，`might_sleep()` 中的 `might_resched()` 也成为抢占点（[`include/linux/kernel.h:136`](../../linux/include/linux/kernel.h#L136)）。内核中可能睡眠的函数大多带有 `might_sleep()` 注解，这些位置因此变成了额外的"自愿"抢占点。
 - **full**：只要 `preempt_count` 为 0 且中断开启，`preempt_enable()` 与中断返回内核态都可以立即抢占（3.2 节）。`cond_resched()` 失去意义，退化为直接返回 0。
-- **lazy**：对 `TIF_NEED_RESCHED` 的处理与 full 完全相同；不同之处在于，经 `resched_curr_lazy()` 发出的请求只设置 `TIF_NEED_RESCHED_LAZY`，给内核态代码最多一个 tick 的宽限期（见下文"惰性抢占"）。
+- **lazy**：对 `TIF_NEED_RESCHED` 的处理与 full 完全相同；不同之处在于，经 `resched_curr_lazy()` 发出的请求通常只设置 `TIF_NEED_RESCHED_LAZY`，推迟响应，正常周期 tick 会在下次到来时将其升级（见下文“惰性抢占”）。
 
-在 Kconfig 中，前四项是一个单选组（[`kernel/Kconfig.preempt:17-87`](../../linux/kernel/Kconfig.preempt#L17-L87)），默认是 `PREEMPT_NONE`；`PREEMPT_LAZY` 要求架构选择 `ARCH_HAS_PREEMPT_LAZY`，x86 满足（[`arch/x86/Kconfig:99`](../../linux/arch/x86/Kconfig#L99)）。`PREEMPT_RT` 不在单选组内，是一个独立选项（[`kernel/Kconfig.preempt:89-103`](../../linux/kernel/Kconfig.preempt#L89-L103)），而 `PREEMPT_NONE` 与 `PREEMPT_VOLUNTARY` 都 `depends on !PREEMPT_RT`（[`kernel/Kconfig.preempt:23`](../../linux/kernel/Kconfig.preempt#L23)、[`kernel/Kconfig.preempt:39`](../../linux/kernel/Kconfig.preempt#L39)）。本书配置选择了 `CONFIG_PREEMPT`，并同时开启 `CONFIG_PREEMPT_RT` 与 `CONFIG_PREEMPT_DYNAMIC`。
+在 Kconfig 中，前四项是一个单选组（[`kernel/Kconfig.preempt:17-87`](../../linux/kernel/Kconfig.preempt#L17-L87)），默认是 `PREEMPT_NONE`；`PREEMPT_LAZY` 要求架构选择 `ARCH_HAS_PREEMPT_LAZY`，x86 满足（[`arch/x86/Kconfig:99`](../../linux/arch/x86/Kconfig#L99)）。`PREEMPT_RT` 不在单选组内，是一个独立选项（[`kernel/Kconfig.preempt:89-103`](../../linux/kernel/Kconfig.preempt#L89-L103)），而 `PREEMPT_NONE` 与 `PREEMPT_VOLUNTARY` 都 `depends on !PREEMPT_RT`（[`kernel/Kconfig.preempt:23`](../../linux/kernel/Kconfig.preempt#L23)、[`kernel/Kconfig.preempt:39`](../../linux/kernel/Kconfig.preempt#L39)）。本书配置选择的是 `CONFIG_PREEMPT_LAZY=y`、`CONFIG_PREEMPT_DYNAMIC=y`、`CONFIG_PREEMPT_RT=n`，所以默认 lazy，四种动态模型都可选。
 
 #### PREEMPT_RT 与抢占模型
 
@@ -623,7 +643,7 @@ static __always_inline void __rt_spin_lock(spinlock_t *lock)
 }
 ```
 
-于是获取 `spinlock_t` 不会增加 `preempt_count`，持锁代码只要遇到生效的抢占点就可能被抢占（锁的语义见 7.4、7.8 节）。none / voluntary 让内核态代码基本不可抢占，与 RT 的低延迟目标相悖，所以在 RT 内核中，`sched_dynamic_mode()` 拒绝这两个模式：
+这是**对照用的 RT 分支**，不是本书默认路径。本书是非 RT 内核，`spinlock_t` 仍会禁止抢占；RT 中普通 `spinlock_t` 不会以持锁方式增加 `preempt_count`，但 `raw_spinlock_t` 和显式的 `preempt_disable()` 仍然禁止抢占（[`include/linux/preempt.h:154-162`](../../linux/include/linux/preempt.h#L154-L162)，锁的语义见 7.4、7.8 节）。none / voluntary 让内核态代码基本不可抢占，与 RT 的低延迟目标相悖，所以在 RT 内核中，`sched_dynamic_mode()` 拒绝这两个模式：
 
 [`kernel/sched/core.c:7648-7667`](../../linux/kernel/sched/core.c#L7648-L7667)（v6.18.60）
 
@@ -792,10 +812,16 @@ static void __sched_dynamic_update(int mode)
    }
    ```
 
-   本书配置走最后一个分支。编译时的初值本来就是 full 状态：`preempt_schedule` 等定义时指向真实函数（如 [`kernel/sched/core.c:7157`](../../linux/kernel/sched/core.c#L7157)），`cond_resched` 与 `might_resched` 用 `DEFINE_STATIC_CALL_RET0` 定义（[`kernel/sched/core.c:7501`](../../linux/kernel/sched/core.c#L7501)、[`kernel/sched/core.c:7506`](../../linux/kernel/sched/core.c#L7506)），`sk_dynamic_preempt_lazy` 初值为假。因此这里只需记下模式、打印一行日志。
+   本书配置走 `CONFIG_PREEMPT_LAZY` 分支，调用 `sched_dynamic_update(preempt_dynamic_lazy)`，启用 lazy static key 并打印 `Dynamic Preempt: lazy`。编译时 static call 的初值本来类似 full：`preempt_schedule` 等指向真实函数（如 [`kernel/sched/core.c:7157`](../../linux/kernel/sched/core.c#L7157)），`cond_resched` 与 `might_resched` 用 `DEFINE_STATIC_CALL_RET0` 定义（[`kernel/sched/core.c:7501`](../../linux/kernel/sched/core.c#L7501)、[`kernel/sched/core.c:7506`](../../linux/kernel/sched/core.c#L7506)），lazy static key 初值为假。只有选择 `CONFIG_PREEMPT=y`、且没有启动参数覆盖时，才走最后一个“无需修改调用点”的 full 分支。
 3. **运行时修改**。写 debugfs 文件 `/sys/kernel/debug/sched/preempt` 会调用 `sched_dynamic_update()`（[`kernel/sched/debug.c:220-242`](../../linux/kernel/sched/debug.c#L220-L242)）。
 
-当前模型可以从几处看到：`preempt_model_str()`（[`kernel/sched/core.c:7809-7848`](../../linux/kernel/sched/core.c#L7809-L7848)）生成诸如 `PREEMPT_{RT,(full)}` 的字符串，出现在 oops 与 `dump_stack()` 的标题行（[`lib/dump_stack.c:65`](../../linux/lib/dump_stack.c#L65)）和 ftrace 延迟跟踪输出的头部（[`kernel/trace/trace.c:4167`](../../linux/kernel/trace/trace.c#L4167)）；`uname -v` 中的 `PREEMPT_RT` 等字样则是构建时由 [`init/Makefile:28-30`](../../linux/init/Makefile#L28-L30) 写入的，不反映运行时切换。
+当前模型可以从几处看到：`preempt_model_str()`（[`kernel/sched/core.c:7809-7848`](../../linux/kernel/sched/core.c#L7809-L7848)）在本书默认配置下生成 `PREEMPT(lazy)`，RT 配置下则可能生成 `PREEMPT_{RT,(full)}` 等字符串，出现在 oops 与 `dump_stack()` 的标题行（[`lib/dump_stack.c:65`](../../linux/lib/dump_stack.c#L65)）和 ftrace 延迟跟踪输出的头部（[`kernel/trace/trace.c:4167`](../../linux/kernel/trace/trace.c#L4167)）；`uname -v` 中的 `PREEMPT_RT` 等字样则是构建时由 [`init/Makefile:28-30`](../../linux/init/Makefile#L28-L30) 写入的，不反映运行时切换。
+
+#### 请求如何到达安全调度点
+
+tick 回调只设置重调度请求，**不能直接在硬中断中调用 `schedule()`**。返回用户态的公共循环同时检查两个重调度位；返回内核态则先由 `irqentry_exit()` 检查被打断现场是否允许恢复中断，再由 `raw_irqentry_exit_cond_resched()` 确认 `preempt_count() == 0` 和 `need_resched()`，最后进入 `preempt_schedule_irq()`（[`kernel/entry/common.c:160-215`](../../linux/kernel/entry/common.c#L160-L215)）。因此，tick 已经设置立即请求，也不代表这次中断退出必然发生切换。
+
+`preempt_enable()` 则在嵌套计数减到允许抢占且立即请求已折叠到 x86 的 `__preempt_count` 时尝试调度；`preempt_schedule()` 还会检查 `preemptible()`，中断关闭时直接返回（[`include/linux/preempt.h:227-245`](../../linux/include/linux/preempt.h#L227-L245)、[`kernel/sched/core.c:7138-7148`](../../linux/kernel/sched/core.c#L7138-L7148)）。即使进入了 `__schedule()`，也可能重新选中原任务；**发请求、进入调度器、实际切换任务是三个不同事件**。
 
 #### cond_resched() 与 might_resched()
 
@@ -872,43 +898,45 @@ void resched_curr_lazy(struct rq *rq)
 | 返回用户态 `exit_to_user_mode_loop()` | `_TIF_NEED_RESCHED \| _TIF_NEED_RESCHED_LAZY`（[`kernel/entry/common.c:30`](../../linux/kernel/entry/common.c#L30)） | 是 |
 | 进入 KVM 客户机 `xfer_to_guest_mode_work()` | 同上 | 是 |
 
-**升级**。如果任务一直停留在内核态，惰性请求由下一个 tick 兜底：`sched_tick()` 发现 `TIF_NEED_RESCHED_LAZY` 仍然置位，就调用 `resched_curr()` 补上 `TIF_NEED_RESCHED`（[`kernel/sched/core.c:5622-5623`](../../linux/kernel/sched/core.c#L5622-L5623)）。`__resched_curr()` 只在目标位或 `TIF_NEED_RESCHED` 已经置位时才提前返回（判断条件为 `(1 << tif) | _TIF_NEED_RESCHED`），此时只有惰性位，所以这次调用会真正设置 `TIF_NEED_RESCHED` 并清除取反位，本次 tick 中断返回内核态时就会经 `preempt_schedule_irq()` 完成抢占。
+**升级**。如果任务一直停留在内核态，惰性请求由下一次实际到达的本地周期 tick 兜底：`sched_tick()` 发现 `TIF_NEED_RESCHED_LAZY` 仍然置位，就调用 `resched_curr()` 补上 `TIF_NEED_RESCHED`（[`kernel/sched/core.c:5622-5623`](../../linux/kernel/sched/core.c#L5622-L5623)）。`__resched_curr()` 只在目标位或 `TIF_NEED_RESCHED` 已经置位时才提前返回（判断条件为 `(1 << tif) | _TIF_NEED_RESCHED`），此时只有惰性位，所以这次调用会真正设置 `TIF_NEED_RESCHED` 并清除取反位。**只有被打断现场可抢占时**，本次中断返回内核态才会进入 `preempt_schedule_irq()`；若正在持有非 RT 自旋锁或处于其他禁止抢占区间，请求仍要等待后续安全点。
 
 ```mermaid
 sequenceDiagram
     participant C as 调度类
     participant K as 核心层
-    participant T as 当前任务
+    participant T as 当前非 idle 任务
     participant H as 下一次 sched_tick()
     C->>K: resched_curr_lazy(rq)
     K->>T: 置 TIF_NEED_RESCHED_LAZY<br/>不改 preempt_count，不发 IPI
-    Note over T: preempt_enable()、中断返回内核态<br/>只看 TIF_NEED_RESCHED：继续运行
+    Note over T: preempt_enable()、中断返回内核态<br/>不响应仅有 _LAZY 的请求：继续运行
     alt 任务先返回用户态（或进入客户机）
         T->>T: exit_to_user_mode_loop() 发现 _LAZY → schedule()
-    else 一个 tick 后仍在内核态
+    else 下一次本地周期 tick 到来时仍未调度
         H->>K: _LAZY 仍置位 → resched_curr(rq)
         K->>T: 置 TIF_NEED_RESCHED，清 PREEMPT_NEED_RESCHED 取反位
-        T->>T: 本次中断返回内核态 → preempt_schedule_irq()
+        T->>T: 现场可抢占则在中断出口调度<br/>否则等待后续安全点
     end
 ```
 
 *图 3-8：lazy 模型下惰性重调度请求的两条响应路径*
 
-升级检查位于 `task_tick()` 之前，所以在某个 tick 的 `task_tick()` 中发出的惰性请求，要到下一个 tick 才会被升级。从发出请求到被强制执行，宽限期不超过一个 tick；`preempt=` 参数说明中的描述是"给任务一个 HZ tick 的时间自行让出 CPU"（[`Documentation/admin-guide/kernel-parameters.txt:5208-5212`](../../linux/Documentation/admin-guide/kernel-parameters.txt#L5208-L5212)）。
+升级检查位于 `task_tick()` 之前，所以在某个 tick 的 `task_tick()` 中发出的惰性请求，不会在同一次 tick 内升级。启动参数文档用“给任务一个 HZ tick 的时间自行让出 CPU”描述这项策略（[`Documentation/admin-guide/kernel-parameters.txt:5208-5212`](../../linux/Documentation/admin-guide/kernel-parameters.txt#L5208-L5212)），指的是**正常周期下请求升级的等待窗口**，不是“在 `1 / HZ` 内保证完成上下文切换”。关中断、禁止抢占、vCPU 被停调都可能拉长实际延迟。
+
+这也解释了它与 `NO_HZ_FULL` 的关系：多个公平任务排队时，调度器通过 `TICK_DEP_BIT_SCHED` 要求恢复 tick，避免把周期检查无限期停掉；1 Hz 的 `sched_tick_remote()` 并不执行 `sched_tick()` 中的 lazy 升级检查，不能把它当成一个 tick 内响应请求的保证。
 
 ## 关键细节 / 设计考量
 
 ### tick 是兜底，不是主要驱动
 
-大多数重调度请求来自事件：唤醒、睡眠、调度属性修改、任务迁移。tick 只负责"没人睡、也没人醒"的情况，比如一个纯计算任务和另一个就绪任务共享 CPU。正因为如此，空闲 CPU 和只有一个任务的 `nohz_full` CPU 才可以停掉 tick，停掉后的副作用（负载均衡、统计更新）分别由 nohz idle 均衡和 1 Hz 的远程 tick 补上。
+调度既可由睡眠主动进入，也可由唤醒、调度属性修改、任务迁移等事件触发重调度请求。tick 则补上“没人睡、也没人醒”时的周期检查，例如两个计算任务共享 CPU。空闲 CPU 或满足依赖条件的 `nohz_full` CPU 可以停 tick；nohz idle 均衡与约 1 Hz 的远程 tick 分别承担部分均衡与统计工作，但并不等价于重放全部本地 tick 副作用。
 
-### 宽限期随 HZ 变化
+### 请求升级窗口随 HZ 变化，不等于切换延迟上界
 
-惰性请求的宽限期上限是一个 tick，`CONFIG_HZ=1000` 时为 1 ms，`HZ=100` 时为 10 ms。因此在 lazy 模型下，惰性请求从发出到完成切换的延迟与 `HZ` 直接相关；而 `TIF_NEED_RESCHED` 请求（以及 full 模型下的所有请求）的这段延迟只取决于当前不可抢占区间还剩多长，与 `HZ` 无关。
+正常周期 tick 的间隔在 `CONFIG_HZ=1000` 时为 1 ms，在 `HZ=100` 时为 10 ms，这决定了 lazy 请求额外等待升级的典型尺度。真实的切换延迟还包含中断投递、不可抢占区间和调度器选取等因素。立即请求不需要等待 lazy 升级，但若请求本身来自周期 tick，其发现时间仍受 `HZ` 影响；因此不能笼统地说 full 模型的调度延迟与 `HZ` 无关。
 
 ### 中断时间计入谁
 
-本书配置未开启 `CONFIG_IRQ_TIME_ACCOUNTING`，`clock_task` 不扣除中断时间，中断处理耗时会被计入恰好在运行的任务，并参与它的时间片与负载计算。中断负载高的系统可开启该选项：任务时钟变得更准确，中断负载另由 `avg_irq` 跟踪并从 CPU 算力中扣除（`NONTASK_CAPACITY` 特性，3.8、3.9 节），代价是每次中断进出都要多读一次时钟。
+本书配置未开启 `CONFIG_IRQ_TIME_ACCOUNTING`，`clock_task` 不扣除中断时间，中断处理耗时会被计入恰好在运行的任务，并参与它的时间片与负载计算。中断负载高的系统可开启该选项：任务时钟变得更准确，中断负载另由 `avg_irq` 跟踪并从 CPU 算力中扣除（`NONTASK_CAPACITY` 特性，3.8、3.9 节），代价是在中断进出记账路径上增加时钟读取。这里的 `clock_task` 属于调度器运行时间计量，不可据此断言 `/proc/stat` 不再单独显示 IRQ 时间；用户可见 CPU 时间统计还有独立的记账路径（[`kernel/sched/cputime.c:189-215`](../../linux/kernel/sched/cputime.c#L189-L215)）。
 
 ### 模型的切换是全局的
 
@@ -916,38 +944,84 @@ sequenceDiagram
 
 ### 停 tick 不等于"零打扰"
 
-`nohz_full` CPU 停掉 tick 的前提是四个依赖掩码全为 0。除调度器外，POSIX CPU 定时器、perf 事件、RCU、不稳定的时钟源都可能让 tick 继续存在；任务自己发起的系统调用、缺页，以及其他 CPU 发来的 IPI，也仍会让它进入内核。远程 tick 把调度器自己的周期性开销移到 housekeeping CPU 上，但 `sched_tick_remote()` 需要获取隔离 CPU 的 rq 锁，仍会与该 CPU 发生少量缓存行交互。
+`nohz_full` CPU 停掉 tick 的必要条件是四个依赖掩码全为 0，还要通过下一事件等检查。除调度器外，POSIX CPU 定时器、perf 事件、RCU、不稳定的时钟源都可能让 tick 继续存在；任务自己发起的系统调用、缺页，以及其他 CPU 发来的 IPI，也仍会让它进入内核。远程 tick 把调度器自己的周期性开销移到 housekeeping CPU 上，但 `sched_tick_remote()` 需要获取隔离 CPU 的 rq 锁，仍会与该 CPU 发生少量缓存行交互。
+
+## 可观测性
+
+### 先区分请求、tick 与切换
+
+当前 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_BPF_EVENTS=y`（取值见 [`.config:320`](../../linux/.config#L320)、[`.config:12937-12974`](../../linux/.config#L12937-L12974)）。以下入口观察的是不同事件，不能用其中一个代替其余事件：
+
+| 入口 | 从哪里看、看什么 | 如何解读 |
+|---|---|---|
+| 裸跟踪点 `sched_set_need_resched_tp` | 定义于 [`include/trace/events/sched.h:895-897`](../../linux/include/trace/events/sched.h#L895-L897)，在 [`kernel/sched/core.c:1113-1152`](../../linux/kernel/sched/core.c#L1113-L1152) 触发 | 参数为目标任务、目标 CPU、TIF 位号；x86 的 4 / 5 分别表示立即 / 惰性请求。远程请求的目标 CPU 不等于记录事件的 CPU；已有标志会抑制重复事件，次数不是等待时长 |
+| `sched:sched_switch` | 定义于 [`include/trace/events/sched.h:220-266`](../../linux/include/trace/events/sched.h#L220-L266)，记录 `prev_pid`、`next_pid`、`prev_state` | 表示真正切换；`R+` 区分抢占路径，但不记录请求最初是立即还是惰性。返回用户态经 `schedule()` 触发的运行态切换也不一定带 `+` |
+| `timer:hrtimer_expire_entry` | [`include/trace/events/timer.h:262-283`](../../linux/include/trace/events/timer.h#L262-L283)，看 `function`、`hrtimer`、`now` | `function=tick_nohz_handler` 对应高精度模式的模拟 tick，`function=hrtick` 对应调度类预约。并不是每个 hrtimer 都是调度 tick |
+| `timer:tick_stop` | [`include/trace/events/timer.h:429-447`](../../linux/include/trace/events/timer.h#L429-L447)，看 `success`、`dependency` | 成功输出 `success=1 dependency=NONE`；NO_HZ_FULL 依赖阻止时输出 `success=0` 与首个命中的依赖名，不是全部依赖的快照 |
+| `irq_vectors:local_timer_entry` / `irq_vectors:local_timer_exit` | [`arch/x86/include/asm/trace/irq_vectors.h:12-40`](../../linux/arch/x86/include/asm/trace/irq_vectors.h#L12-L40)，依赖 `CONFIG_X86_LOCAL_APIC=y` | 包围 LAPIC 定时器中断，可测中断处理耗时；一个中断可执行多个到期定时器，不能直接当成一次 `sched_tick()` |
+
+`DECLARE_TRACE()` 会给裸跟踪点的名字加 `_tp` 后缀（[`include/linux/tracepoint.h:474-477`](../../linux/include/linux/tracepoint.h#L474-L477)），所以 BPF 入口是 `rawtracepoint:sched_set_need_resched_tp`，不存在同名的 `events/sched/.../enable`。`tick_stop` 的成功事件仅在从未停到已停的状态转换时触发（[`kernel/time/tick-sched.c:1041-1048`](../../linux/kernel/time/tick-sched.c#L1041-L1048)）；失败事件来自依赖检查（[`kernel/time/tick-sched.c:320-354`](../../linux/kernel/time/tick-sched.c#L320-L354)）。它不是完整的停止 / 恢复事件流，没有记录不等于 tick 正在运行或已经停止。
+
+### 配置、时钟快照与计数器
+
+下表中 debugfs 入口依赖 `CONFIG_DEBUG_FS=y` 并已挂载；`preempt` 另依赖 `CONFIG_PREEMPT_DYNAMIC=y`。这些文件由 `sched_init_debug()` 创建（[`kernel/sched/debug.c:495-510`](../../linux/kernel/sched/debug.c#L495-L510)）。
+
+| 接口 | 源码与对应字段 | 解读边界 |
+|---|---|---|
+| `/sys/kernel/debug/sched/preempt` | `sched_dynamic_show()` / `sched_dynamic_write()`（[`kernel/sched/debug.c:220-266`](../../linux/kernel/sched/debug.c#L220-L266)） | 带括号者是当前模式；本书默认 `none voluntary full (lazy)`，不是构建时的 `uname -v` 标签 |
+| `/sys/kernel/debug/sched/features` | `sched_feat_show()` / `sched_feat_write()`（[`kernel/sched/debug.c:59-68`](../../linux/kernel/sched/debug.c#L59-L68)、[`kernel/sched/debug.c:101-156`](../../linux/kernel/sched/debug.c#L101-L156)） | `NO_HRTICK`、`NO_HRTICK_DL`、`NO_LATENCY_WARN` 表示相应特性关闭；编译进功能不等于正在使用 |
+| `/sys/kernel/debug/sched/debug` | `print_cpu()` 输出 `rq->clock`、`rq->clock_task`、`nr_running`、`nr_switches`（[`kernel/sched/debug.c:928-960`](../../linux/kernel/sched/debug.c#L928-L960)） | 时间以毫秒加 6 位小数显示，换算见 [`kernel/sched/debug.c:28-48`](../../linux/kernel/sched/debug.c#L28-L48)。这是可能滞后的非原子快照，不是连续时间采样，也不适合比较不同 CPU 的绝对值 |
+| `/sys/devices/system/cpu/nohz_full` | `print_cpus_nohz_full()` 输出 `tick_nohz_full_mask`（[`drivers/base/cpu.c:303-310`](../../linux/drivers/base/cpu.c#L303-L310)），依赖 `CONFIG_NO_HZ_FULL=y`、`CONFIG_SYSFS=y` | 仅表示哪些 CPU 被配置为 full dynticks，不表示此刻的 tick 已停 |
+| `/proc/interrupts` 的 `LOC` | `arch_show_interrupts()` 输出 `apic_timer_irqs`（[`arch/x86/kernel/irq.c:77-80`](../../linux/arch/x86/kernel/irq.c#L77-L80)），在 `local_apic_timer_interrupt()` 递增（[`arch/x86/kernel/apic/apic.c:1039`](../../linux/arch/x86/kernel/apic/apic.c#L1039)） | 包含调度 tick、hrtick 和其他 LAPIC 定时器中断，适合粗看趋势，不能精确计数 tick |
+
+本书 `CONFIG_PROC_FS=y`、`CONFIG_SYSFS=y`、`CONFIG_X86_LOCAL_APIC=y` 的取值见 [`.config:11777-11787`](../../linux/.config#L11777-L11787)、[`.config:453`](../../linux/.config#L453)。
+
+### 延迟告警与动态探针
+
+开启 `LATENCY_WARN` 后，`latency_warn_ms` 与 `latency_warn_once` 分别控制阈值与是否每次启动只告警一次。默认值是 100 ms、1（[`kernel/sched/core.c:172-180`](../../linux/kernel/sched/core.c#L172-L180)）。计时起点是 tick **第一次观察到** `need_resched()`，不是请求精确的设置时刻；它不直接测量只有惰性位时的等待，也不能诊断没有 tick 到达的整段关中断时间（[`kernel/sched/core.c:5548-5577`](../../linux/kernel/sched/core.c#L5548-L5577)）。输出还有独立的限速（[`kernel/sched/debug.c:1280-1290`](../../linux/kernel/sched/debug.c#L1280-L1290)），没有日志不等于没有延迟。
+
+必要时可对 `sched_tick()`、`hrtick()`、`sched_tick_remote()` 使用函数跟踪或动态探针，分别区分本地周期检查、精确检查与远程记账。当前 `CONFIG_FUNCTION_TRACER=y`、`CONFIG_KPROBES=y`、`CONFIG_KPROBE_EVENTS=y`（[`.config:881-886`](../../linux/.config#L881-L886)、[`.config:12945-12970`](../../linux/.config#L12945-L12970)）；实际可挂接性仍须检查运行内核的 `available_filter_functions`、符号和探针限制。不要尝试对内联的 `dynamic_preempt_lazy()` 挂普通函数探针，也不要把 `notrace` 的 `sched_clock_cpu()` 当作普通 ftrace 入口；`preempt_schedule()` 更被 `NOKPROBE_SYMBOL` 明确禁止 kprobe（[`kernel/sched/core.c:7138-7148`](../../linux/kernel/sched/core.c#L7138-L7148)）。优先利用现成事件，避免给时钟和调度热路径引入明显扰动。
 
 ## 动手实验
 
-以下实验在 **dev 虚拟机** 中进行，标注了所需权限。输出取决于虚拟机实际运行的内核及其配置，先用 `uname -v` 确认。
+以下命令面向 **dev 虚拟机**，尚未在该虚拟机实测，下面描述的是预期现象，不是实测输出。先确认实际运行的是所分析的内核：`uname -r`、`/proc/cmdline` 与运行内核配置都要检查，`uname -v` 不能说明当前动态模型。需要 root 的实验还应确认 debugfs / tracefs 已挂载；CPU 1、CPU 3 必须在线且在实验进程的允许 CPU 集合内。模型与特性位的修改对全系统生效，实验结束须恢复原值。
 
 1. **查看与切换抢占模型**：
 
    ```bash
    # 虚拟机，普通用户
-   uname -v                                   # 构建时标志，如 "... SMP PREEMPT_RT ..."
-   # 虚拟机，root
-   cat /sys/kernel/debug/sched/preempt        # 当前模型带括号；本书配置下为 "(full) lazy"
+   uname -r
+   uname -v                                   # 仅反映构建时标签
+   cat /proc/cmdline                           # 留意 preempt= 与 nohz_full=
+   # 虚拟机，root；必要时先 mount -t debugfs debugfs /sys/kernel/debug
+   preempt=/sys/kernel/debug/sched/preempt
+   original=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^\(/) {
+       gsub(/[()]/,"",$i); print $i
+   }}' "$preempt")
+   test -n "$original" || exit 1
+   trap 'printf "%s\n" "$original" > "$preempt"' EXIT
+   cat "$preempt"                             # 无启动覆盖时：none voluntary full (lazy)
    dmesg | grep 'Dynamic Preempt'
-   echo lazy > /sys/kernel/debug/sched/preempt && cat /sys/kernel/debug/sched/preempt
-   echo none > /sys/kernel/debug/sched/preempt   # RT 内核返回 "Invalid argument"
-   echo full > /sys/kernel/debug/sched/preempt
+   echo full > "$preempt"; cat "$preempt"
+   echo lazy > "$preempt"; cat "$preempt"
+   printf '%s\n' "$original" > "$preempt"
+   trap - EXIT
    ```
 
-   在非 RT 内核中，`preempt` 文件会列出全部四个模式。
+   本书的非 RT x86_64 内核列出全部四个模式，none / voluntary 也可写入。只有另行构建 RT 内核时才只列出 full / lazy，并拒绝 none / voluntary。文件不存在时先排查运行内核配置与挂载，不要据此判断是哪种模型。
 
 2. **观察惰性请求与 tick 升级**：`sched_set_need_resched_tp` 是没有 tracefs 事件的裸跟踪点，参数依次为任务、CPU、TIF 位号（4 为 `TIF_NEED_RESCHED`，5 为 `TIF_NEED_RESCHED_LAZY`）。
 
    ```bash
    # 虚拟机，root
-   taskset -c 1 sh -c 'while :; do :; done' &              # 纯用户态循环
-   taskset -c 1 dd if=/dev/zero of=/dev/null bs=64M &      # 每次 read() 在内核中清零 64 MB
-   bpftrace -e 'rawtracepoint:sched_set_need_resched_tp /arg1 == 1/ { @[arg2, kstack(3)] = count(); }'
-   # 分别在 full 与 lazy 模型下运行十几秒后 Ctrl-C，最后 kill %1 %2
+   taskset -c 1 sh -c 'while :; do :; done' & p1=$!        # 主要在用户态运行
+   taskset -c 1 dd if=/dev/zero of=/dev/null bs=64M & p2=$! # 在内核中批量清零
+   bpftrace -e 'rawtracepoint:sched_set_need_resched_tp /arg1 == 1/ { @[arg2, kstack(8)] = count(); }'
+   # 切换模型观察后 Ctrl-C 结束 bpftrace，再清理实验进程
+   kill "$p1" "$p2"; wait "$p1" "$p2" 2>/dev/null
    ```
 
-   full 模型下应只出现位号 4。lazy 模型下，调度类发出的请求以位号 5 出现；当 `dd` 停留在 `read_zero()` 中超过一个 tick 时，还会出现调用栈含 `sched_tick` 的位号 4，这就是 tick 升级。`read_zero()` 每清零一页调用一次 `cond_resched()`（[`drivers/char/mem.c:477-502`](../../linux/drivers/char/mem.c#L477-L502)），但在 full / lazy 模型下它是空操作。
+   在另一个终端用实验 1 的接口分别切换 full / lazy，并保存、恢复初始模型。稳定运行的 full 模型下通常只出现位号 4；lazy 模型下，公平类的惰性请求以位号 5 出现，同时仍可能有直接发出的位号 4。若请求在 `dd` 的内核路径上持续到下一次 tick，可以捕捉调用栈含 `sched_tick()` 的位号 4，表示 tick 升级；是否捕获到取决于竞争、内核停留时间与调用栈深度，不能保证每次都有。该脚本统计请求次数，不测量请求到切换的延迟。`read_zero()` 每清零一页调用一次 `cond_resched()`（[`drivers/char/mem.c:477-502`](../../linux/drivers/char/mem.c#L477-L502)），但在 full / lazy 模型下它是空操作。
 
 3. **观察 tick 频率与空闲停 tick**：
 
@@ -958,23 +1032,34 @@ sequenceDiagram
    grep LOC /proc/interrupts; sleep 10; grep LOC /proc/interrupts; kill $pid
    ```
 
-   `LOC` 是本地 APIC 定时器中断计数。运行计算循环的 CPU 1 在 10 秒内大约增加 `10 × HZ` 次，再加上其他高精度定时器；空闲 CPU 的增量明显更少，这就是空闲停 tick 的效果。
+   `LOC` 是本地 APIC 定时器中断计数。CPU 1 未配置 `nohz_full`、且周期 tick 正常运行时，忙循环阶段通常接近每秒 `HZ` 次并叠加其他定时器；空闲阶段通常明显更少。若 CPU 1 是允许停 tick 的 `nohz_full` CPU，单个忙循环也可能保持很低的计数。`LOC` 不是精确 tick 计数，计时职责、其他定时器、广播与虚拟机调度均会影响结果；需精确区分时结合 `hrtimer_expire_entry` 的回调字段。
 
 4. **观察 NO_HZ_FULL 的调度器依赖**（需要在虚拟机内核命令行中加入 `nohz_full=3` 并重启）：
 
    ```bash
-   # 虚拟机，root
-   cat /sys/devices/system/cpu/nohz_full                   # 应输出 3
-   cd /sys/kernel/tracing
-   echo > trace; echo 1 > events/timer/tick_stop/enable
-   taskset -c 3 sh -c 'while :; do :; done' &              # 单个任务
-   sleep 3; grep -E 'success=1|dependency' per_cpu/cpu3/trace | tail -3
-   taskset -c 3 sh -c 'while :; do :; done' &              # 第二个任务
-   sleep 3; grep 'dependency=SCHED' per_cpu/cpu3/trace | tail -3
-   kill %1 %2; echo 0 > events/timer/tick_stop/enable
+   # 虚拟机，root；至少 4 个 vCPU，在 taskset -c 0 bash 启动的独立 shell 中执行
+   cat /sys/devices/system/cpu/nohz_full                   # 应包含 3
+   trace=/sys/kernel/tracing/instances/tick-preempt
+   mkdir "$trace" || exit 1                              # 独立实例，避免清空全局 trace
+   p1= p2=
+   cleanup() {
+       kill $p1 $p2 2>/dev/null || :
+       wait $p1 $p2 2>/dev/null || :
+       echo 0 > "$trace/events/timer/tick_stop/enable"
+       rmdir "$trace"
+   }
+   trap cleanup EXIT
+   echo 1 > "$trace/events/timer/tick_stop/enable"
+   taskset -c 3 sh -c 'while :; do :; done' & p1=$!        # 单个公平任务
+   sleep 3
+   taskset -c 3 sh -c 'while :; do :; done' & p2=$!        # 第二个公平任务
+   sleep 3
+   echo 0 > "$trace/tracing_on"
+   grep -E 'success=1|dependency=SCHED' "$trace/per_cpu/cpu3/trace" | tail
+   exit                                                  # EXIT trap 清理任务与实例
    ```
 
-   `tick_stop` 事件在停 tick 成功时输出 `success=1`，被某个依赖阻止时输出 `success=0` 和该依赖的名字（[`include/trace/events/timer.h:429-447`](../../linux/include/trace/events/timer.h#L429-L447)）。第二个任务入队后，调度器设置 `TICK_DEP_BIT_SCHED`，就能看到 `dependency=SCHED`。如果只有一个任务时也一直出现其他依赖（例如虚拟机中 TSC 被判定不稳定时的 `CLOCK_UNSTABLE`），tick 就始终停不下来。同时观察 `/proc/interrupts` 中 CPU 3 的 `LOC` 增速，可以对比 tick 停止与恢复时的差别。
+   预期单个不受 quota 限制的公平任务允许停 tick；第二个公平任务入队后设置 `TICK_DEP_BIT_SCHED`，可观察 `success=0 dependency=SCHED`。但如果全局掩码先命中了 `CLOCK_UNSTABLE` 等依赖，检查会提前返回，即使有两个任务也可能看不到 `SCHED`。默认带宽、perf、RCU 及其他 runnable 任务都会干扰实验，应结合依赖事件排查；`nohz_full=` 本身不把其他普通任务自动移出 CPU 3。同时观察 `LOC` 的增速可以粗略对比，不能把没有 `SCHED` 事件解释为无调度器依赖。
 
 5. **开启重调度延迟告警**：
 
@@ -986,23 +1071,23 @@ sequenceDiagram
    echo NO_LATENCY_WARN > /sys/kernel/debug/sched/features
    ```
 
-   在可抢占模型下很难触发这个告警；它更适合在 none / voluntary 内核中定位缺少 `cond_resched()` 的长循环。`latency_warn_once`（默认 1）控制每次启动只告警一次。
+   这只是开启诊断入口，不保证自然出现告警，不建议为演示而故意长时间关中断。它更适合在 none / voluntary 模型下定位缺少 `cond_resched()` 的长循环。只有立即请求置位后仍有 tick 到达，才会累计等待；默认还受 `latency_warn_once=1` 和日志限速限制。若实验前已启用 `LATENCY_WARN`，结束时应保留原状态，不要关闭。
 
 ## 小结
 
 - rq 时钟以 `sched_clock_cpu()` 为源，在同一个 rq 上单调。`update_rq_clock()` 同时推进 `clock`、`clock_task`、`clock_pelt`；`clock_update_flags` 配合加锁时的 pin 操作，保证"每次持锁先更新、再读取"，并能跳过紧邻的重复更新。本书配置中 `clock_task` 不扣除中断与 steal 时间。
-- `sched_tick()` 在硬中断中以 `HZ` 频率运行（RT 内核亦然）：采样频率、更新时钟、在 lazy 模型下升级惰性请求、调用调度类的 `task_tick()`，并顺带完成负载均值采样、perf 与工作队列检查、周期性负载均衡触发。
+- 周期 tick 开启时，`sched_tick()` 在硬中断中以 `HZ` 为目标频率运行（RT 内核亦然）：采样频率、更新时钟、在 lazy 模型下升级惰性请求、调用调度类的 `task_tick()`，并完成负载均值采样、perf 与工作队列检查、周期性负载均衡触发。它不在硬中断中直接切换任务。
 - hrtick 让调度类用单次高精度定时器预约精确的 `task_tick()`（`queued = 1`），间隔不少于 10 μs；`HRTICK` / `HRTICK_DL` 特性位默认关闭，默认情况下不生效。
-- 空闲 CPU 停 tick 后，负载均衡与 blocked 负载衰减交给 nohz idle 均衡。`nohz_full` CPU 停 tick 要求四个依赖掩码全为 0：调度器在 `nr_running` 变化时经 `sched_can_stop_tick()` 维护 `TICK_DEP_BIT_SCHED`，tick 停止期间由 housekeeping CPU 每秒执行一次 `sched_tick_remote()`。
+- 空闲 CPU 停 tick 后，负载均衡与 blocked 负载衰减交给 nohz idle 均衡。`nohz_full` CPU 停 tick 不仅要四个依赖掩码全为 0，还要通过下一事件检查；单任务也可能因 Deadline 或带宽约束而保留 tick。housekeeping CPU 约每秒执行一次精简的 `sched_tick_remote()`，而非重放完整的本地 tick。
 - 抢占模型决定哪些抢占点生效、惰性请求设置哪一位。`PREEMPT_DYNAMIC` 在 x86 上用内联 static call 直接改写 `preempt_schedule`、`irqentry_exit_cond_resched`、`cond_resched` 等调用点（`call`、NOP 或 `xorl`），切换时先全部打开再按需关闭，以避开所有抢占点同时失效的中间状态。
-- `PREEMPT_RT` 缩小的是不可抢占区间，与抢占模型正交；RT 内核只允许 full 与 lazy。本书配置默认为 full，可切换为 lazy。
-- 惰性请求只在返回用户态（或进入客户机）时被响应，否则由下一个 tick 升级为立即请求，宽限期不超过一个 tick。
+- `PREEMPT_RT` 缩小的是不可抢占区间，不是与 none / voluntary / full / lazy 并列的动态模式；RT 内核只允许 full 与 lazy。本书是非 RT 动态抢占内核，默认 lazy，四种模式均可选。
+- 惰性请求可在返回用户态（或进入客户机）时触发调度；否则下一次本地周期 tick 将其升级为立即请求，仍需等到安全点才能调度。一个 tick 是正常周期下的升级窗口，不是切换延迟的硬上界。
 
 ## 参考
 
 - [`Documentation/timers/no_hz.rst`](../../linux/Documentation/timers/no_hz.rst)：`NO_HZ_IDLE` 与 `NO_HZ_FULL` 的使用方法与限制。
 - [`Documentation/timers/highres.rst`](../../linux/Documentation/timers/highres.rst)：高精度定时器与 tick 模拟。
-- [`Documentation/admin-guide/kernel-parameters.txt`](../../linux/Documentation/admin-guide/kernel-parameters.txt)：`preempt=`（第 5200 行起）、`nohz_full=`（第 4316 行起）启动参数。
+- [`Documentation/admin-guide/kernel-parameters.txt:5200-5212`](../../linux/Documentation/admin-guide/kernel-parameters.txt#L5200-L5212)：`preempt=` 启动参数；[`Documentation/admin-guide/kernel-parameters.txt:4316-4327`](../../linux/Documentation/admin-guide/kernel-parameters.txt#L4316-L4327)：`nohz_full=` 启动参数。
 - [`Documentation/locking/preempt-locking.rst`](../../linux/Documentation/locking/preempt-locking.rst)：可抢占内核中的加锁规则。
 - [`Documentation/locking/locktypes.rst`](../../linux/Documentation/locking/locktypes.rst)：各类锁在 `PREEMPT_RT` 下的语义变化。
 - [`kernel/Kconfig.preempt`](../../linux/kernel/Kconfig.preempt)：各抢占模型、`PREEMPT_RT` 与 `PREEMPT_DYNAMIC` 的 Kconfig 说明。

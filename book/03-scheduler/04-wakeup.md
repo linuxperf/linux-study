@@ -179,7 +179,7 @@ LOAD CONDITION                           LOAD p->__state
 	} while (0)
 ```
 
-唤醒方的屏障是 `try_to_wake_up()` 获取 `pi_lock` 之后的 `smp_mb__after_spinlock()`。单独的加锁只有 acquire 语义，不能阻止"锁之前的写"与"锁之后的读"重排，所以必须补上这个屏障（7.3 节）。如果条件检查与唤醒已经被同一把锁串行化（例如 7.6 节 mutex 的 `wait_lock`），等待方可以改用不带屏障的 `__set_current_state()`。
+唤醒方的屏障是 `try_to_wake_up()` 获取 `pi_lock` 之后的 `smp_mb__after_spinlock()`。单独的加锁只有 acquire 语义，不能阻止"锁之前的写"与"锁之后的读"重排，所以必须补上这个屏障（7.3 节）。如果条件检查与唤醒已经被同一把锁串行化，等待方可以改用不带屏障的 `__set_current_state()`。completion 就是这样做的：`do_wait_for_common()` 在 `x->wait.lock` 保护下用 `__set_current_state()` 设置状态、检查 `x->done`（[`kernel/sched/completion.c:85-110`](../../linux/kernel/sched/completion.c#L85-L110)），`complete()` 在同一把锁下修改 `x->done` 并执行唤醒（[`kernel/sched/completion.c:21-31`](../../linux/kernel/sched/completion.c#L21-L31)）。注意 7.6 节的 mutex 虽然也在 `wait_lock` 下检查条件，但唤醒推迟到释放 `wait_lock` 之后经 `wake_q` 执行，所以等待方仍使用 `set_current_state()`。
 
 ### 状态写入的冲突
 
@@ -188,7 +188,7 @@ LOAD CONDITION                           LOAD p->__state
 - 与等待方循环结束时的 `__set_current_state(TASK_RUNNING)` 撞车：两边写的值相同，无害。
 - 与等待方下一轮循环的 `set_current_state(TASK_UNINTERRUPTIBLE)` 撞车，睡眠状态被覆盖成 `TASK_RUNNING`：等待方只是多绕一圈循环，由条件检查兜底。
 
-因此睡眠必须写成"循环 + 重新检查条件"的形式，并且要容忍**伪唤醒**（Spurious Wakeup）——被唤醒时条件不一定成立。少数状态（`__TASK_STOPPED`、`__TASK_TRACED`、`TASK_PARKED`、`TASK_DEAD`、`TASK_FROZEN`）不使用这种循环，不能容忍状态被覆盖，它们用 `set_special_state()` 在 `pi_lock` 保护下写状态，与 `try_to_wake_up()` 串行化：
+因此睡眠必须写成"循环 + 重新检查条件"的形式，并且要容忍**伪唤醒**（Spurious Wakeup）——被唤醒时条件不一定成立。少数**特殊状态**（Special State：`__TASK_STOPPED`、`__TASK_TRACED`、`TASK_PARKED`、`TASK_DEAD`、`TASK_FROZEN`，见 [`include/linux/sched.h:156-162`](../../linux/include/linux/sched.h#L156-L162) 的 `is_special_task_state()`）不使用这种循环，不能容忍状态被覆盖，必须在 `pi_lock` 保护下写状态，与 `try_to_wake_up()` 串行化。前四种通过 `set_special_state()` 写入；`TASK_FROZEN` 由冻结代码直接持 `pi_lock` 写入（[`kernel/freezer.c:75-79`](../../linux/kernel/freezer.c#L75-L79)，或经 `task_call_func()` 在 [`kernel/freezer.c:109-145`](../../linux/kernel/freezer.c#L109-L145) 中写入）。`set_special_state()` 的定义如下：
 
 [`include/linux/sched.h:258-267`](../../linux/include/linux/sched.h#L258-L267)（v6.18.60）
 
@@ -233,7 +233,7 @@ kernel_clone()                      kernel/fork.c:2573
 └── wake_up_new_task()              kernel/fork.c:2645  // 选 CPU、第一次入队
 ```
 
-`copy_process()` 在 `sched_fork()` 之后的任何一步失败，都会经 `sched_cancel_fork()`（[`kernel/fork.c:2483`](../../linux/kernel/fork.c#L2483)）撤销。
+`sched_fork()` 自身失败时直接跳到更早的清理标签（[`kernel/fork.c:2158-2160`](../../linux/kernel/fork.c#L2158-L2160)）；它成功之后，`copy_process()` 的任何一步失败都会经过 `sched_cancel_fork()`（[`kernel/fork.c:2482-2483`](../../linux/kernel/fork.c#L2482-L2483)）。该函数只调用 `scx_cancel_fork()` 撤销 sched_ext 的状态（[`kernel/sched/core.c:4797-4800`](../../linux/kernel/sched/core.c#L4797-L4800)），其余调度字段不需要专门撤销：任务此时还没有进入任何运行队列，随 `task_struct` 一起释放即可。
 
 ### sched_fork()：初始化与 TASK_NEW
 
@@ -395,7 +395,7 @@ wake_up() / wake_up_interruptible()  include/linux/wait.h:221-231
 wake_up_q(head)                      kernel/sched/core.c:1084  → wake_up_process()
 ```
 
-`try_to_wake_up()` 返回 1 表示这次调用确实唤醒了任务，返回 0 表示任务状态不匹配（通常是它已经在运行）。调用者会利用这个返回值，例如信号投递在唤醒失败时调用 `kick_process()`（[`kernel/sched/core.c:3476-3483`](../../linux/kernel/sched/core.c#L3476-L3483)），向正在其他 CPU 上运行的目标任务发送重调度 IPI，让它尽快进入内核处理信号。
+`try_to_wake_up()` 返回 1 表示这次唤醒生效，返回 0 表示任务状态不匹配（通常是它已经在运行）。"生效"不一定意味着任务被放回运行队列：唤醒落在 `saved_state` 上时同样返回 1（见下文"持 pi_lock 匹配状态"）。调用者会利用这个返回值，例如信号投递在唤醒失败时调用 `kick_process()`（[`kernel/sched/core.c:3476-3483`](../../linux/kernel/sched/core.c#L3476-L3483)），向正在其他 CPU 上运行的目标任务发送重调度 IPI，让它尽快进入内核处理信号。
 
 ### 等待队列
 
@@ -432,7 +432,7 @@ static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
 ```
 
 - `mode` 就是传给 `try_to_wake_up()` 的状态掩码，`wake_up()` 为 `TASK_NORMAL`，`wake_up_interruptible()` 为 `TASK_INTERRUPTIBLE`（[`include/linux/wait.h:221-231`](../../linux/include/linux/wait.h#L221-L231)）。
-- **排他等待**（`WQ_FLAG_EXCLUSIVE`）用于避免"惊群"：`wake_up()` 只唤醒 1 个排他等待者，`wake_up_all()` 传入 `nr_exclusive == 0`，唤醒全部。注意只有唤醒函数返回非零（真正唤醒了任务）才消耗名额；函数头注释（[`kernel/sched/wait.c:80-92`](../../linux/kernel/sched/wait.c#L80-L92)）说明，任务可能已经开始运行但状态还不是 `TASK_RUNNING`，此时 `try_to_wake_up()` 返回 0，遍历继续向后寻找。
+- **排他等待**（Exclusive Wait，`WQ_FLAG_EXCLUSIVE`）用于避免**惊群**（Thundering Herd）：`wake_up()` 唤醒排在前面的所有非排他等待者，再加 1 个排他等待者就停止遍历；`wake_up_all()` 传入 `nr_exclusive == 0`，唤醒全部。注意只有唤醒函数返回非零（真正唤醒了任务）才消耗名额；函数头注释（[`kernel/sched/wait.c:80-92`](../../linux/kernel/sched/wait.c#L80-L92)）说明，任务可能已经开始运行但状态还不是 `TASK_RUNNING`，此时 `try_to_wake_up()` 返回 0，遍历继续向后寻找。
 - `default_wake_function()`（[`kernel/sched/core.c:7273-7278`](../../linux/kernel/sched/core.c#L7273-L7278)）只允许 `WF_SYNC` 与 `WF_CURRENT_CPU` 两种唤醒标志从等待队列传入。
 
 ### wake_q：先登记、后唤醒
@@ -603,10 +603,13 @@ bool ttwu_state_match(struct task_struct *p, unsigned int state, int *success)
 
 `__task_state_match()`（[`kernel/sched/core.c:2236-2246`](../../linux/kernel/sched/core.c#L2236-L2246)）先比较 `__state`，命中返回 1；再比较 `saved_state`，命中返回 -1。后一种情况出现在两类场景：
 
-- **PREEMPT_RT 睡眠锁**（依赖 `CONFIG_PREEMPT_RT`）：`spinlock_t` 在 PREEMPT_RT 下是基于 rt_mutex 的可睡眠锁。任务设置睡眠状态之后、调用 `schedule()` 之前若阻塞在这种锁上，原状态被暂存到 `saved_state`，`__state` 改为 `TASK_RTLOCK_WAIT`（[`include/linux/sched.h:294-303`](../../linux/include/linux/sched.h#L294-L303)）。
-- **冻结**：可冻结的任务被冻结时，原状态同样暂存在 `saved_state` 中。
+- **PREEMPT_RT 睡眠锁**（依赖 `CONFIG_PREEMPT_RT`，本书配置未开启）：`spinlock_t` 在 PREEMPT_RT 下是基于 rt_mutex 的可睡眠锁。任务设置睡眠状态之后、调用 `schedule()` 之前若阻塞在这种锁上，原状态被暂存到 `saved_state`，`__state` 改为 `TASK_RTLOCK_WAIT`（[`include/linux/sched.h:294-303`](../../linux/include/linux/sched.h#L294-L303)）。
+- **冻结**（依赖 `CONFIG_FREEZER`，本书配置开启）：以 `TASK_FREEZABLE` 睡眠的任务被冻结时，`__set_task_frozen()` 把原状态暂存到 `saved_state`，`__state` 改为 `TASK_FROZEN`（[`kernel/freezer.c:142-143`](../../linux/kernel/freezer.c#L142-L143)）。
 
-此时任务真正等待的是锁释放或解冻，普通唤醒不能把它从那里拉出来，但也不能丢失。于是只把 `saved_state` 改为 `TASK_RUNNING` 并报告成功：任务拿到锁或解冻后从 `saved_state` 恢复状态，会发现自己"已经被唤醒过"。
+此时任务真正等待的是锁释放或解冻，普通唤醒不能把它从那里拉出来，但也不能丢失。于是只把 `saved_state` 改为 `TASK_RUNNING` 并报告成功，任务本身不入队。之后这次唤醒分别以如下方式兑现：
+
+- RT 锁：任务拿到锁后，`current_restore_rtlock_saved_state()` 把 `saved_state` 写回 `__state`（[`include/linux/sched.h:305-314`](../../linux/include/linux/sched.h#L305-L314)）。写回的已是 `TASK_RUNNING`，随后的 `schedule()` 不会再让它睡下，等待循环重新检查条件。
+- 冻结：解冻方 `__thaw_task()` 先尝试把 `saved_state` 恢复为 `__state`；发现它已是 `TASK_RUNNING` 时不做恢复，改为以 `TASK_FROZEN` 真正唤醒任务（[`kernel/freezer.c:190-208`](../../linux/kernel/freezer.c#L190-L208)）。若冻结期间没有普通唤醒，任务则恢复原来的睡眠状态，继续睡眠。
 
 匹配成功后，`smp_rmb()` 保证先读 `__state`、再读 `on_rq`。被省略的注释（[`kernel/sched/core.c:4204-4225`](../../linux/kernel/sched/core.c#L4204-L4225)）给出了反例：任务被前一次唤醒放回队列、切入运行后又设置了睡眠状态；如果读 `on_rq` 被提前到读 `__state` 之前，唤醒者可能看到前一次唤醒之前那个过时的 `on_rq == 0`，误以为任务已出队，随后卡在等待 `on_cpu` 清零的自旋中。
 
@@ -683,11 +686,13 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 		smp_cond_load_acquire(&p->on_cpu, !VAL);
 ```
 
-走到这里说明 `on_rq == 0`，任务确实已经出队。但"已出队"不等于"已切换完"：3.2 节中 `prev` 在 `__schedule()` 早期就出队了，`on_cpu` 却要到 `finish_task()` 才清零。这段窗口里任务仍在旧 CPU 上执行调度代码、使用着自己的内核栈，绝不能让它同时在别的 CPU 上运行。
+走到这里说明 `on_rq == 0`，任务确实已经出队：要么一开始就读到 `on_rq == 0`，要么 `ttwu_runnable()` 持 rq 锁复查时发现任务刚刚出队。但"已出队"不等于"已切换完"：3.2 节中 `prev` 在 `__schedule()` 早期就出队了，`on_cpu` 却要到 `finish_task()` 才清零。这段窗口里任务仍在旧 CPU 上执行调度代码、使用着自己的内核栈，绝不能让它同时在别的 CPU 上运行。
 
-- `smp_acquire__after_ctrl_dep()` 把前面"读到 `on_rq == 0` 才继续"的控制依赖升级为 acquire 语义，与 `__block_task()` 中的 `smp_store_release(&p->on_rq, 0)` 配对（3.2 节）。此后可以确信 `__schedule()` 已经处理完 `prev->__state`，不会再读它。
+- `smp_acquire__after_ctrl_dep()` 把前面"读到 `on_rq == 0` 才继续"的控制依赖升级为 acquire 语义，与 `__block_task()` 中的 `smp_store_release(&p->on_rq, 0)` 配对（[`kernel/sched/sched.h:2769-2810`](../../linux/kernel/sched/sched.h#L2769-L2810)，3.2 节）。它提供两点保证：
+  - 出队一方基于 `prev->__state` 做出的阻塞决定已经完成，此后改写状态不会影响它。`finish_task_switch()` 仍会在清零 `on_cpu` 之前读一次 `prev->__state`，但只用于判断 `TASK_DEAD`（[`kernel/sched/core.c:5193-5204`](../../linux/kernel/sched/core.c#L5193-L5204)），`TASK_WAKING` 不影响这一判断。
+  - 后面对 `on_cpu` 的读取不会被提前到读 `on_rq` 之前。任务必须在 CPU 上（`on_cpu == 1`）才能让自己出队；如果先读到切入之前过时的 `on_cpu == 0`，再读到出队之后的 `on_rq == 0`，唤醒者就会误以为切换已经完成（[`kernel/sched/core.c:4230-4252`](../../linux/kernel/sched/core.c#L4230-L4252)）。
 - **`TASK_WAKING`** 表示"唤醒已被认领，任务正在入队途中"。有了这个标记，后续的入队可以在不持 `pi_lock` 的情况下完成（例如交给远程 CPU 的唤醒队列），而其他唤醒者看到 `TASK_WAKING` 时状态匹配会失败，不会重复处理。
-- **`on_cpu` 仍为 1**：任务正在某个 CPU 上被切换出去。与其原地自旋，不如把唤醒请求挂到**那个 CPU** 的唤醒队列上（`ttwu_queue_wakelist(p, task_cpu(p), ...)`），让唤醒者立即返回。这是安全的：那个 CPU 在关中断状态下执行 `__schedule()`，IPI 只能在切换完成、`on_cpu` 清零并开中断之后才被处理（[`kernel/sched/core.c:4263-4281`](../../linux/kernel/sched/core.c#L4263-L4281) 的注释）。注意这条路径直接在原 CPU 上唤醒，**不经过选核**。
+- **`on_cpu` 仍为 1**：任务正在某个 CPU 上被切换出去。与其原地自旋，不如把唤醒请求挂到**那个 CPU** 的唤醒队列上（`ttwu_queue_wakelist(p, task_cpu(p), ...)`），让唤醒者立即返回。这是安全的：那个 CPU 在关中断状态下执行 `__schedule()`，IPI 只能在切换完成、`on_cpu` 清零并开中断之后才被处理（[`kernel/sched/core.c:4263-4281`](../../linux/kernel/sched/core.c#L4263-L4281) 的注释）。注意这条路径直接在原 CPU 上唤醒，**不经过选核**。这里用 `smp_load_acquire()` 读 `on_cpu`，保证读到 1 时，随后读到的 `task_cpu(p)` 正是任务正在其上被切换出去的那个 CPU，而不是更早的旧值（同一段注释）。
 - 不满足唤醒队列的使用条件时，用 `smp_cond_load_acquire()` 自旋等待 `on_cpu` 变为 0。它与 `finish_task()` 中的 `smp_store_release(&prev->on_cpu, 0)`（[`kernel/sched/core.c:4968-4982`](../../linux/kernel/sched/core.c#L4968-L4982)）配对，保证任务在旧 CPU 上的所有操作都先于它在新 CPU 上的执行。[`kernel/sched/core.c:4039-4120`](../../linux/kernel/sched/core.c#L4039-L4120) 的长注释称之为**程序序**（Program Order）保证：迁移靠 rq 锁的释放 / 获取链提供这一保证，睡眠后的唤醒则没有锁链可用，只能靠 `on_cpu` 的 release / acquire。
 
 ### 选核、迁移与入队
@@ -779,7 +784,7 @@ int select_task_rq(struct task_struct *p, int cpu, int *wake_flags)
 
 - **只有能选择时才询问调度类**。任务只能在一个 CPU 上运行（绑核任务、per-CPU 内核线程），或处于禁止迁移状态（此时 `cpus_ptr` 临时指向只含当前 CPU 的掩码，3.1 节）时，直接取掩码中的那个 CPU，完全绕过调度类的选核逻辑。
 - 调度类回调收到三个参数：任务、起点 CPU（唤醒时为 `p->wake_cpu`，fork 时为 `sched_cgroup_fork()` 暂定的 CPU）、唤醒标志。它可以按自己的策略返回任意 CPU；各调度类的选核策略不在本节讨论。
-- **合法性由核心层统一兜底**。`is_cpu_allowed()`（[`kernel/sched/core.c:2435-2459`](../../linux/kernel/sched/core.c#L2435-L2459)）要求 CPU 在任务的掩码中；普通用户任务还要求 CPU 处于 active 状态，per-CPU 内核线程与禁止迁移的任务只要求 online。不合法时由 `select_fallback_rq()`（[`kernel/sched/core.c:3508-3577`](../../linux/kernel/sched/core.c#L3508-L3577)）重选：先在同一 NUMA 节点中找允许且可用的 CPU，再在整个 `cpus_ptr` 中找；仍找不到就逐级放宽亲和性（先放宽到 cpuset 允许的范围，再放宽到所有可能的 CPU），并打印 "no longer affine to cpu" 提示。
+- **合法性由核心层统一兜底**。`is_cpu_allowed()`（[`kernel/sched/core.c:2435-2459`](../../linux/kernel/sched/core.c#L2435-L2459)）要求 CPU 在任务的掩码中，此外：禁止迁移的任务与 per-CPU 内核线程只要求 CPU online；非内核线程要求 CPU 处于 active 状态；其他内核线程要求 CPU online 且不处于下线过程中（`cpu_dying()`）。不合法时由 `select_fallback_rq()`（[`kernel/sched/core.c:3508-3577`](../../linux/kernel/sched/core.c#L3508-L3577)）重选：先在同一 NUMA 节点中找允许且可用的 CPU，再在整个 `cpus_ptr` 中找；仍找不到就逐级放宽亲和性（先放宽到 cpuset 允许的范围，再放宽到所有可能的 CPU），并打印 "no longer affine to cpu" 提示。
 
 源码注释点明了这样分工的好处：调度类的回调可以简单地返回 `task_cpu(p)`，不必关心 CPU 热插拔和亲和性这类通用约束。
 
@@ -821,7 +826,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 }
 ```
 
-- 第一条检查表达了本节的核心约束：**不能对已阻塞的任务调用 `set_task_cpu()`**，除非它处于 `TASK_WAKING`，即已被某个唤醒者认领。睡眠任务的放置只能由 `try_to_wake_up()` 决定。
+- 第一条检查表达了本节的核心约束：**不能对已经阻塞出队的任务调用 `set_task_cpu()`**。允许的只有三种情形：状态为 `TASK_RUNNING`；状态为 `TASK_WAKING`，即已被某个唤醒者认领；任务仍在运行队列上（例如处于延迟出队中的睡眠任务）。睡眠任务的放置只能由 `try_to_wake_up()` 决定。
 - 被省略的 lockdep 检查要求调用者持有 `p->pi_lock`（唤醒中的任务）或 `task_rq(p)` 的锁（可运行任务），二者之一即可"钉住"任务所在的 CPU。
 - CPU 真正改变时调用调度类的 `migrate_task_rq()`，让调度类把任务在旧 CPU 上的记账转走。由于唤醒者并不持有旧 rq 的锁，调度类在这个回调中只能做不依赖旧 rq 锁的操作（3.8 节"迁移的异步移除"就是一例）。随后累加迁移次数，并通知 rseq、mm_cid 与 perf。
 
@@ -904,7 +909,7 @@ SCHED_FEAT(TTWU_QUEUE, true)
 #endif
 ```
 
-该特性在未开启 `CONFIG_PREEMPT_RT` 时默认开启；开启 `CONFIG_PREEMPT_RT` 时默认关闭，此时所有唤醒都由唤醒者直接完成入队。运行时可以通过 `/sys/kernel/debug/sched/features` 切换。
+该特性在未开启 `CONFIG_PREEMPT_RT` 时默认开启；开启 `CONFIG_PREEMPT_RT` 时默认关闭，此时所有唤醒都由唤醒者直接完成入队。本书配置未开启 `CONFIG_PREEMPT_RT`，因此默认开启。运行时可以通过 `/sys/kernel/debug/sched/features` 切换（需要 `CONFIG_DEBUG_FS`，本书配置开启）。
 
 整条路径横跨两个 CPU：
 
@@ -970,7 +975,7 @@ static inline bool ttwu_queue_cond(struct task_struct *p, int cpu)
 排除 CPU 热插拔过程中和亲和性不允许的情形后，满足以下任一条件就使用唤醒队列：
 
 - **唤醒者与目标 CPU 不共享 LLC**：避免跨缓存域访问远程运行队列。`cpus_share_cache()`（[`kernel/sched/core.c:3895-3901`](../../linux/kernel/sched/core.c#L3895-L3901)）比较两个 CPU 的 `sd_llc_id`，即各自所在 LLC 调度域的标识（3.9 节）。
-- **目标 CPU 空闲**（`nr_running == 0`）：把入队工作卸载给反正无事可做的目标 CPU，忙碌的唤醒者可以更快返回。被省略的注释（[`kernel/sched/core.c:3947-3957`](../../linux/kernel/sched/core.c#L3947-L3957)）指出，"任务正在切换出去、且是目标 CPU 上唯一的任务"也属于这种情况——被唤醒者此时已出队，不再计入 `nr_running`。前文 `on_cpu` 仍为 1 时的委托能否成功，就取决于这一条。
+- **目标 CPU 空闲**（`nr_running == 0`）：把入队工作卸载给反正无事可做的目标 CPU，忙碌的唤醒者可以更快返回。被省略的注释（[`kernel/sched/core.c:3947-3957`](../../linux/kernel/sched/core.c#L3947-L3957)）指出，"任务正在切换出去、且是目标 CPU 上唯一的任务"也属于这种情况——被唤醒者此时已出队，不再计入 `nr_running`。前文 `on_cpu` 仍为 1 时的委托以任务所在的 CPU 为目标：若该 CPU 与唤醒者不共享 LLC，由上一条直接放行；若共享 LLC，能否委托就取决于这一条——那个 CPU 上没有其他可运行任务时才委托，否则唤醒者原地自旋，等待 `on_cpu` 清零。
 
 本地唤醒，以及目标 CPU 与唤醒者共享 LLC 且正忙时，不使用唤醒队列。外层的 `ttwu_queue_wakelist()`（[`kernel/sched/core.c:3964-3973`](../../linux/kernel/sched/core.c#L3964-L3973)）还要求 `TTWU_QUEUE` 特性开启，并在投递前调用一次 `sched_clock_cpu(cpu)` 同步目标 CPU 的调度时钟。
 
@@ -1194,18 +1199,73 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 从 `sched_waking` 跟踪点到被唤醒任务真正在 CPU 上运行，延迟由几部分组成：
 
 1. 唤醒路径本身，可能包括在 `on_cpu` 上的自旋；
-2. 走唤醒队列时 IPI 的投递，以及目标 CPU 关中断区段造成的推迟；
+2. 跨核唤醒时 IPI 的投递（唤醒队列的跨核调用 IPI，或直接入队后唤醒抢占发出的重调度 IPI），以及目标 CPU 关中断区段造成的推迟；
 3. 目标 CPU 从深度空闲状态退出的时间；
 4. 在运行队列中等待被选中的时间，取决于调度类的策略和 `wakeup_preempt()` 的判断；
 5. 已请求重调度时，等到下一个抢占点的时间，取决于抢占模型（3.5 节）。
 
 下面的实验可以分别观察其中几项。
 
+## 可观测性
+
+本节的机制可以从跟踪点、/proc 与 /sys 接口、动态探针三个层面观察。下文列出的入口在本书配置下均可用，例外处单独注明；具体操作见"动手实验"。
+
+### 跟踪点
+
+唤醒路径上的三个调度器跟踪点共用同一个事件类 `sched_wakeup_template`，字段为 `comm`、`pid`、`prio`、`target_cpu`，其中 `target_cpu` 取触发时的 `task_cpu(p)`（[`include/trace/events/sched.h:141-164`](../../linux/include/trace/events/sched.h#L141-L164)）。
+
+| 跟踪点 | 触发位置 | 观察内容 |
+|---|---|---|
+| `sched:sched_waking` | `try_to_wake_up()` 状态匹配成功之后（[`kernel/sched/core.c:4186`](../../linux/kernel/sched/core.c#L4186)、[`kernel/sched/core.c:4202`](../../linux/kernel/sched/core.c#L4202)） | 保证在唤醒者上下文中触发（[`include/trace/events/sched.h:166-172`](../../linux/include/trace/events/sched.h#L166-L172)）。此时尚未选核，`target_cpu` 是任务上次所在的 CPU。状态不匹配、或只匹配到 `saved_state` 时不触发 |
+| `sched:sched_wakeup` | `ttwu_do_wakeup()`（[`kernel/sched/core.c:3698`](../../linux/kernel/sched/core.c#L3698)） | `__state` 刚被写成 `TASK_RUNNING`，`target_cpu` 是最终所在的 CPU。`ttwu_runnable()` 与唤醒当前任务的路径也会触发；经唤醒队列时在目标 CPU 的 `sched_ttwu_pending()` 中触发，因此不一定在唤醒者上下文中（[`include/trace/events/sched.h:174-180`](../../linux/include/trace/events/sched.h#L174-L180)） |
+| `sched:sched_wakeup_new` | `wake_up_new_task()` 入队之后（[`kernel/sched/core.c:4855`](../../linux/kernel/sched/core.c#L4855)） | 在父进程上下文中触发，`target_cpu` 为 fork 均衡选出的 CPU |
+| `sched:sched_migrate_task` | `set_task_cpu()`（[`kernel/sched/core.c:3342`](../../linux/kernel/sched/core.c#L3342)） | `orig_cpu` 与 `dest_cpu`（[`include/trace/events/sched.h:272-297`](../../linux/include/trace/events/sched.h#L272-L297)）。唤醒路径只在选出的 CPU 与原 CPU 不同时调用 `set_task_cpu()`，每次唤醒迁移对应一条；负载均衡、`sched_exec()` 等迁移同样触发，可结合同一 `pid` 的 `sched_waking` 区分。fork 放置用的是 `__set_task_cpu()`，不触发此事件 |
+| `sched:sched_wake_idle_without_ipi` | `call_function_single_prep_ipi()`（[`kernel/sched/core.c:3847`](../../linux/kernel/sched/core.c#L3847)）、`__resched_curr()`（[`kernel/sched/core.c:1145`](../../linux/kernel/sched/core.c#L1145)）等 | 目标 CPU 的 idle 线程正在轮询，只设置 `TIF_NEED_RESCHED`、省掉一次 IPI（[`include/trace/events/sched.h:812-827`](../../linux/include/trace/events/sched.h#L812-L827)）。前者对应唤醒队列等单播跨核调用的投递，后者对应直接入队后 `wakeup_preempt()` 发出的重调度请求 |
+| `csd:csd_queue_cpu` | `__smp_call_single_queue()`（[`kernel/smp.c:389-398`](../../linux/kernel/smp.c#L389-L398)） | 每向某个 CPU 的跨核调用队列挂入一个节点触发一次（[`include/trace/events/csd.h:10-35`](../../linux/include/trace/events/csd.h#L10-L35)）。唤醒队列节点的 `func` 显示为 `sched_ttwu_pending`，不论随后是否真的发送 IPI |
+| `csd:csd_function_entry` / `csd_function_exit` | `csd_do_func()`（[`kernel/smp.c:132-138`](../../linux/kernel/smp.c#L132-L138)），唤醒队列在 [`kernel/smp.c:593`](../../linux/kernel/smp.c#L593) 处调用 | `func=sched_ttwu_pending` 的一对记录之间，就是目标 CPU 批量完成入队的区间（[`include/trace/events/csd.h:59-67`](../../linux/include/trace/events/csd.h#L59-L67)） |
+| `ipi:ipi_send_cpu` | `send_call_function_single_ipi()`（[`kernel/smp.c:117-121`](../../linux/kernel/smp.c#L117-L121)） | 真正发送单播跨核调用 IPI 时触发（[`include/trace/events/ipi.h:10-30`](../../linux/include/trace/events/ipi.h#L10-L30)），`callsite` 指出发起者；目标在轮询时不触发 |
+| `irq_vectors:call_function_single_entry` / `_exit` | `sysvec_call_function_single()`（[`arch/x86/kernel/smp.c:269-272`](../../linux/arch/x86/kernel/smp.c#L269-L272)） | 目标 CPU 处理单播跨核调用 IPI 的区间，唤醒队列在其中处理 |
+| `irq_vectors:reschedule_entry` / `_exit` | `sysvec_reschedule_ipi()`（[`arch/x86/kernel/smp.c:251-254`](../../linux/arch/x86/kernel/smp.c#L251-L254)） | 重调度 IPI 的处理区间。直接入队远程 rq 后的唤醒抢占、`kick_process()` 都经由它 |
+| `sched:sched_stat_sleep` / `sched_stat_blocked` / `sched_stat_iowait` | `__update_stats_enqueue_sleeper()`（[`kernel/sched/stats.c:48-99`](../../linux/kernel/sched/stats.c#L48-L99)），由公平、实时、Deadline 类在带 `ENQUEUE_WAKEUP` 入队时调用 | `delay` 为本次睡眠时长（ns），前两者分别对应可中断与不可中断睡眠，`sched_stat_iowait` 是后者中 `in_iowait` 的部分（[`include/trace/events/sched.h:530-547`](../../linux/include/trace/events/sched.h#L530-L547)）。依赖 `CONFIG_SCHEDSTATS`（本书配置开启），且只在运行时开启 schedstats 后触发 |
+
+等待方一侧的状态写入还有一个裸跟踪点 `sched_set_state_tp(tsk, state)`（[`include/trace/events/sched.h:890-893`](../../linux/include/trace/events/sched.h#L890-L893)）。`set_current_state()`、`__set_current_state()`、`set_special_state()` 都经 `trace_set_current_state()`（[`include/linux/sched.h:195-199`](../../linux/include/linux/sched.h#L195-L199)）调用它，`TP_CONDITION` 限定只在任务于"运行 / 非运行"之间切换时触发。唤醒方在 `ttwu_do_wakeup()` 中用 `WRITE_ONCE()` 写入 `TASK_RUNNING`，不经过它。与 3.2 节的裸跟踪点一样，它不导出到 tracefs，只能由内核模块或 BPF raw tracepoint 挂接。
+
+### /proc 与 /sys 接口
+
+| 接口 | 内容 | 源码中的来源 |
+|---|---|---|
+| `/proc/<pid>/sched` 的 `nr_wakeups`、`nr_wakeups_sync`、`nr_wakeups_migrate`、`nr_wakeups_local`、`nr_wakeups_remote` | 该任务被成功唤醒的次数及分类；local / remote 是相对唤醒者所在 CPU 而言的 | `ttwu_stat()` 递增（[`kernel/sched/core.c:3655-3690`](../../linux/kernel/sched/core.c#L3655-L3690)），`proc_sched_show_task()` 输出（[`kernel/sched/debug.c:1196-1200`](../../linux/kernel/sched/debug.c#L1196-L1200)）；依赖 `CONFIG_SCHEDSTATS` 并需运行时开启。紧随其后的 `nr_wakeups_affine` 等由公平类维护（3.12 节） |
+| `/proc/<pid>/sched` 的 `se.nr_migrations` | 任务更换 CPU 的累计次数，包括唤醒迁移、负载均衡、exec 均衡等 | 在 `set_task_cpu()` 中递增（[`kernel/sched/core.c:3347`](../../linux/kernel/sched/core.c#L3347)），[`kernel/sched/debug.c:1172`](../../linux/kernel/sched/debug.c#L1172) 输出；不受 schedstats 开关影响 |
+| `/proc/schedstat` 的 `cpuN` 行第 5、6 个数 | `ttwu_count`、`ttwu_local`：本 CPU 作为唤醒者发起的成功唤醒数，其中被唤醒者落在本 CPU 上的次数 | `ttwu_stat()` 递增，`show_schedstat()` 输出（[`kernel/sched/stats.c:124-130`](../../linux/kernel/sched/stats.c#L124-L130)）。`linux/Documentation/scheduler/sched-stats.rst` 把第 5 项描述为"`try_to_wake_up()` 被调用的次数"，实际只在唤醒成功时递增 |
+| `/proc/schedstat` 的 `domainN` 行第 43、44、45 个数（不计域名与 CPU 掩码） | `ttwu_wake_remote`：被唤醒者落在其他 CPU 上、且该域是包含目标 CPU 的最低一级域的次数；`ttwu_move_affine`：公平类唤醒亲和选中唤醒者一侧作为搜索起点的次数；`ttwu_move_balance` | 第一项在 `ttwu_stat()` 中递增（[`kernel/sched/core.c:3673-3679`](../../linux/kernel/sched/core.c#L3673-L3679)），第二项在 [`kernel/sched/fair.c:7586`](../../linux/kernel/sched/fair.c#L7586)，输出见 [`kernel/sched/stats.c:155-161`](../../linux/kernel/sched/stats.c#L155-L161)。v6.18.60 中已没有代码递增第三项，恒为 0 |
+| `/sys/kernel/debug/sched/debug` 中每个 CPU 的 `.nr_uninterruptible`、`.avg_idle`、`.max_idle_balance_cost`、`.ttwu_count`、`.ttwu_local` | 对应同名的 rq 字段。单个 CPU 的 `.nr_uninterruptible` 可能显示为负数：任务在一个 CPU 上睡下、在另一个 CPU 上被唤醒，只有各 CPU 之和有意义 | `print_cpu()`（[`kernel/sched/debug.c:954-976`](../../linux/kernel/sched/debug.c#L954-L976)）；后两项只在开启 schedstats 时输出 |
+| `/proc/loadavg`、`/proc/stat` 的 `procs_blocked` | 负载均值把各 CPU 的 `nr_uninterruptible` 计入活动任务数（[`kernel/sched/loadavg.c:80-93`](../../linux/kernel/sched/loadavg.c#L80-L93)）；`procs_blocked` 是各 CPU `nr_iowait` 之和 | `nr_iowait()`（[`kernel/sched/core.c:5448-5456`](../../linux/kernel/sched/core.c#L5448-L5456)）、[`fs/proc/stat.c:173-183`](../../linux/fs/proc/stat.c#L173-L183)。两个计数都在 `__block_task()` 中增加、在 `ttwu_do_activate()` 中减少；发生唤醒迁移时，`nr_iowait` 提前在 `try_to_wake_up()` 中减少 |
+| `/proc/interrupts` 的 `CAL`、`RES` 行 | 各 CPU 收到的跨核调用 IPI（包括唤醒队列）与重调度 IPI 数 | `irq_call_count` 在 `sysvec_call_function_single()` 等处递增（[`arch/x86/kernel/smp.c:270`](../../linux/arch/x86/kernel/smp.c#L270)），`irq_resched_count` 在 `sysvec_reschedule_ipi()` 中递增（[`arch/x86/kernel/smp.c:252`](../../linux/arch/x86/kernel/smp.c#L252)），输出见 [`arch/x86/kernel/irq.c:106-113`](../../linux/arch/x86/kernel/irq.c#L106-L113) |
+| `/proc/<pid>/status` 的 `State`、`/proc/<pid>/stat` 的状态字母 | `TASK_WAKING` 与 `TASK_NEW` 不在 `TASK_REPORT` 掩码中，在用户态看来都是 `R (running)` | `__task_state_index()`（[`include/linux/sched.h:1697-1717`](../../linux/include/linux/sched.h#L1697-L1717)）、[`fs/proc/array.c:126-146`](../../linux/fs/proc/array.c#L126-L146) |
+| `/sys/kernel/debug/sched/features` 中的 `TTWU_QUEUE` | 是否使用唤醒队列，可写入 `TTWU_QUEUE` / `NO_TTWU_QUEUE` 切换 | [`kernel/sched/features.h:74-83`](../../linux/kernel/sched/features.h#L74-L83)，文件在 [`kernel/sched/debug.c:501`](../../linux/kernel/sched/debug.c#L501) 创建 |
+
+上表中标明"需运行时开启"的计数，由 `sysctl kernel.sched_schedstats=1` 或启动参数 `schedstats=enable` 打开，默认关闭（[`kernel/sched/core.c:4574-4611`](../../linux/kernel/sched/core.c#L4574-L4611)）。
+
+### 动态探针
+
+- 适合挂探针的全局函数：`try_to_wake_up()`（kretprobe 的返回值即 `success`）、`wake_up_new_task()`、`sched_fork()`、`sched_cgroup_fork()`、`sched_exec()`、`set_task_cpu()`、`activate_task()`、`wakeup_preempt()`、`sched_ttwu_pending()`（在目标 CPU 的 IPI 处理、idle 循环或 stopper 线程中执行）、`call_function_single_prep_ipi()`（返回 false 表示省去了 IPI）、`__smp_call_single_queue()`、`wake_q_add()`、`wake_up_q()`、`default_wake_function()`、`kick_process()`。调度类的回调（如 `select_task_rq_fair()`）虽然是 static 函数，但通过函数指针调用，有独立符号。
+- 没有独立符号、无法挂探针的：`ttwu_state_match()`、`__task_state_match()`（`__always_inline`），`ttwu_do_wakeup()`、`select_task_rq()`、`psi_ttwu_dequeue()`（`static inline`），`__set_task_cpu()`（`kernel/sched/sched.h` 中的 `static inline`）。观察它们的效果应改用上面的跟踪点。
+- `ttwu_runnable()`、`ttwu_do_activate()`、`ttwu_queue()`、`ttwu_queue_wakelist()`、`ttwu_stat()`、`select_fallback_rq()` 等 static 函数可能被内联，或带上 `.isra.0` 之类的编译器后缀，挂探针前先在 `/sys/kernel/tracing/available_filter_functions` 中确认。
+- 本书配置未开启 `CONFIG_DEBUG_INFO_BTF`，bpftrace 的 fentry / fexit 探针不可用，应使用 kprobe / kretprobe（`CONFIG_KPROBE_EVENTS=y`）。
+
+### 调试选项
+
+- `CONFIG_SCHEDSTATS`（开启）：编译进 `ttwu_stat()` 的各项计数与 `sched_stat_*` 跟踪点，运行时开关见上文。
+- `CONFIG_PROVE_LOCKING`（未开启）：开启后 lockdep 会检查 `select_task_rq()` 要求的 `p->pi_lock`、`ttwu_do_activate()` 要求的 rq 锁，以及 `set_task_cpu()` 中"持有 `pi_lock` 或 `task_rq(p)` 的锁二者之一"的约束（[`kernel/sched/core.c:3321-3334`](../../linux/kernel/sched/core.c#L3321-L3334)，依赖 `CONFIG_LOCKDEP`）。
+- `CONFIG_DEBUG_ATOMIC_SLEEP`（未开启）：开启后 `set_current_state()` 传入特殊状态、或 `set_special_state()` 传入普通状态时告警，并把设置状态的位置记入 `task_state_change`，供"do not call blocking ops when !TASK_RUNNING"一类报告引用（[`include/linux/sched.h:164-193`](../../linux/include/linux/sched.h#L164-L193)）。
+- `CONFIG_DEBUG_PREEMPT`（未开启）：开启后 `ttwu_state_match()` 检查 `TASK_RTLOCK_WAIT` 不与其他状态位混用（[`kernel/sched/core.c:4012-4015`](../../linux/kernel/sched/core.c#L4012-L4015)）。
+- 与配置无关、始终生效的 `WARN_ON_ONCE`：`set_task_cpu()` 对阻塞任务、离线 CPU、禁止迁移任务的检查（[`kernel/sched/core.c:3310-3340`](../../linux/kernel/sched/core.c#L3310-L3340)），`sched_ttwu_pending()` 对 `on_cpu` 与 `task_cpu(p)` 的检查（[`kernel/sched/core.c:3815-3819`](../../linux/kernel/sched/core.c#L3815-L3819)），以及唤醒当前任务时对 `sched_delayed` 的检查（[`kernel/sched/core.c:4182`](../../linux/kernel/sched/core.c#L4182)）。触发时在内核日志中留下带调用栈的 `WARNING`。
+
 ## 动手实验
 
 以下实验在 **dev 虚拟机**中进行，需要 **root 权限**。`perf bench sched pipe` 让两个进程通过管道来回传递数据，可以稳定地产生大量唤醒，用作负载。
 
-1. 区分唤醒在哪里完成。`sched_waking` 在唤醒者一侧触发，`sched_wakeup` 在 `ttwu_do_wakeup()` 中触发，二者的 CPU 不同，说明入队是在目标 CPU 上经唤醒队列完成的：
+1. 区分唤醒在哪里完成。`sched_waking` 总在唤醒者一侧触发，`sched_wakeup` 在 `ttwu_do_wakeup()` 中触发。二者的 CPU 不同，说明入队是在目标 CPU 上经唤醒队列完成的；二者相同时，再按 `sched_wakeup` 的 `target_cpu` 区分被唤醒者是否落在唤醒者所在的 CPU 上：
 
    ```bash
    # 虚拟机，root；另开一个终端运行 perf bench sched pipe -l 1000000
@@ -1216,14 +1276,16 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
        if ($w != cpu) {
            @path["wake list: activated on target CPU"] = count();
        } else if (args.target_cpu == cpu) {
-           @path["local: wakee stays on waker CPU"] = count();
+           @path["local: wakee on waker CPU"] = count();
        } else {
-           @path["direct: waker locked remote rq"] = count();
+           @path["remote rq locked by waker"] = count();
        }
        delete(@wcpu[args.pid]);
    }
    interval:s:10 { exit(); }'
    ```
+
+   最后一类包括两种情形：唤醒者直接锁住目标 rq 入队（`ttwu_queue()`）；任务仍在远程运行队列上，由 `ttwu_runnable()` 锁住其 rq 把状态改回 `TASK_RUNNING`。
 
    然后关闭 `TTWU_QUEUE` 重复测量，"wake list" 一项应基本消失；测完恢复原值。若内核开启了 `CONFIG_PREEMPT_RT`，该特性默认就是关闭的，可反过来打开它对比：
 
@@ -1234,15 +1296,18 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
    echo TTWU_QUEUE > /sys/kernel/debug/sched/features                 # 开启
    ```
 
-2. 统计 IPI 与免 IPI 唤醒。`sched_wake_idle_without_ipi` 在目标 CPU 正在轮询、省去 IPI 时触发；`call_function_single_entry` 是 x86 上跨核单播调用 IPI 的入口（也包括唤醒以外的跨核调用）。对比两个进程分散运行与限定在同一个 CPU 上的差别：
+2. 统计 IPI 与免 IPI 唤醒。走唤醒队列时，目标 CPU 收到的是单播跨核调用 IPI（`call_function_single_entry`，也包括唤醒以外的跨核调用）；唤醒者直接入队远程 rq 后，若需要抢占，`resched_curr()` 发出的是重调度 IPI（`reschedule_entry`）。目标 CPU 的 idle 线程正在轮询时，两条路径都只设置标志、省去 IPI，并触发 `sched_wake_idle_without_ipi`。对比两个进程分散运行与限定在同一个 CPU 上的差别：
 
    ```bash
    # 虚拟机，root
-   EVENTS=sched:sched_waking,sched:sched_wakeup,sched:sched_wake_idle_without_ipi,irq_vectors:call_function_single_entry
+   EVENTS=sched:sched_waking,sched:sched_wakeup,sched:sched_wake_idle_without_ipi
+   EVENTS=$EVENTS,irq_vectors:call_function_single_entry,irq_vectors:reschedule_entry
    perf stat -a -e $EVENTS -- perf bench sched pipe -l 200000
    perf stat -a -e $EVENTS -- taskset -c 0 perf bench sched pipe -l 200000
-   grep CAL /proc/interrupts   # 各 CPU 累计的 Function call interrupts
+   grep -E '^ *(CAL|RES):' /proc/interrupts   # 各 CPU 累计的跨核调用与重调度 IPI
    ```
+
+   限定在同一个 CPU 上时，所有唤醒都是本地唤醒，三类 IPI 相关事件应几乎为 0。
 
 3. 唤醒延迟分布（从 `sched_waking` 到被唤醒者切入 CPU，单位 µs）。被唤醒时仍在运行的任务不会立即发生切换，会带来少量偏大的样本：
 

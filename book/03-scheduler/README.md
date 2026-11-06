@@ -7,8 +7,8 @@
 ## 阅读建议
 
 - 3.1、3.2 是全章基础，建议按顺序阅读。
-- 3.3、3.4 构成公平调度的完整生命周期；3.5 介绍与调度类无关的调度时钟、无 tick 模式和抢占模型。三节是本章的重点。
-- 3.6～3.11 相对独立，可按兴趣选读。
+- 3.3、3.4 构成公平调度的完整生命周期；3.5 介绍 rq 时钟、无 tick 模式的依赖判据，以及重调度请求与安全抢占点的关系，并给出观测入口。三节是本章的重点。
+- 3.6～3.11 相对独立，可按兴趣选读。3.8 解释 PELT 衰减、实体与队列聚合、频率 / 算力不变性及 `util_est`，为负载均衡和选核决策提供信号基础，并列出观测入口。
 - 3.12 以公平调度类的回调为线索，把 3.3、3.8～3.10 的内容串联起来，并分析唤醒与 fork 时的选核策略，建议在读完这几节后阅读。
 
 ## 本章配置
@@ -18,9 +18,10 @@
 | 配置项 | 取值 | 影响 |
 |---|---|---|
 | `CONFIG_SMP` | y | 多核负载均衡、远程唤醒 |
-| `CONFIG_PREEMPT` / `CONFIG_PREEMPT_DYNAMIC` / `CONFIG_PREEMPT_RT` | y / y / y | 实时内核，默认 full 抢占模型，可在启动参数或运行时切换为 lazy（3.5 节） |
-| `CONFIG_NO_HZ_FULL` | y | 无 tick 运行 |
-| `CONFIG_HZ` | 1000 | tick 周期 1 ms |
+| `CONFIG_PREEMPT_LAZY` / `CONFIG_PREEMPT_DYNAMIC` | y / y | 默认 lazy，可在启动参数或运行时切换 none / voluntary / full / lazy（3.5 节） |
+| `CONFIG_PREEMPT` / `CONFIG_PREEMPT_RT` | n / n | 非 RT；`CONFIG_PREEMPTION=y`，仍支持内核抢占 |
+| `CONFIG_NO_HZ_FULL` | y | 支持运行中停 tick，还需 `nohz_full=` 指定 CPU 并满足依赖条件 |
+| `CONFIG_HZ` | 1000 | 周期 tick 开启时的目标间隔为 1 ms |
 | `CONFIG_FAIR_GROUP_SCHED` / `CONFIG_CFS_BANDWIDTH` | y / y | 公平类组调度与带宽控制 |
 | `CONFIG_RT_GROUP_SCHED` | n | 无 RT 组调度 |
 | `CONFIG_SCHED_CORE` | y | 核心调度（SMT 隔离） |
@@ -36,10 +37,10 @@
 | [3.2 主调度函数与上下文切换](02-schedule.md) | 已完成 |
 | [3.3 EEVDF 公平调度算法](03-eevdf.md) | 已完成 |
 | [3.4 任务创建与唤醒](04-wakeup.md) | 已完成 |
-| [3.5 调度时钟与抢占模型](05-tick-preempt.md) | 已完成 |
+| [3.5 调度时钟、无 tick 模式与抢占模型](05-tick-preempt.md) | 已完成 |
 | [3.6 实时调度类](06-rt.md) | 已完成 |
 | [3.7 Deadline 调度类与 dl_server](07-deadline.md) | 已完成 |
-| [3.8 PELT 负载跟踪](08-pelt.md) | 已完成 |
+| [3.8 PELT 负载跟踪与利用率估计](08-pelt.md) | 已完成（已复核源码，含可观测性） |
 | [3.9 调度域与负载均衡](09-load-balance.md) | 已完成 |
 | [3.10 组调度与 CPU 带宽控制](10-group-sched.md) | 已完成 |
 | [3.11 sched_ext 可扩展调度器](11-sched-ext.md) | 已完成 |
@@ -47,9 +48,9 @@
 
 ## 待完善
 
-- [ ] 当前 `linux/.config` 为 `CONFIG_PREEMPT_LAZY=y`，`CONFIG_PREEMPT`、`CONFIG_PREEMPT_RT`、`CONFIG_SCHED_CLASS_EXT` 均未开启。3.2 节已按此复核；上方"本章配置"表中抢占一行（y / y / y）与 3.5 节仍按 `CONFIG_PREEMPT=y`、`CONFIG_PREEMPT_RT=y` 编写，其余各节也需逐节复核；3.3 节"`rq_clock_task()` 不含中断处理时间"在未开启 `CONFIG_IRQ_TIME_ACCOUNTING` 的本书配置下不成立。
-- [ ] 原 3.5 节中各调度类对 `sched_can_stop_tick()` 的具体判据（Deadline、`SCHED_RR` / `SCHED_FIFO`、多个公平任务）已移出，需在 3.3、3.6 节补充（3.7、3.10 节已有相应说明）。
-- [ ] 按 AGENTS.md 3.1 节要求，3.3～3.12 尚缺"可观测性"一节（3.2 已补充，3.1 为概述小节可省略）。
+- [ ] 当前 `linux/.config` 为 `CONFIG_PREEMPT_LAZY=y`，`CONFIG_PREEMPT`、`CONFIG_PREEMPT_RT`、`CONFIG_SCHED_CLASS_EXT` 均未开启。3.2、3.5 节与本章配置表已按此复核，其余各节仍需逐节核查；3.3 节“`rq_clock_task()` 不含中断处理时间”在未开启 `CONFIG_IRQ_TIME_ACCOUNTING` 的本书配置下不成立。
+- [ ] 3.5 节已补齐 `sched_can_stop_tick()` 的顺序判据；3.3、3.6 节仍需从各调度类角度补充停 tick 的限制（3.7、3.10 节已有相应说明）。
+- [ ] 按 AGENTS.md 3.1 节要求，3.3、3.6～3.7、3.9～3.12 尚缺“可观测性”一节（3.2、3.4、3.5、3.8 已补充，3.1 为概述小节可省略）。
 - [ ] 3.1～3.12 的"动手实验"尚未在 dev 虚拟机中实测，需补充真实输出示例（注明内核版本与配置）。
 - [ ] 3.11 的实验需要开启 `CONFIG_SCHED_CLASS_EXT`（依赖 `CONFIG_DEBUG_INFO_BTF`）的内核，本书默认配置无法直接运行。
 - [ ] 各节 Mermaid 图（图 3-1、3-3、3-5、3-7、3-8、3-10、3-12、3-16、3-17、3-18、3-20）需在目标渲染器中确认显示效果。

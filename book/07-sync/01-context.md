@@ -121,7 +121,7 @@ static __always_inline int preempt_count(void)
 
 - **软中断域用了两种步长**。`SOFTIRQ_OFFSET`（`1 << 8`）表示"正在执行软中断处理函数"，`SOFTIRQ_DISABLE_OFFSET`（`2 << 8`）表示"禁用了软中断"。这样只需检查第 8 位就能区分"在软中断里"和"只是关了软中断"——这正是 `in_serving_softirq()` 与 `in_softirq()` 的区别。
 - **抢占计数为 per-CPU 而非 per-task**。上下文切换时并不保存 / 恢复它，而是依赖一个不变式：任何任务在切换点上的 `preempt_count` 都等于 `2 * PREEMPT_DISABLE_OFFSET`（`schedule()` 自身关一次抢占，持有的 `rq->lock` 再关一次），见 [`include/linux/preempt.h:67-76`](../../linux/include/linux/preempt.h#L67-L76) 的 `FORK_PREEMPT_COUNT` 注释。新任务从 `finish_task_switch()` 开始执行时会把它恢复为 0（3.2 节）。
-- **NEED_RESCHED 折叠进最高位**，让 `preempt_enable()` 只需一条 `decl` 指令就能同时判断"计数归零"和"需要调度"（3.2 节"x86 上的 preempt_count 小技巧"）。
+- **NEED_RESCHED 折叠进最高位**，让 `preempt_enable()` 只需一条 `decl` 指令就能同时判断"计数归零"和"需要调度"（3.2 节"重调度标志与 x86 的 preempt_count"）。
 
 ### 上下文判断宏
 
