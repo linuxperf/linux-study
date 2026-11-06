@@ -8,7 +8,9 @@
 
 ## 阅读指南
 
+- 首次阅读从 [第 0 章 前言](00-preface/README.md) 开始，先建立阅读方法、只读构建环境、源码导航与运行时验证流程。
 - 目录见 [SUMMARY.md](SUMMARY.md)，术语译法见 [glossary.md](glossary.md)。
 - 代码块均标注 `文件路径:起始行-结束行`，路径相对于内核源码根目录，可直接在 `linux/` 中跳转核对。
 - 依赖配置项的行为会注明 `CONFIG_XXX`，默认以 `linux/.config` 的取值为准。
-- 实验环境见仓库 `dev/Vagrantfile`，实验命令会注明运行环境与权限要求。
+- 实验环境见仓库 [`dev/Vagrantfile`](../dev/Vagrantfile)，实验命令会注明运行环境与权限要求；虚拟机默认内核不保证与分析版本一致。
+- 仓库 `linux/` 是只读分析基线，完整默认配置为 [`linux/.config`](../linux/.config)；构建、生成索引和配置调整均在仓库外工作区进行。

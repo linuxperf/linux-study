@@ -17,11 +17,12 @@
 | EFI stub | EFI Boot Stub | 内嵌于内核镜像的 EFI 启动适配代码，本版本 x86 路径可自行解压并直接进入未压缩内核 | 1.2 |
 | fork / exec 均衡 | Fork / Exec Balancing | 新任务第一次入队前（`WF_FORK`）或 `execve()` 时（`WF_EXEC`）为任务选择 CPU | 3.4 |
 | I/O 成本控制器 | I/O Cost Controller，IOCost | 按访问模式与长度估算设备时间成本，并按层次权重分配 I/O 能力的控制器 | 10.10 |
-| I/O 调度器 | I/O Scheduler | 请求交给驱动前选择执行顺序或控制并发的可插拔块层策略 | 10.2 |
+| I/O 调度器 | I/O Scheduler | 请求交给驱动前选择执行顺序或控制并发的可插拔块层策略；系统分析见 10.7 | 10.1 |
 | I/O APIC | I/O Advanced Programmable Interrupt Controller | 把传统中断引脚翻译为中断消息的芯片组中断控制器 | 5.5 |
 | managed 中断 | Managed Interrupt | 亲和性由内核按拓扑计算且不可修改的多队列设备中断 | 5.8 |
 | misfit 任务 | Misfit Task | 非对称算力系统上利用率超出所在 CPU 算力、应迁往更大核的任务 | 3.8 |
 | per-CPU 页缓存 | Per-CPU Pageset，PCP | 每 CPU、每 zone 的小阶空闲页缓存，`struct per_cpu_pages` | 4.3 |
+| PID 文件描述符 | PID File Descriptor，pidfd | 对进程或线程身份对象的稳定 fd 引用，避免数字 PID 重用误指向；不改变权限或等待资格 | 2.3 |
 | rootfs | rootfs | 最初创建的根文件系统实例，initramfs 归档被解包到其中，不等同于最终磁盘根分区 | 1.10 |
 | steal 时间 | Steal Time | 虚拟机中 vCPU 可运行却被宿主机调度走的时间 | 3.1 |
 | tick 广播 | Tick Broadcast | 本地时钟事件设备在深度 C-state 中停止时，由全局设备（如 HPET）代为到期并经 IPI 唤醒的机制 | 8.6 |
@@ -30,14 +31,18 @@
 | 按需分配 | Demand Paging | mmap 只建立 VMA，物理页在首次访问的缺页中分配 | 4.7 |
 | 保护模式 | Protected Mode | x86 启用 `CR0.PE` 后的保护执行模式；进入 32 位保护模式不等于已经进入 64 位模式 | 1.3 |
 | 标签 | Tag | 在标签集合内标识并限制请求资源的编号，可用于由设备完成定位请求 | 10.1 |
-| 背压 | Backpressure | 下游资源不足时限制或推迟上游工作，避免无限积压；块层包含标签等待与派发重试 | 10.6 |
+| 标准信号 | Standard Signal | 在同一待决集合中合并同号待决实例的非实时信号，不保证逐次发送逐次处理 | 2.8 |
+| 背压 | Backpressure | 下游资源不足时限制或推迟上游工作，避免无限积压；块层包含标签等待与派发重试，系统分析见 10.6 | 10.1 |
 | 保护页 | Guard Page | vmalloc 区域末尾不映射的一页，用于捕获越界访问 | 4.6 |
+| 备用信号栈 | Alternate Signal Stack | 用户登记、供 `SA_ONSTACK` 信号处理使用的用户栈区域，不是内核栈 | 2.9 |
 | 保留模式 | Reservation Mode | 中断分配时只记账、激活时才占用真实向量的向量分配策略 | 5.8 |
 | 保留标签 | Reserved Tag | 标签集合中供显式保留资源申请使用的独立编号范围 | 10.5 |
 | 本地 APIC | Local APIC，LAPIC | 每个 CPU 内的中断控制器，负责接收与投递中断、发送 IPI、提供本地定时器 | 5.1 |
 | 比较并交换 | Compare-And-Swap，CAS | 若内存值等于预期则写入新值的原子操作，x86 为 `cmpxchg` | 7.2 |
+| 编译数据库 | Compilation Database | 记录源文件、编译工作目录和真实编译命令的数据库，供 clangd 等工具解析当前构建 | 0.2 |
 | 并发管理工作队列 | Concurrency Managed Workqueue，CMWQ | 所有工作队列共享 worker 池、按运行中 worker 数动态调整并发的工作队列实现 | 5.12 |
 | 不变 TSC | Invariant TSC | 恒速递增且在 C-state 中不停止的 TSC（`constant_tsc` + `nonstop_tsc`） | 8.3 |
+| 不可返回点 | Point of No Return | exec 装载进入不可完整回滚的资源交接阶段后，错误不能返回旧用户程序的边界 | 2.6 |
 | 不可屏蔽中断 | Non-Maskable Interrupt，NMI | 不受 `RFLAGS.IF` 屏蔽的中断，向量 2 | 1.3 |
 | 布隆过滤器 | Bloom Filter | MGLRU 老化时记录值得扫描的 PMD，跳过冷区域 | 4.10 |
 | 常量盲化 | Constant Blinding | JIT 前改写立即数相关指令以降低可预测机器码的风险，不能替代访问安全验证 | 13.5 |
@@ -56,11 +61,12 @@
 | 次缺页 | Minor Fault | 无需 I/O 即可完成的缺页，计入 `min_flt` | 4.8 |
 | 存储缓冲区 | Store Buffer | CPU 内暂存待提交写操作的缓冲，导致 x86 上的写后读重排 | 7.3 |
 | 错误码 | Error Code | 部分异常由 CPU 额外压栈的 32 位信息，如 #PF 的访问类型 | 5.1 |
-| 打开文件描述 | Open File Description | 一次打开的状态对象，由 `struct file` 保存位置、标志与操作表，可被多个文件描述符共享；见 [`include/linux/fs.h:1211`](../linux/include/linux/fs.h#L1211) | 9.1 |
+| 打开文件描述 | Open File Description | 一次打开的状态对象，由 `struct file` 保存位置、标志与操作表，可被多个文件描述符共享；见 [`include/linux/fs.h:1211`](../linux/include/linux/fs.h#L1211) | 2.5 |
 | 大页 | Huge Page | 以 PMD（2 MB）或 PUD（1 GB）直接映射的页 | 4.13 |
 | 代 | Generation | MGLRU 中按年龄划分的页集合，以 `max_seq`/`min_seq` 编号 | 4.10 |
 | 代理执行 | Proxy Execution | 让持锁任务借用等待者的调度上下文运行（`CONFIG_SCHED_PROXY_EXEC`） | 3.1 |
 | 单调时钟 | Monotonic Clock | 不可设置、单调递增的 `CLOCK_MONOTONIC`，不含系统挂起时间 | 8.1 |
+| 待决信号 | Pending Signal | 已生成但尚待消费的信号状态，分线程私有集合与线程组共享集合 | 2.8 |
 | 等待队列 | Wait Queue | 以 `wait_queue_head` 组织的睡眠任务链表，由 `wake_up()` 系列逐个调用唤醒函数 | 3.2 |
 | 调度策略 | Scheduling Policy | `SCHED_NORMAL`、`SCHED_FIFO` 等，用户态可见 | 3.1 |
 | 调度队列 | Dispatch Queue，DSQ | sched_ext 中承载待运行任务的队列 | 3.11 |
@@ -81,17 +87,20 @@
 | 队列静止 | Queue Quiesce | 停止新的请求派发并等待进行中的派发临界区退出，不等于所有命令已完成 | 10.2 |
 | 队列映射 | Queue Mapping | 按提交 CPU 与操作类型选择 blk-mq 硬件上下文的映射 | 10.5 |
 | 读拷贝更新 | Read-Copy Update，RCU | 读者无锁、写者发布新版本并在宽限期后回收旧版本的同步机制 | 7.9 |
+| 独立构建目录 | Out-of-tree Build | 用 `O=` 将配置和构建产物与干净源码树分离；本书另建仓库外源码副本以保护只读基线 | 0.2 |
 | 读写锁 | Reader-Writer Lock | 允许多个读者或一个写者的自旋锁，`rwlock_t` | 7.5 |
 | 读写信号量 | Reader-Writer Semaphore，rwsem | 可睡眠的读写锁，`struct rw_semaphore` | 7.7 |
-| 对称多处理 | Symmetric Multiprocessing，SMP | 多个处理器共享系统资源，Linux 为各 CPU 准备独立执行上下文并协调上线 | 1.8 |
+| 对称多处理 | Symmetric Multiprocessing，SMP | 多个处理器共享系统资源，Linux 为各 CPU 准备独立执行上下文并协调上线；启动路径见 1.8 | 0.1 |
 | 多尺寸 THP | Multi-size THP，mTHP | 介于 4 KB 与 2 MB 之间的匿名大 folio（v6.8） | 4.8 |
 | 多代 LRU | Multi-Gen LRU，MGLRU | v6.1 起的多代页面回收算法（`CONFIG_LRU_GEN`） | 4.10 |
+| 多队列块层 | Multi-Queue Block Layer，blk-mq | 将面向提交 CPU 的软件上下文与面向驱动队列的硬件上下文分开，组织请求分配、派发和完成的块层框架；系统分析见 10.5 | 10.1 |
 | 多粒度时间戳 | Multigrain Timestamp | 文件系统平时取粗粒度时间、需要区分时才取精确时间的时间戳机制（v6.13） | 8.4 |
 | 多生产者、单消费者 | Multi-Producer Single-Consumer，MPSC | 多个生产者共享发布通道、由单个消费者推进消费位置的并发模型 | 13.4 |
 | 惰性抢占 | Lazy Preemption | 以 `TIF_NEED_RESCHED_LAZY` 标记较不紧急的请求；返回用户态可响应，下一次本地周期 tick 可将其升级为立即请求，实际调度仍须满足安全条件 | 3.2 |
 | 惰性 TLB | Lazy TLB | 内核线程借用上一任务地址空间而不切换页表 | 3.2 |
 | 返回栈缓冲区 | Return Stack Buffer，RSB | CPU 预测 `ret` 目标地址的硬件栈，上下文切换时需填充以缓解推测执行攻击 | 3.2 |
 | 反向映射 | Reverse Mapping，rmap | 由物理页找到所有映射它的页表项 | 4.9 |
+| 翻译单元 | Translation Unit | 一个源文件及其包含内容经过预处理后形成的编译单位，其解析受真实编译参数约束 | 0.3 |
 | 非对称算力 | Asymmetric CPU Capacity | 各 CPU 最大算力不同的系统，如大小核 | 3.12 |
 | 非自愿上下文切换 | Involuntary Context Switch | 因抢占发生的切换，计入 `nivcsw` | 3.2 |
 | 分区存储设备 | Zoned Block Device，ZBD | 以 zone 管理容量与写入约束的块设备，zone 不等同于分区表中的 partition | 10.9 |
@@ -101,9 +110,11 @@
 | 负载均值 | Load Average | `/proc/loadavg` 中可运行与不可中断睡眠任务数的 1、5、15 分钟指数平均 | 3.5 |
 | 服务质量 | Quality of Service，QoS | 对共享资源的时延、吞吐或公平性施加控制；块层通过请求生命周期钩子实现多种策略 | 10.10 |
 | 辅助时钟 | Auxiliary Clock | 自 `CLOCK_AUX` 起、各有独立 timekeeper 的可设置与调频的 POSIX 时钟（`CONFIG_POSIX_AUX_CLOCKS`，v6.17） | 8.1 |
+| 辅助向量 | Auxiliary Vector，auxv | ELF 用户栈上的类型和值条目，向程序及动态链接器传递入口、程序头和安全状态等信息 | 2.6 |
 | 高精度定时器 | High-Resolution Timer，hrtimer | 纳秒精度的内核定时器，模拟的周期 tick 与 hrtick 都基于它实现 | 3.2 |
 | 高精度事件定时器 | High Precision Event Timer，HPET | 芯片组中的 MMIO 定时器，含一个自由运行的主计数器与若干比较器 | 8.1 |
-| 跟踪点 | Tracepoint | 源码中预置的静态探测点，可经 tracefs、perf、BPF 挂接 | 3.2 |
+| 跟踪点 | Tracepoint | 源码中预置的静态探测点；具有事件接口的跟踪点可经 tracefs 等入口观测，不能与裸跟踪点混同 | 0.4 |
+| 跟踪实例 | Trace Instance | tracefs 中具有独立缓冲区和多种采集设置的实例，用于隔离跟踪会话，但不消除系统开销 | 0.4 |
 | 辅助函数（BPF） | BPF Helper | 由程序类型开放、通过数值 ID 与原型约束调用的内核接口 | 13.1 |
 | 共享映射 | Shared Mapping | 对普通文件的共享映射将修改保留在文件 page cache 中，持久化仍依赖文件系统写回与同步；系统分析见 9.11 | 4.7 |
 | 工作队列 | Workqueue | 在内核线程中执行可睡眠延迟工作的机制 | 1.7 |
@@ -120,11 +131,14 @@
 | 后向合并 | Back Merge | 把紧邻已有请求末尾的 bio 并入请求，减少命令数量而不复制数据 | 10.6 |
 | 后备存储 | Backing Store | 页内容的持久化位置：文件页为文件，匿名页为交换空间 | 4.11 |
 | 后备设备信息 | Backing Device Information，BDI | 描述预读与写回等能力，`bdi_writeback` 在其下组织具体写回域；见 [`include/linux/backing-dev-defs.h`](../linux/include/linux/backing-dev-defs.h) | 9.10 |
+| 忽略（信号） | Ignored | 信号处理方式之一，不等于把信号阻塞后留待以后处理 | 2.8 |
 | 互斥锁 | Mutex | 可睡眠的互斥锁，`struct mutex`，支持乐观自旋 | 7.6 |
 | 唤醒队列 | Wake List | `TTWU_QUEUE` 机制下挂在目标 CPU 上、经 IPI 处理的待唤醒任务链表 | 3.4 |
 | 唤醒亲和 | Wake Affine | 唤醒时在唤醒者所在 CPU 与任务原 CPU 之间选定搜索空闲 CPU 的区域 | 3.12 |
 | 回写节流 | Writeback Throttling，WBT | 利用设备时延反馈控制相关写入在途深度的设备级块层策略 | 10.10 |
 | 回收 | Reclaim | 释放已用页以补充空闲内存，执行者为 kswapd 与直接回收 | 4.4 |
+| 会话 | Session | 与作业控制和控制终端相关的进程组集合 | 2.1 |
+| 会话标识符 | Session ID，SID | 标识会话的编号，使用 `PIDTYPE_SID` 关系 | 2.3 |
 | 伙伴系统 | Buddy System | 以 2 的幂次块管理空闲物理页的分配器 | 4.1 |
 | 获取 / 释放 | Acquire / Release | 单向内存序：获取之后的访问不提前，释放之前的访问不推后 | 7.3 |
 | 即时编译 | Just-In-Time Compilation，JIT | 将验证后的 BPF 指令转换为本机机器码；BPF 执行引擎见 13.5 | 5.3 |
@@ -133,6 +147,7 @@
 | 计时 CPU | Timekeeping CPU | 负责推进 jiffies 与 timekeeper 的 CPU，`tick_do_timer_cpu` | 8.6 |
 | 基于对象的反向映射 | Object-based Reverse Mapping | 经 `folio->mapping` 与 `index` 计算虚拟地址的 rmap 方案 | 4.9 |
 | 间隔定时器 | Interval Timer，itimer | `setitimer()` 提供的每进程三个定时器：`ITIMER_REAL`、`ITIMER_VIRTUAL`、`ITIMER_PROF` | 8.11 |
+| 僵尸 | Zombie | 已结束执行并释放主要资源引用、仍保留父侧等待结果的任务状态 | 2.1 |
 | 交换表 | Swap Table | v6.18 起每 cluster 一页的交换缓存数组 | 4.11 |
 | 交换槽位 | Swap Slot | 交换设备上存放一页的位置 | 4.11 |
 | 交换缓存 | Swap Cache | 交换槽位到 folio 的映射，同步换入换出 | 4.11 |
@@ -141,7 +156,12 @@
 | 节点 | Node | 一组访问延迟相同的内存，`pg_data_t` | 4.1 |
 | 阶段公平 | Phase-Fair | 读写锁唤醒策略：读阶段让所有等待的读者一起进入 | 7.7 |
 | 节流 | Throttle | 实体或任务组用尽预算后暂停运行 | 3.7 |
+| 进程 | Process | 用户空间的执行与资源组织单位；多线程进程在内核中对应一个线程组，而非单一任务对象 | 2.1 |
+| 进程标识符 | Process ID，PID | 用户接口中的进程编号，需区分线程 TID、线程组 TGID 与命名空间视图 | 2.3 |
+| 进程凭据 | Credentials | 以 `struct cred` 保存的用户、组、能力、用户命名空间及安全关联，按新对象发布协议更新；系统分析见 2.12 | 2.1 |
 | 进程上下文标识符 | Process-Context Identifier，PCID | x86 TLB 项的地址空间标签，切换 CR3 时可保留其他地址空间的 TLB 项 | 3.2 |
+| 进程组 | Process Group | 服务于作业控制的进程集合，不等于线程组或父子关系 | 2.1 |
+| 进程组标识符 | Process Group ID，PGID | 标识作业控制进程组的编号，使用 `PIDTYPE_PGID` 关系 | 2.3 |
 | 惊群 | Thundering Herd | 一次事件唤醒大量等待者、最终只有一个能拿到资源的现象 | 3.4 |
 | 经典 BPF | Classic BPF，cBPF | 与现代 eBPF 区分的早期 BPF 指令与接口模型，本章不将其与 eBPF 混用 | 13.1 |
 | 静止状态 | Quiescent State | RCU 术语，CPU 不处于读临界区的时刻 | 3.2 |
@@ -169,6 +189,7 @@
 | 流控处理函数 | Flow Handler | 按触发方式完成应答、屏蔽、EOI 的中断处理函数，`desc->handle_irq` | 5.6 |
 | 利用率估计 | Utilization Estimation，util_est | 保存任务激活结束时的利用率样本，上升立即跟随、下降按条件使用 EWMA，补偿睡眠期间的 PELT 衰减 | 3.8 |
 | 门描述符 | Gate Descriptor | IDT 中的 16 字节表项，记录入口地址、IST 下标与 DPL | 5.1 |
+| 命名空间 | Namespace | 将资源可见集合或编号解释分离的内核对象，不自动提供资源配额；系统分析见 2.11 | 2.1 |
 | 末级缓存 | Last Level Cache，LLC | 一组 CPU 共享的最后一级缓存，调度器以此划分 `sd_llc` 域 | 3.4 |
 | 目录项 | Directory Entry，dentry | 关联父目录、名字与 inode 的 VFS 对象；负目录项的 `d_inode` 为 `NULL`；见 [`include/linux/dcache.h:92`](../linux/include/linux/dcache.h#L92) | 9.1 |
 | 目录项缓存 | Dentry Cache，dcache | 缓存名字与 inode 的关联，支持路径查找及不存在名字的缓存；见 [`Documentation/filesystems/vfs.rst`](../linux/Documentation/filesystems/vfs.rst) | 9.4 |
@@ -181,8 +202,11 @@
 | 内存模型 | Memory Model | 规定并发访问可观察结果的规则；内核使用 Linux 内核内存模型（LKMM） | 7.3 |
 | 内存屏障 | Memory Barrier | 约束编译器与 CPU 对内存访问重排的指令或原语 | 7.3 |
 | 内存域 | Zone | 节点内按地址范围划分的区域，如 `ZONE_DMA32` | 4.1 |
+| 内核构建系统 | Kernel Build System，Kbuild | 按配置、构建规则与工具链组织内核编译、链接和生成文件的构建系统 | 0.2 |
+| 内核线程 | Kernel Thread | 带 `PF_KTHREAD` 的可调度执行主体，通常执行内核函数且不拥有用户 mm；系统分析见 2.10 | 1.7 |
 | 内核函数接口（BPF） | Kernel Function，kfunc | 使用 BTF 原型与注册标志向 BPF 开放的内核函数接口，系统分析见 13.6 | 3.11 |
 | 内核地址空间布局随机化 | Kernel Address Space Layout Randomization，KASLR | 随机化内核镜像放置或运行布局；物理地址选择与虚拟布局选择需分别理解 | 1.4 |
+| 能力 | Capability | 对传统超级用户权限的细分授权，须结合能力集合和目标用户命名空间解释 | 2.11 |
 | 能效感知调度 | Energy Aware Scheduling，EAS | 在非对称算力平台上按能耗选择 CPU | 3.8 |
 | 排他等待 | Exclusive Wait | 带 `WQ_FLAG_EXCLUSIVE` 的等待队列项，`wake_up()` 每次只唤醒一个此类等待者 | 3.4 |
 | 票号锁 | Ticket Lock | 按取号顺序获取的公平自旋锁，x86 上已被 qspinlock 取代 | 7.4 |
@@ -209,6 +233,7 @@
 | 全序存储 | Total Store Order，TSO | x86 的内存模型，仅允许写后读重排 | 7.3 |
 | 权重 | Load Weight | 公平调度类按其比例分配 CPU 时间，由 nice 值决定 | 3.1 |
 | 缺页异常 | Page Fault，#PF | 访问未映射或权限不符的地址时 CPU 触发的异常 | 4.8 |
+| 任务 | Task | 由一个 `task_struct` 表示的可调度执行主体，用户线程和内核线程均使用任务机制 | 2.1 |
 | 任务优先级寄存器 | Task Priority Register，TPR | 本地 APIC 中屏蔽低优先级类中断的寄存器，Linux 固定为 `0x10` | 5.5 |
 | 任务状态段 | Task State Segment，TSS | x86_64 上提供 `sp0` 与 IST 栈指针的结构；启动期还使用描述符满足虚拟化约束 | 1.3 |
 | 入口栈 | Entry Stack | cpu_entry_area 中供用户态进入内核时使用的跳板栈 | 4.6 |
@@ -218,7 +243,7 @@
 | 闰秒 | Leap Second | 为使 UTC 与地球自转一致而插入或删除的一秒，插入时出现 23:59:60 | 8.5 |
 | 上半部 / 下半部 | Top Half / Bottom Half | 中断处理中必须立即完成的部分与可延迟执行的部分 | 5.9 |
 | 上下文跟踪 | Context Tracking | 记录 CPU 处于用户态、内核态或 idle，供 RCU 与时间统计使用 | 7.10 |
-| 上下文切换 | Context Switch | — | 3.1 |
+| 上下文切换 | Context Switch | 将 CPU 执行从一个任务切换到另一个任务；运行时可用 `sched:sched_switch` 观察相关任务与状态 | 0.4 |
 | 时间戳计数器 | Time Stamp Counter，TSC | x86 处理器内部按固定节拍递增的 64 位计数器，`rdtsc` 读取 | 8.1 |
 | 时间轮 | Timer Wheel | 按相对到期时间把 `timer_list` 散列到多层桶中的数据结构，层越高粒度越粗 | 5.9 |
 | 时间命名空间 | Time Namespace | 为 `CLOCK_MONOTONIC` 与 `CLOCK_BOOTTIME` 提供每命名空间偏移的命名空间（v5.6） | 8.12 |
@@ -227,6 +252,7 @@
 | 时间维护 | Timekeeping | 维护当前时间及各 POSIX 时钟的子系统，核心为 `struct timekeeper` | 8.1 |
 | 实模式 | Real Mode | 传统 x86 16 位执行环境，Linux BIOS setup 在此调用固件服务并准备保护模式切换 | 1.3 |
 | 实时内核 | Real-Time Kernel，PREEMPT_RT | 开启 `CONFIG_PREEMPT_RT` 的内核：`spinlock_t` 等换成基于 rt_mutex 的可睡眠锁，中断强制线程化 | 3.2 |
+| 实时信号 | Real-Time Signal | 支持携带信息并排队多个实例的信号，队列仍受资源和发送接口规则限制 | 2.8 |
 | 实时时钟 | Real-Time Clock，RTC | 断电后靠电池维持计时的硬件时钟，只有秒级精度 | 8.5 |
 | 时钟事件设备 | Clock Event Device | 可编程定时器硬件的抽象，`struct clock_event_device` | 8.1 |
 | 时钟源 | Clocksource | 自由运行硬件计数器的抽象，`struct clocksource` | 8.1 |
@@ -273,18 +299,25 @@
 | 位置无关代码 | Position-Independent Code，PIC | 不依赖固定绝对执行地址的代码，早期内核入口使用它跨越初始映射与链接地址的差异 | 1.5 |
 | 无 tick 模式 | Dynticks，NO_HZ | 不需要时停掉周期性 tick：空闲时停（`NO_HZ_IDLE`），或单任务运行时也停（`NO_HZ_FULL`） | 3.5 |
 | 稀疏内存模型 | SPARSEMEM | 按 section 分配 `struct page` 的物理内存模型 | 4.1 |
+| 线程 | Thread | 有独立执行现场、任务描述符和内核栈的执行主体，通常与同进程线程共享用户资源 | 2.1 |
+| 线程标识符 | Thread ID，TID | 标识单个任务的编号，原生 Linux `gettid()` 返回调用者视图中的 TID | 2.3 |
 | 线程化中断 | Threaded IRQ | 主处理函数唤醒专属内核线程执行主体工作的中断处理方式 | 5.7 |
+| 线程局部存储 | Thread-Local Storage，TLS | 用户运行时为各线程保留独立数据的机制；创建时可通过 `CLONE_SETTLS` 设置架构状态 | 2.4 |
+| 线程组 | Thread Group | 共享组级状态并作为一个多线程进程呈现的任务集合 | 2.1 |
+| 线程组标识符 | Thread Group ID，TGID | 标识线程组的编号，Linux `getpid()` 返回调用者视图中的 TGID | 2.3 |
 | 向量 | Vector | x86 标识中断与异常的 0～255 编号，用于索引 IDT | 5.1 |
 | 消息信号中断 | Message Signaled Interrupts，MSI / MSI-X | 设备通过写特定地址触发中断的机制 | 5.5 |
 | 写指针 | Write Pointer | 顺序写 zone 中的当前写入位置，块层 zone 描述符以 512 字节扇区报告 | 10.9 |
-| 写时复制 | Copy-On-Write，COW | 共享只读页，写入时再复制 | 4.9 |
+| 写时复制 | Copy-On-Write，COW | 普通私有页在 fork 后共享并受写保护，写入时按条件复制或独占复用；系统分析见 4.9 | 2.5 |
+| 信号 | Signal | 执行主体之间的异步通知协议，动作可为忽略、用户处理、停止 / 继续或终止等 | 2.1 |
+| 信号帧 | Signal Frame | 用户信号处理前建立的上下文保存区域，经 `rt_sigreturn` 恢复原执行现场 | 2.9 |
 | 写回 | Writeback | 将已修改的缓存数据交给后备存储的过程，不等同于完整文件同步或掉电持久化；系统分析见 9.10 | 4.10 |
 | 信号量 | Semaphore | 允许至多 N 个持有者的睡眠锁，`struct semaphore` | 7.7 |
 | 性能域 | Performance Domain | 共享同一频率的一组 CPU，EAS 以它为单位估算能耗 | 3.12 |
 | 修正唤醒规则 | Revised Wakeup Rule | 受约束 Deadline 任务唤醒时削减预算而非重开周期 | 3.7 |
 | 虚拟动态共享对象 | virtual Dynamic Shared Object，vDSO | 内核映射到每个进程中的共享库，在用户态完成 `clock_gettime()` 等调用 | 8.12 |
 | 虚拟截止时间 | Virtual Deadline | `vruntime + slice / weight` | 3.3 |
-| 虚拟内存区域 | Virtual Memory Area，VMA | 进程地址空间中属性相同的一段区间，`vm_area_struct` | 4.7 |
+| 虚拟内存区域 | Virtual Memory Area，VMA | 进程地址空间中属性相同的一段区间，`vm_area_struct`；系统分析见 4.7 | 2.5 |
 | 虚拟时间 | Virtual Time，V | 所有实体 vruntime 的加权平均 | 3.3 |
 | 虚拟文件系统 | Virtual File System，VFS | 提供统一文件系统接口、使不同文件系统实现共存的内核抽象层；见 [`Documentation/filesystems/vfs.rst`](../linux/Documentation/filesystems/vfs.rst) | 9.1 |
 | 虚拟运行时间 | Virtual Runtime，vruntime | 按权重折算后的运行时间 | 3.3 |
@@ -304,11 +337,14 @@
 | 引导加载器 | Boot Loader | 按启动协议放置内核镜像、命令行和可选初始镜像，并交接执行权的软件 | 1.1 |
 | 应用处理器 | Application Processor，AP | 在 BSP 建立共享基础后被唤起、完成每 CPU 初始化的其他处理器 | 1.8 |
 | 影子 timekeeper | Shadow Timekeeper | 写者修改的 timekeeper 副本，修改完成后在顺序计数写区间内整体复制给读者副本 | 8.4 |
+| 影子栈 | Shadow Stack | 保存并验证返回地址的受保护栈；编译支持不等于所有任务都已启用 | 2.9 |
 | 硬中断栈 | Hardirq Stack | 每 CPU 16 KB 的中断处理栈，`hardirq_stack_ptr` | 5.1 |
+| 用户空间 API | Userspace API，UAPI | 内核向用户程序提供的接口；相关可导出头文件位于 `include/uapi/` 和架构 UAPI 目录 | 0.3 |
 | 有界拖延 | Bounded Tardiness | 多核全局 EDF 下任务完成时间超过截止时间的量有上界 | 3.7 |
 | 优先级反转 | Priority Inversion | 高优先级任务因等待低优先级任务持有的资源而被中优先级任务间接阻塞 | 3.6 |
 | 优先级继承 | Priority Inheritance，PI | 持锁的低优先级任务临时继承等待者的优先级 | 3.1 |
 | 预算公平排队 | Budget Fair Queueing，BFQ | 以服务预算与权重组织 I/O 队列、支持低延迟启发式及层次组调度的调度器 | 10.7 |
+| 语言服务器协议 | Language Server Protocol，LSP | 编辑器与语言服务器交换定义、引用、类型及调用关系等语义信息的协议 | 0.3 |
 | 原子操作 | Atomic Operation | 对其他 CPU 不可分割的读改写操作 | 7.2 |
 | 原子上下文 | Atomic Context | 不允许睡眠的执行环境：持自旋锁、关抢占、中断等 | 7.1 |
 | 运行队列 | Runqueue，rq | 每 CPU 一个的 `struct rq` | 3.1 |
@@ -316,6 +352,7 @@
 | 脏页限速 | Dirty Throttling | 根据脏页水平与写回吞吐限制任务继续弄脏页面的速率，通用控制入口为 `balance_dirty_pages()` | 9.10 |
 | 早期用户空间 | Early Userspace | initramfs 中的 `/init` 等程序提供的用户态启动环境，可负责准备最终根文件系统 | 1.10 |
 | 增强红黑树 | Augmented RB-tree | 节点额外维护子树聚合信息的红黑树 | 3.3 |
+| 执行与链接格式 | Executable and Linkable Format，ELF | 描述可执行文件、目标文件等的格式，程序头指导内核建立装载映射 | 2.6 |
 | 直接回收 | Direct Reclaim | 分配者在慢速路径中自行回收内存 | 4.4 |
 | 直接映射区 | Direct Map | 线性映射全部物理内存的内核虚拟地址区域，起始于 `PAGE_OFFSET` | 4.1 |
 | 指数加权移动平均 | Exponentially Weighted Moving Average，EWMA | `util_est` 用于平滑利用率下降，新样本权重为 1/4 | 3.8 |
@@ -342,6 +379,8 @@
 | 组调度 | Group Scheduling | 以任务组为单位分配 CPU（`CONFIG_FAIR_GROUP_SCHED`） | 3.10 |
 | zone 写入暂存 | Zone Write Plugging | 块层按 zone 协调顺序写、清零与模拟 append 的机制，不同于任务本地 plug | 10.9 |
 | 组合树 | Combining Tree | Tree RCU 中汇总静止状态报告的 `rcu_node` 层级结构 | 7.10 |
+| 子收割者 | Child Subreaper | 在 PID 命名空间内接管后代孤儿回收责任的祖先进程，区别于无条件交给宿主 PID 1 | 2.7 |
+| 阻塞（信号） | Blocked | 信号掩码暂时阻止普通投递，不等于采用忽略处理方式 | 2.8 |
 | 阻塞负载 | Blocked Load | 睡眠实体保留在原公平运行队列 PELT 聚合中的历史贡献，随队列时间继续衰减 | 3.8 |
 | 最近最少使用 | Least Recently Used，LRU | 以最近访问时间近似页面冷热的回收策略 | 4.10 |
 | 最早合格虚拟截止时间优先 | Earliest Eligible Virtual Deadline First，EEVDF | v6.6 起的公平调度算法 | 3.3 |

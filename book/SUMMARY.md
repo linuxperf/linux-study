@@ -5,7 +5,11 @@
 
 ## 正文
 
-- 第 0 章 前言（规划中）
+- [第 0 章 前言](00-preface/README.md)
+  - [0.1 阅读方法与分析边界](00-preface/01-overview.md)
+  - [0.2 实验环境与只读构建](00-preface/02-environment.md)
+  - [0.3 源码布局与 clangd 导航](00-preface/03-source-navigation.md)
+  - [0.4 从源码到运行时验证](00-preface/04-observability.md)
 - [第 1 章 启动过程](01-boot/README.md)
   - [1.1 启动全景：从固件到用户空间](01-boot/01-overview.md)
   - [1.2 内核镜像、启动协议与 EFI stub](01-boot/02-boot-protocol.md)
@@ -18,7 +22,19 @@
   - [1.9 initcall：分级初始化与启动跟踪](01-boot/09-initcalls.md)
   - [1.10 initramfs 与根文件系统](01-boot/10-rootfs.md)
   - [1.11 PID 1：从内核初始化到用户程序](01-boot/11-userspace.md)
-- 第 2 章 进程管理（规划中）
+- [第 2 章 进程管理](02-process/README.md)
+  - [2.1 进程管理全景：任务、资源与生命周期](02-process/01-overview.md)
+  - [2.2 任务描述符、内核栈与任务状态](02-process/02-task.md)
+  - [2.3 PID、线程组与进程标识](02-process/03-pid.md)
+  - [2.4 任务创建：fork、clone 与首次运行](02-process/04-fork.md)
+  - [2.5 资源继承：共享、复制与写时复制](02-process/05-resources.md)
+  - [2.6 程序执行：exec 框架与 ELF 装载](02-process/06-exec.md)
+  - [2.7 任务退出、僵尸与等待回收](02-process/07-exit-wait.md)
+  - [2.8 信号生成、排队与线程选择](02-process/08-signal.md)
+  - [2.9 x86_64 信号投递与系统调用重启](02-process/09-signal-frame.md)
+  - [2.10 内核线程：创建、运行与停止](02-process/10-kthread.md)
+  - [2.11 命名空间：资源视图与身份边界](02-process/11-namespaces.md)
+  - [2.12 进程凭据、权限与创建限制](02-process/12-credentials-limits.md)
 - [第 3 章 调度器](03-scheduler/README.md)
   - [3.1 调度器框架：调度策略、调度类与运行队列](03-scheduler/01-overview.md)
   - [3.2 主调度函数与上下文切换](03-scheduler/02-schedule.md)
@@ -101,7 +117,7 @@
   - [9.11 文件内存映射：缺页、共享写与截断](09-vfs/11-mmap.md)
   - [9.12 目录操作与 ramfs](09-vfs/12-directory-ramfs.md)
 - [第 10 章 块设备层](10-block/README.md)
-  - [10.1 块设备层概览：从文件偏移到设备命令](10-block/01-overview.md)
+  - [10.1 块设备层概览：对象、分层与 I/O 生命周期](10-block/01-overview.md)
   - [10.2 设备模型：gendisk、block_device 与 request_queue](10-block/02-device-model.md)
   - [10.3 bio：数据描述、分配、拆分与完成链](10-block/03-bio.md)
   - [10.4 提交路径：检查、分区重映射与堆叠设备](10-block/04-submit.md)
