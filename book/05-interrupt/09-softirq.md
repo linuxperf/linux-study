@@ -49,7 +49,7 @@ enum
 | 编号 | 名称 | 处理函数 | 注册位置 | 用途 |
 |---|---|---|---|---|
 | 0 | `HI` | `tasklet_hi_action()` | [`kernel/softirq.c:1047`](../../linux/kernel/softirq.c#L1047) | 高优先级 tasklet 与 BH 工作队列（5.10 节） |
-| 1 | `TIMER` | `run_timer_softirq()` | [`kernel/time/timer.c:2579`](../../linux/kernel/time/timer.c#L2579) | 定时器轮（timer wheel）回调（第 8 章） |
+| 1 | `TIMER` | `run_timer_softirq()` | [`kernel/time/timer.c:2579`](../../linux/kernel/time/timer.c#L2579) | 时间轮（timer wheel）回调（8.7 节） |
 | 2 | `NET_TX` | `net_tx_action()` | [`net/core/dev.c:13269`](../../linux/net/core/dev.c#L13269) | 网络发送完成、qdisc 调度 |
 | 3 | `NET_RX` | `net_rx_action()` | [`net/core/dev.c:13270`](../../linux/net/core/dev.c#L13270) | NAPI 收包轮询 |
 | 4 | `BLOCK` | `blk_done_softirq()` | [`block/blk-mq.c:5288`](../../linux/block/blk-mq.c#L5288) | 块 I/O 完成回调 |

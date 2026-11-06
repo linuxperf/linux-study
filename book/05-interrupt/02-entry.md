@@ -505,7 +505,7 @@ void irq_enter_rcu(void)
 }
 ```
 
-`__irq_enter_raw()`（[`include/linux/hardirq.h:46-50`](../../linux/include/linux/hardirq.h#L46-L50)）给 `preempt_count` 加上 `HARDIRQ_OFFSET`，此后 `in_hardirq()` 为真（7.1 节）。如果打断的是 idle 且是最外层中断，`tick_irq_enter()` 会在 NO_HZ 模式下补更新 jiffies，让中断处理函数看到正确的时间（第 8 章）。
+`__irq_enter_raw()`（[`include/linux/hardirq.h:46-50`](../../linux/include/linux/hardirq.h#L46-L50)）给 `preempt_count` 加上 `HARDIRQ_OFFSET`，此后 `in_hardirq()` 为真（7.1 节）。如果打断的是 idle 且是最外层中断，`tick_irq_enter()` 会在 NO_HZ 模式下补更新 jiffies，让中断处理函数看到正确的时间（8.10 节）。
 
 [`kernel/softirq.c:713-742`](../../linux/kernel/softirq.c#L713-L742)（v6.18.60）
 

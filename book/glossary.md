@@ -13,17 +13,22 @@
 | misfit 任务 | Misfit Task | 非对称算力系统上利用率超出所在 CPU 算力、应迁往更大核的任务 | 3.8 |
 | per-CPU 页缓存 | Per-CPU Pageset，PCP | 每 CPU、每 zone 的小阶空闲页缓存，`struct per_cpu_pages` | 4.3 |
 | steal 时间 | Steal Time | 虚拟机中 vCPU 可运行却被宿主机调度走的时间 | 3.1 |
+| tick 广播 | Tick Broadcast | 本地时钟事件设备在深度 C-state 中停止时，由全局设备（如 HPET）代为到期并经 IPI 唤醒的机制 | 8.6 |
 | tick 依赖 | Tick Dependency | 阻止 `NO_HZ_FULL` CPU 停 tick 的原因位掩码，如 `TICK_DEP_BIT_SCHED` | 3.5 |
+| TSC-deadline 模式 | TSC-Deadline Mode | LAPIC 定时器以 TSC 绝对值作为到期时刻编程的模式，无需校准 | 5.5 |
 | 按需分配 | Demand Paging | mmap 只建立 VMA，物理页在首次访问的缺页中分配 | 4.7 |
 | 保护页 | Guard Page | vmalloc 区域末尾不映射的一页，用于捕获越界访问 | 4.6 |
 | 保留模式 | Reservation Mode | 中断分配时只记账、激活时才占用真实向量的向量分配策略 | 5.8 |
 | 本地 APIC | Local APIC，LAPIC | 每个 CPU 内的中断控制器，负责接收与投递中断、发送 IPI、提供本地定时器 | 5.1 |
 | 比较并交换 | Compare-And-Swap，CAS | 若内存值等于预期则写入新值的原子操作，x86 为 `cmpxchg` | 7.2 |
 | 并发管理工作队列 | Concurrency Managed Workqueue，CMWQ | 所有工作队列共享 worker 池、按运行中 worker 数动态调整并发的工作队列实现 | 5.12 |
+| 不变 TSC | Invariant TSC | 恒速递增且在 C-state 中不停止的 TSC（`constant_tsc` + `nonstop_tsc`） | 8.3 |
 | 不可屏蔽中断 | Non-Maskable Interrupt，NMI | 不受 `RFLAGS.IF` 屏蔽的中断，向量 2 | 5.1 |
 | 布隆过滤器 | Bloom Filter | MGLRU 老化时记录值得扫描的 PMD，跳过冷区域 | 4.10 |
 | 层 | Tier | MGLRU 代内按文件描述符访问次数的细分 | 4.10 |
+| 超限 | Overrun | 周期定时器在通知被处理前错过的周期数，POSIX 定时器由 `timer_getoverrun()` 报告 | 8.9 |
 | 程序序 | Program Order | 任务迁移或睡眠唤醒前后，其操作保持程序顺序的保证 | 3.4 |
+| 持久时钟 | Persistent Clock | 断电后仍计时、可在关中断时读取的时钟，x86 上为 CMOS RTC，用于启动与挂起恢复时取得墙上时间 | 8.4 |
 | 处理器间中断 | Inter-Processor Interrupt，IPI | 一个 CPU 经本地 APIC 向其他 CPU 投递的中断 | 4.6 |
 | 次缺页 | Minor Fault | 无需 I/O 即可完成的缺页，计入 `min_flt` | 4.8 |
 | 存储缓冲区 | Store Buffer | CPU 内暂存待提交写操作的缓冲，导致 x86 上的写后读重排 | 7.3 |
@@ -31,6 +36,7 @@
 | 大页 | Huge Page | 以 PMD（2 MB）或 PUD（1 GB）直接映射的页 | 4.13 |
 | 代 | Generation | MGLRU 中按年龄划分的页集合，以 `max_seq`/`min_seq` 编号 | 4.10 |
 | 代理执行 | Proxy Execution | 让持锁任务借用等待者的调度上下文运行（`CONFIG_SCHED_PROXY_EXEC`） | 3.1 |
+| 单调时钟 | Monotonic Clock | 不可设置、单调递增的 `CLOCK_MONOTONIC`，不含系统挂起时间 | 8.1 |
 | 等待队列 | Wait Queue | 以 `wait_queue_head` 组织的睡眠任务链表，由 `wake_up()` 系列逐个调用唤醒函数 | 3.2 |
 | 调度策略 | Scheduling Policy | `SCHED_NORMAL`、`SCHED_FIFO` 等，用户态可见 | 3.1 |
 | 调度队列 | Dispatch Queue，DSQ | sched_ext 中承载待运行任务的队列 | 3.11 |
@@ -40,14 +46,18 @@
 | 调度时钟中断 | Scheduler Tick | 以 `HZ` 频率触发、驱动 `sched_tick()` 的周期性时钟中断，正文简称 tick | 3.1 |
 | 调度域 | Scheduling Domain | 按硬件拓扑组织的 CPU 层级，`struct sched_domain` | 3.9 |
 | 调度组 | Scheduling Group | 调度域内参与负载比较的 CPU 子集，`struct sched_group` | 3.9 |
+| 定时器迁移层次 | Timer Migration Hierarchy | 空闲 CPU 把最早的全局定时器登记到按拓扑组织的层次中、由活跃 CPU 代为执行的机制（v6.9） | 8.7 |
+| 定时器松弛 | Timer Slack | hrtimer 允许推迟到期的区间，用于合并唤醒；任务的默认值为 `timer_slack_ns` | 8.9 |
 | 丢失唤醒 | Lost Wakeup | 等待方检查条件与睡眠之间错过唤醒的竞态 | 3.2 |
 | 动态抢占 | Dynamic Preemption | `CONFIG_PREEMPT_DYNAMIC`，用 static call / static key 在启动或运行时切换抢占模型 | 3.5 |
+| 动态时钟 | Dynamic POSIX Clock | 以文件描述符编码时钟 ID 的 POSIX 时钟，如 PTP 硬件时钟 | 8.11 |
 | 抖动 | Thrashing | 工作集超过内存，频繁回收与重新读入导致系统几乎停滞 | 4.10 |
 | 读拷贝更新 | Read-Copy Update，RCU | 读者无锁、写者发布新版本并在宽限期后回收旧版本的同步机制 | 7.9 |
 | 读写锁 | Reader-Writer Lock | 允许多个读者或一个写者的自旋锁，`rwlock_t` | 7.5 |
 | 读写信号量 | Reader-Writer Semaphore，rwsem | 可睡眠的读写锁，`struct rw_semaphore` | 7.7 |
 | 多尺寸 THP | Multi-size THP，mTHP | 介于 4 KB 与 2 MB 之间的匿名大 folio（v6.8） | 4.8 |
 | 多代 LRU | Multi-Gen LRU，MGLRU | v6.1 起的多代页面回收算法（`CONFIG_LRU_GEN`） | 4.10 |
+| 多粒度时间戳 | Multigrain Timestamp | 文件系统平时取粗粒度时间、需要区分时才取精确时间的时间戳机制（v6.13） | 8.4 |
 | 惰性抢占 | Lazy Preemption | lazy 抢占模型下以 `TIF_NEED_RESCHED_LAZY` 标记、推迟到返回用户态或下一个 tick 才执行的抢占 | 3.2 |
 | 惰性 TLB | Lazy TLB | 内核线程借用上一任务地址空间而不切换页表 | 3.2 |
 | 返回栈缓冲区 | Return Stack Buffer，RSB | CPU 预测 `ret` 目标地址的硬件栈，上下文切换时需填充以缓解推测执行攻击 | 3.2 |
@@ -58,7 +68,9 @@
 | 复合页 | Compound Page | 多个连续页组成的整体，由头页与尾页构成 | 4.1 |
 | 负载均衡 | Load Balancing | 在 CPU 之间迁移任务以纠正负载不均 | 3.9 |
 | 负载均值 | Load Average | `/proc/loadavg` 中可运行与不可中断睡眠任务数的 1、5、15 分钟指数平均 | 3.5 |
+| 辅助时钟 | Auxiliary Clock | 自 `CLOCK_AUX` 起、各有独立 timekeeper 的可设置与调频的 POSIX 时钟（`CONFIG_POSIX_AUX_CLOCKS`，v6.17） | 8.1 |
 | 高精度定时器 | High-Resolution Timer，hrtimer | 纳秒精度的内核定时器，模拟的周期 tick 与 hrtick 都基于它实现 | 3.2 |
+| 高精度事件定时器 | High Precision Event Timer，HPET | 芯片组中的 MMIO 定时器，含一个自由运行的主计数器与若干比较器 | 8.1 |
 | 工作队列 | Workqueue | 在内核线程中执行可睡眠延迟工作的机制 | 4.3 |
 | 工作项 | Work Item | 提交给工作队列的函数及其数据，`struct work_struct` | 5.12 |
 | 故障 / 陷阱 / 终止 | Fault / Trap / Abort | 按返回地址与可恢复性划分的三类异常 | 5.1 |
@@ -76,7 +88,9 @@
 | 获取 / 释放 | Acquire / Release | 单向内存序：获取之后的访问不提前，释放之前的访问不推后 | 7.3 |
 | 计费 | Charge | 把内存用量计入某个 memcg | 4.14 |
 | 机器检查异常 | Machine Check Exception，#MC | CPU 检测到硬件错误时触发的异常，向量 18 | 5.4 |
+| 计时 CPU | Timekeeping CPU | 负责推进 jiffies 与 timekeeper 的 CPU，`tick_do_timer_cpu` | 8.6 |
 | 基于对象的反向映射 | Object-based Reverse Mapping | 经 `folio->mapping` 与 `index` 计算虚拟地址的 rmap 方案 | 4.9 |
+| 间隔定时器 | Interval Timer，itimer | `setitimer()` 提供的每进程三个定时器：`ITIMER_REAL`、`ITIMER_VIRTUAL`、`ITIMER_PROF` | 8.11 |
 | 交换表 | Swap Table | v6.18 起每 cluster 一页的交换缓存数组 | 4.11 |
 | 交换槽位 | Swap Slot | 交换设备上存放一页的位置 | 4.11 |
 | 交换缓存 | Swap Cache | 交换槽位到 folio 的映射，同步换入换出 | 4.11 |
@@ -89,6 +103,7 @@
 | 静止状态 | Quiescent State | RCU 术语，CPU 不处于读临界区的时刻 | 3.2 |
 | 救援线程 | Rescuer | `WQ_MEM_RECLAIM` 工作队列专属的 worker，保证内存回收路径前进 | 5.12 |
 | 局部向量表 | Local Vector Table，LVT | 本地 APIC 中为定时器、性能计数器等本地中断源配置向量的寄存器组 | 5.5 |
+| 可延迟定时器 | Deferrable Timer | 带 `TIMER_DEFERRABLE` 标志、不会唤醒空闲 CPU 的时间轮定时器 | 8.7 |
 | 空闲核 | Idle Core | 所有 SMT 兄弟线程都空闲的物理核 | 3.12 |
 | 宽限期 | Grace Period | 所有 CPU 都至少经历一次静止状态的时间段 | 7.9 |
 | 扩展静止状态 | Extended Quiescent State，EQS | CPU 处于 idle 或 NO_HZ_FULL 用户态，RCU 不关注它 | 7.10 |
@@ -111,6 +126,8 @@
 | 票号锁 | Ticket Lock | 按取号顺序获取的公平自旋锁，x86 上已被 qspinlock 取代 | 7.4 |
 | 迁移类型 | Migrate Type | 按页块记录的可移动性分类（不可移动、可移动、可回收等） | 4.1 |
 | 迁移项 | Migration Entry | 页迁移期间替代 PTE 的特殊不存在项 | 4.11 |
+| 迁移者 | Migrator | 定时器迁移层次中负责代为处理组内空闲子节点事件的子节点 | 8.8 |
+| 墙上时间 | Wall Time | 日历时间，即 `CLOCK_REALTIME`，自 1970-01-01 UTC 起计 | 8.1 |
 | 抢占 | Preemption | 在任务未主动让出时强制切换到其他任务 | 3.1 |
 | 抢占模型 | Preemption Model | none / voluntary / full / lazy，决定哪些抢占点生效、惰性请求设置哪个标志位 | 3.5 |
 | 抢占点 | Preemption Point | 检查重调度标志并可能进入调度器的位置，如 `preempt_enable()`、中断返回、返回用户态 | 3.2 |
@@ -124,14 +141,25 @@
 | 任务优先级寄存器 | Task Priority Register，TPR | 本地 APIC 中屏蔽低优先级类中断的寄存器，Linux 固定为 `0x10` | 5.5 |
 | 任务状态段 | Task State Segment，TSS | x86_64 上提供 `sp0` 与 IST 栈指针的结构 | 5.1 |
 | 入口栈 | Entry Stack | cpu_entry_area 中供用户态进入内核时使用的跳板栈 | 4.6 |
+| 软到期 / 硬到期 | Soft / Hard Expiry | hrtimer 到期区间的起点与终点：红黑树按硬到期排序，软到期已过即可执行回调 | 8.9 |
 | 软锁死 / 硬锁死 | Soft Lockup / Hard Lockup | CPU 长时间不可调度 / 长时间不响应中断 | 7.11 |
 | 软中断 | Softirq | 静态定义的 per-CPU 下半部，在硬中断退出或 ksoftirqd 中执行 | 7.1 |
+| 闰秒 | Leap Second | 为使 UTC 与地球自转一致而插入或删除的一秒，插入时出现 23:59:60 | 8.5 |
 | 上半部 / 下半部 | Top Half / Bottom Half | 中断处理中必须立即完成的部分与可延迟执行的部分 | 5.9 |
 | 上下文跟踪 | Context Tracking | 记录 CPU 处于用户态、内核态或 idle，供 RCU 与时间统计使用 | 7.10 |
 | 上下文切换 | Context Switch | — | 3.1 |
+| 时间戳计数器 | Time Stamp Counter，TSC | x86 处理器内部按固定节拍递增的 64 位计数器，`rdtsc` 读取 | 8.1 |
+| 时间轮 | Timer Wheel | 按相对到期时间把 `timer_list` 散列到多层桶中的数据结构，层越高粒度越粗 | 5.9 |
+| 时间命名空间 | Time Namespace | 为 `CLOCK_MONOTONIC` 与 `CLOCK_BOOTTIME` 提供每命名空间偏移的命名空间（v5.6） | 8.12 |
 | 时间片 | Slice | EEVDF 中任务每次请求的运行长度，`se->slice` | 3.3 |
 | 时间片保护 | Run to Parity | `RUN_TO_PARITY`，选中后在保护期内不被轻易切走 | 3.3 |
+| 时间维护 | Timekeeping | 维护当前时间及各 POSIX 时钟的子系统，核心为 `struct timekeeper` | 8.1 |
 | 实时内核 | Real-Time Kernel，PREEMPT_RT | 开启 `CONFIG_PREEMPT_RT` 的内核：`spinlock_t` 等换成基于 rt_mutex 的可睡眠锁，中断强制线程化 | 3.2 |
+| 实时时钟 | Real-Time Clock，RTC | 断电后靠电池维持计时的硬件时钟，只有秒级精度 | 8.5 |
+| 时钟事件设备 | Clock Event Device | 可编程定时器硬件的抽象，`struct clock_event_device` | 8.1 |
+| 时钟源 | Clocksource | 自由运行硬件计数器的抽象，`struct clocksource` | 8.1 |
+| 时钟源看门狗 | Clocksource Watchdog | 用一个可靠时钟源周期性检验其他时钟源（主要是 TSC）是否可信的机制 | 8.2 |
+| 始终运行 APIC 定时器 | Always Running APIC Timer，ARAT | 在所有 C-state 中都不停止的 LAPIC 定时器，无需 tick 广播 | 8.6 |
 | 首次适配 | First Fit | 在空闲区间中选择第一个足够大的区间 | 4.6 |
 | 数据竞争 | Data Race | 至少一方为普通写的并发访问，LKMM 中行为未定义 | 7.3 |
 | 双重故障 | Double Fault，#DF | 投递异常过程中再次发生异常，x86_64 上常由栈溢出引起 | 5.1 |
@@ -140,6 +168,7 @@
 | 碎片化指数 | Fragmentation Index | 判断分配失败源于内存不足还是碎片化的指标 | 4.12 |
 | 锁持有者抢占 | Lock Holder Preemption | 虚拟机中持锁 vCPU 被宿主机调度出去，其他 vCPU 空转 | 7.4 |
 | 锁类 | Lock Class | lockdep 中按初始化位置归类的一组锁 | 7.11 |
+| 锁相环 / 锁频环 | Phase-Locked Loop，PLL / Frequency-Locked Loop，FLL | NTP 内核时钟规程依据相位偏差调整频率的两种算法 | 8.5 |
 | 锁依赖验证器 | Lock Dependency Validator，lockdep | 运行时记录加锁顺序并检测潜在死锁的调试工具 | 7.11 |
 | 提交记账 | Commit Accounting | 统计私有可写映射承诺的内存量，`Committed_AS` | 4.7 |
 | 透明大页 | Transparent Huge Page，THP | 缺页时自动尝试分配大页，失败回退 | 4.13 |
@@ -149,6 +178,7 @@
 | 外部碎片 | External Fragmentation | 空闲页总量足够但缺少连续块 | 4.12 |
 | 完全公平调度器 | Completely Fair Scheduler，CFS | v2.6.23～v6.5 的公平调度算法 | 3.3 |
 | 完全抢占 | Full Preemption | full 抢占模型：`preempt_count` 为 0 的内核代码随时可被抢占（`CONFIG_PREEMPT`） | 3.5 |
+| 网络时间协议 | Network Time Protocol，NTP | 与外部时间源同步本机时钟的协议，内核提供 `adjtimex()` 时钟规程接口 | 8.5 |
 | 未接受内存 | Unaccepted Memory | 机密虚拟机中须显式接受后才能使用的内存 | 4.2 |
 | 伪共享 | False Sharing | 不同 CPU 频繁写入同一缓存行中的不同数据，导致该缓存行在 CPU 间反复迁移 | 3.1 |
 | 伪唤醒 | Spurious Wakeup | 被唤醒时等待条件并不成立的唤醒，等待方须在循环中重新检查条件 | 3.2 |
@@ -162,6 +192,7 @@
 | 信号量 | Semaphore | 允许至多 N 个持有者的睡眠锁，`struct semaphore` | 7.7 |
 | 性能域 | Performance Domain | 共享同一频率的一组 CPU，EAS 以它为单位估算能耗 | 3.12 |
 | 修正唤醒规则 | Revised Wakeup Rule | 受约束 Deadline 任务唤醒时削减预算而非重开周期 | 3.7 |
+| 虚拟动态共享对象 | virtual Dynamic Shared Object，vDSO | 内核映射到每个进程中的共享库，在用户态完成 `clock_gettime()` 等调用 | 8.12 |
 | 虚拟截止时间 | Virtual Deadline | `vruntime + slice / weight` | 3.3 |
 | 虚拟内存区域 | Virtual Memory Area，VMA | 进程地址空间中属性相同的一段区间，`vm_area_struct` | 4.7 |
 | 虚拟时间 | Virtual Time，V | 所有实体 vruntime 的加权平均 | 3.3 |
@@ -176,6 +207,7 @@
 | 异常表 | Exception Table | 记录允许出错的内核指令及其修复地址的表，`__ex_table` | 5.3 |
 | 移交 | Handoff | 解锁者把锁直接交给指定的等待者，防止饥饿 | 7.6 |
 | 硬件中断号 | Hardware IRQ Number，hwirq | 中断控制器本地的输入编号，在 `irq_domain` 内唯一 | 5.6 |
+| 影子 timekeeper | Shadow Timekeeper | 写者修改的 timekeeper 副本，修改完成后在顺序计数写区间内整体复制给读者副本 | 8.4 |
 | 硬中断栈 | Hardirq Stack | 每 CPU 16 KB 的中断处理栈，`hardirq_stack_ptr` | 5.1 |
 | 有界拖延 | Bounded Tardiness | 多核全局 EDF 下任务完成时间超过截止时间的量有上界 | 3.7 |
 | 优先级反转 | Priority Inversion | 高优先级任务因等待低优先级任务持有的资源而被中优先级任务间接阻塞 | 3.6 |
@@ -214,4 +246,4 @@
 
 ## 不翻译的术语
 
-`EEVDF`、`CFS`、`PELT`、`RCU`、`per-CPU`、`softirq`、`tasklet`、`slab`、`page cache`、`vruntime`、`lag`、`next buddy`、`nice`、`idle`、`dl_server`、`sched_ext`、`uclamp`、`PSI`、`folio`、`memblock`、`vmemmap`、`vmalloc`、`SLUB`、`kswapd`、`kcompactd`、`khugepaged`、`shrinker`、`zswap`、`zram`、`anon_vma`、`lruvec`、`hugetlbfs`、`GFP`、`qspinlock`、`qrwlock`、`seqcount`、`mutex`、`rwsem`、`rt_mutex`、`OSQ`、`futex`、`SRCU`、`lockdep`、`irq_work`、`wake_q`、`kworker`、`ksoftirqd`、`NAPI`、`x2APIC`、`hwirq`、`tick`、`hrtick`、`static call`、`static key`、`housekeeping`
+`EEVDF`、`CFS`、`PELT`、`RCU`、`per-CPU`、`softirq`、`tasklet`、`slab`、`page cache`、`vruntime`、`lag`、`next buddy`、`nice`、`idle`、`dl_server`、`sched_ext`、`uclamp`、`PSI`、`folio`、`memblock`、`vmemmap`、`vmalloc`、`SLUB`、`kswapd`、`kcompactd`、`khugepaged`、`shrinker`、`zswap`、`zram`、`anon_vma`、`lruvec`、`hugetlbfs`、`GFP`、`qspinlock`、`qrwlock`、`seqcount`、`mutex`、`rwsem`、`rt_mutex`、`OSQ`、`futex`、`SRCU`、`lockdep`、`irq_work`、`wake_q`、`kworker`、`ksoftirqd`、`NAPI`、`x2APIC`、`hwirq`、`tick`、`hrtick`、`static call`、`static key`、`housekeeping`、`jiffies`、`HZ`、`timekeeper`、`timerfd`、`alarmtimer`、`kvm-clock`、`pvclock`、`vvar`

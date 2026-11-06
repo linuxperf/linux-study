@@ -62,7 +62,20 @@
   - [7.9 RCU 原理与使用](07-sync/09-rcu-basics.md)
   - [7.10 Tree RCU：宽限期检测与回调处理](07-sync/10-tree-rcu.md)
   - [7.11 lockdep 与锁调试](07-sync/11-lockdep.md)
-- 第 8 章 时间与定时器（规划中）
+- [第 8 章 时间与定时器](08-time/README.md)
+  - [8.1 时间子系统概览：硬件、分层与时间表示](08-time/01-overview.md)
+  - [8.2 时钟源框架：clocksource](08-time/02-clocksource.md)
+  - [8.3 x86 时钟硬件：TSC、HPET 与 kvm-clock](08-time/03-x86-clock-hw.md)
+  - [8.4 时间维护：timekeeper 与读时接口](08-time/04-timekeeping.md)
+  - [8.5 NTP 调频、闰秒与 RTC 同步](08-time/05-ntp-rtc.md)
+  - [8.6 时钟事件设备与 tick 设备](08-time/06-clockevents.md)
+  - [8.7 时间轮定时器：timer_list](08-time/07-timer-wheel.md)
+  - [8.8 定时器迁移层次：空闲 CPU 的全局定时器](08-time/08-timer-migration.md)
+  - [8.9 高精度定时器：hrtimer](08-time/09-hrtimer.md)
+  - [8.10 tick 模拟与无 tick 模式](08-time/10-tick-nohz.md)
+  - [8.11 POSIX 时钟与定时器接口](08-time/11-posix-timers.md)
+  - [8.12 vDSO 与时间命名空间](08-time/12-vdso-timens.md)
+  - [8.13 内核中的延时与睡眠](08-time/13-delay-sleep.md)
 - 第 9 章 虚拟文件系统（规划中）
 - 第 10 章 块设备层（规划中）
 - 第 11 章 网络栈（规划中）

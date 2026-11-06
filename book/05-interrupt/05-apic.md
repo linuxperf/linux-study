@@ -277,7 +277,7 @@ static notrace __maybe_unused void kvm_guest_apic_eoi_write(void)
 
 ### LAPIC 定时器
 
-LAPIC 定时器是每个 CPU 私有的时钟事件设备（clock event device），是 x86 上 tick 与高精度定时器的主要硬件来源（第 8 章）。它有两种编程方式：
+LAPIC 定时器是每个 CPU 私有的时钟事件设备（clock event device），是 x86 上 tick 与高精度定时器的主要硬件来源（8.6 节）。它有两种编程方式：
 
 [`arch/x86/kernel/apic/apic.c:410-431`](../../linux/arch/x86/kernel/apic/apic.c#L410-L431)（v6.18.60）
 

@@ -317,7 +317,7 @@ void update_process_times(int user_tick)
 }
 ```
 
-时钟事件设备、jiffies 与定时器轮的细节留给第 8 章，这里只需记住：`sched_tick()` 以 `HZ` 频率、在硬中断上下文中、关中断执行。
+时钟事件设备、jiffies 与时间轮的细节见 8.6、8.7、8.10 节，这里只需记住：`sched_tick()` 以 `HZ` 频率、在硬中断上下文中、关中断执行。
 
 这一点在 `PREEMPT_RT` 下同样成立。实时内核把未显式标记 `HRTIMER_MODE_HARD` 的高精度定时器一律推迟到软中断上下文执行（[`kernel/time/hrtimer.c:1620-1627`](../../linux/kernel/time/hrtimer.c#L1620-L1627)），而模拟 tick 的定时器以 `HRTIMER_MODE_ABS_HARD` 创建（[`kernel/time/tick-sched.c:1576`](../../linux/kernel/time/tick-sched.c#L1576)），下文的 hrtick 也使用 `_HARD` 模式。
 
