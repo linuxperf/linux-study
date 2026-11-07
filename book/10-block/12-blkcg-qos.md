@@ -1,4 +1,4 @@
-# 10.10 块 I/O 控制组与服务质量
+# 10.12 块 I/O 控制组与服务质量
 
 > **本节源码**：[`block/blk-cgroup.c`](../../linux/block/blk-cgroup.c)、[`block/blk-cgroup.h`](../../linux/block/blk-cgroup.h)、[`block/blk-throttle.c`](../../linux/block/blk-throttle.c)、[`block/blk-rq-qos.h`](../../linux/block/blk-rq-qos.h)、[`block/blk-wbt.c`](../../linux/block/blk-wbt.c)、[`block/blk-iocost.c`](../../linux/block/blk-iocost.c)
 > **关键函数**：`bio_associate_blkg()`、`blk_cgroup_bio_start()`、`__blk_throtl_bio()`、`rq_qos_throttle()`、`blkcg_print_stat()`
@@ -6,7 +6,7 @@
 
 ## 概述
 
-多个租户共享设备时，提升总吞吐量并不能保证资源隔离。块 I/O 控制组负责给访问标注归属，并为统计、限速和比例分配提供基础；QoS 钩子则允许策略在请求分配、派发与完成等阶段施加控制。绝对带宽上限、权重公平和保护读时延解决的问题不同，也不都依赖 I/O 调度器。本节以 cgroup v2 为主，明确当前配置下哪些机制可用。
+多个租户共享设备时，提升总吞吐量并不能保证资源隔离。块 I/O 控制组（Block I/O Cgroup，blkcg）负责给访问标注归属，并为统计、限速和比例分配提供基础；服务质量（Quality of Service，QoS）钩子则允许策略在请求分配、派发与完成等阶段施加控制。绝对带宽上限、权重公平和保护读时延解决的问题不同，也不都依赖 I/O 调度器。本节以 cgroup v2 为主，明确当前配置下哪些机制可用。
 
 ## 核心数据结构
 
@@ -52,7 +52,19 @@ struct rq_qos_ops {
 
 ## 主流程分析
 
-下面把归属初始化与实际提交流程分开；它们不必发生在同一个函数调用内。
+下面把归属初始化与实际提交流程分开；它们不必发生在同一个函数调用内。主线之外，要先认清每个控制器限制的是哪一种资源：
+
+| 机制 | 控制目标 | 主要作用点 | 生效条件 |
+|---|---|---|---|
+| blkcg 基础框架 | 身份与统计 | bio 构造、重映射、提交 | cgroup 归属与设备队列关联 |
+| blk-throttle / `io.max` | 绝对字节率 / IOPS 上限 | request 创建之前的 bio 提交 | 相应层次设置了限额 |
+| WBT | 用写侧深度控制保护设备时延 | `rq_qos` 等待与反馈 | 队列策略实际启用 |
+| IOCost | 按估算设备成本进行层次权重分配 | `rq_qos` 与成本反馈 | 按设备启用成本控制器 |
+| BFQ 组调度 | 基于队列 / 组预算分配服务 | I/O 调度器 | 设备选用 BFQ 且组调度可用 |
+
+配置、接口与实现分别在下文核对。`none` 只取消 elevator 策略，不会自动禁用前四行机制。
+
+[`block/blk-cgroup.c:2157-2249`](../../linux/block/blk-cgroup.c#L2157-L2249)、[`block/blk-core.c:725-757`](../../linux/block/blk-core.c#L725-L757)、[`block/blk-core.c:875-877`](../../linux/block/blk-core.c#L875-L877)、[`block/blk-mq.c:3058-3087`](../../linux/block/blk-mq.c#L3058-L3087)（v6.18.60）
 
 ```text
 构造或改变 bio 目标设备
@@ -108,6 +120,12 @@ BFQ 的 cgroup v2 权重接口是 `io.bfq.weight`，依赖 BFQ 已被选为设�
 
 非根 cgroup 的 `blk_cgroup_bio_start()` 在 bio 提交侧累加字节和次数，`BIO_CGROUP_ACCT` 防止拆分重复累计字节，但次数可以随拆分增加，见 [`block/blk-cgroup.c:2207-2249`](../../linux/block/blk-cgroup.c#L2207-L2249)。根组又从系统设备统计取数。因此 `io.stat` 的 `rios` / `wios` 与设备完成请求数不必完全相同，不能仅按两者差值判定丢 I/O。
 
+### 三种“等待”不能用同一个函数时长替代
+
+`io.max` 可以把 bio 留在异步服务队列中；`__blk_throtl_bio()` 返回不代表等待结束。`rq_qos_throttle()` 则在新请求分配前运行，其返回之后才进入标签等待；plug 缓存命中也会先执行 QoS 节流再绑定数据，见 [`block/blk-mq.c:3058-3087`](../../linux/block/blk-mq.c#L3058-L3087)、[`block/blk-mq.c:3204-3224`](../../linux/block/blk-mq.c#L3204-L3224)。
+
+因此，`blk_mq_get_tag()` 耗时不包含此前的 QoS 等待，`block_bio_queue` 又位于 blk-throttle 之后。分析延迟应先确定哪个阶段可见，再补充缺失区间，而不是把所有 issue 前的时间都称为“调度器排队”。完整观测方法见 [10.14](14-observability.md)。
+
 ### 控制器叠加需要标明实验条件
 
 `io.max`、IOCost、WBT 与 I/O 调度器作用于不同位置，观测到的总等待可能由多个策略共同产生。分析一个控制器时，应记录其他策略状态，不能只改变一个权重值就把所有现象归因于该权重。
@@ -125,7 +143,7 @@ BFQ 的 cgroup v2 权重接口是 `io.bfq.weight`，依赖 BFQ 已被选为设�
 | `/sys/block/<disk>/queue/wbt_lat_usec` | WBT 目标及运行时开关 | [`block/blk-sysfs.c:620-693`](../../linux/block/blk-sysfs.c#L620-L693)，`CONFIG_SYSFS=y`、`CONFIG_BLK_WBT=y` |
 | `wbt:wbt_stat`、`wbt:wbt_step` | 读写时延统计、深度缩放与限制 | [`include/trace/events/wbt.h:15-126`](../../linux/include/trace/events/wbt.h#L15-L126)，`CONFIG_TRACING=y` |
 
-动态探针可在 `__blk_throtl_bio()` 或相应策略的 throttle 方法观察是否进入限流，但仅测函数执行时间不一定包含 bio 在异步服务队列中的全部停留时间。
+动态探针可在 `__blk_throtl_bio()` 或相应策略的 throttle 方法观察是否进入限流，但仅测函数执行时间不一定包含 bio 在异步服务队列中的全部停留时间。`rq_qos_throttle()` 本身为内联分发助手，不应假定存在独立可挂载符号，见 [`block/blk-rq-qos.h:161-168`](../../linux/block/blk-rq-qos.h#L161-L168)。本配置 `CONFIG_KPROBES=y`、`CONFIG_KPROBE_EVENTS=y`；事件接口还依赖 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`。
 
 ## 小结
 

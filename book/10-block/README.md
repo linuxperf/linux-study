@@ -1,36 +1,59 @@
 # 第 10 章 块设备层
 
-本章以 Linux v6.18.60、x86_64 为基准，分析块设备层如何把上层的 `bio` 组织成设备可执行的请求，并把完成与错误传回提交者。阅读主线是：**设备与地址 → 数据描述 → 提交检查 → 请求分配 → 合并和调度 → 驱动 → 完成**，持久化语义与资源控制贯穿其中。
+本章以 Linux v6.18.60、x86_64 为基准，沿 **设备对象 → bio → 提交检查 → request 与标签 → 合并和派发 → 完成** 分析通用块层，再分别讨论持久化、范围操作、zoned 写入约束与资源控制。最后用 NVMe PCI、virtio-blk 对照驱动接口，以只读 `null_blk` 实验连接源码与运行时观测。
 
-这里的“队列”不都是硬件环：`request_queue` 是设备的块层入口，`blk_mq_ctx` 是面向提交 CPU 的软件上下文，`blk_mq_hw_ctx` 是面向驱动队列的块层上下文；NVMe 的提交队列与 virtio 的描述符环还在驱动一侧。理解这些边界，比记住某条调用链更重要。
+全章围绕三个问题展开：**数据范围如何描述，执行资源由谁持有，完成结果在什么边界传回上层**。`submit_bio()` 返回、请求分配成功、驱动接收、字节完成、请求资源归还和数据持久化不是同一时刻；“队列”也不总是设备命令环。先建立这些边界，再看各个优化分支。
+
+## 阅读路线与章节分工
 
 ```mermaid
 flowchart TD
-    A[文件系统、直接 I/O、交换] --> B[bio：设备范围与内存向量]
-    B --> C[提交检查、分区重映射、blk-throttle]
-    C --> D[堆叠驱动的 submit_bio]
-    D --> B
-    C --> E[blk-mq：拆分、合并、分配 request]
-    E --> F[plug / I/O 调度器 / 软件队列]
-    F --> G[派发、驱动标签、queue_rq]
-    G --> H[NVMe / virtio-blk / 其他驱动]
-    H --> I[请求完成、bio_endio、上层回调]
+    A[10.1 对象与生命周期全景] --> B[10.2 设备模型]
+    B --> C[10.3 bio 与完成依赖]
+    C --> D[10.4 提交检查与重映射]
+    D --> E[10.5 request、队列映射与标签]
+    E --> F[10.6 合并与派发 / 10.7 调度器]
+    F --> G[10.8 完成、超时与轮询]
+    G --> H[10.9 持久化序列]
+    G --> I[10.10 范围操作 / 10.11 zoned 约束]
+    D -. 归属与等待 .-> J[10.12 blkcg 与 QoS]
+    G --> K[10.13 驱动衔接]
+    H --> L[10.14 观测与实验]
+    I --> L
+    J --> L
+    K --> L
 ```
 
-*图 10-0：块 I/O 的提交与完成主线，省略错误分支及旁路优化*
+*图 10-0：章节依赖与阅读路线；这是学习顺序，不是每条 I/O 必经的执行路径*
 
-## 阅读建议
+- **第一次阅读**：先读 10.1～10.8，走通普通读写的对象与资源生命周期；再读 10.13，用具体驱动验证 `queue_rq()` 和完成回调的边界。
+- **持久化与特殊操作**：10.9 只讨论 flush / FUA；10.10 区分 discard、清零和安全擦除；10.11 独立讨论 zone、append 与顺序写入。三者不能统一解释成“另一种普通写”。
+- **性能与隔离**：结合 10.5～10.7、10.12 和 10.14，区分请求分配前等待、派发等待与驱动处理后的时间，先确定计数口径，再做时延统计。
+- **上层背景**：第 9 章解释文件读写、page cache 和回写。本章从已经映射好的设备范围开始，不重复文件地址映射；软中断、工作队列、引用计数与定时器分别参照第 5、7、8 章。
+- **观测分工**：各节的“可观测性”把本节机制对应到事件、属性或探针；10.14 统一解释关联方法、设备统计与可复现步骤，避免每节重复同一套跟踪命令。
 
-- 先读 10.1，区分设备对象与 I/O 对象，建立提交、派发、完成和持久化的边界；再读 10.2～10.4，展开设备模型、数据描述和提交路径。第 9 章的文件读写与 page cache 提供上层背景，但不影响独立阅读本章。
-- 10.5～10.8 是请求路径的核心。对性能问题，先区分“等待分配标签”“等待派发”“驱动已经接收但未完成”三个阶段。
-- 10.9 讨论完成与持久化的区别，以及 discard 和分区存储设备的操作边界。
-- 10.10 讨论块 I/O 控制组（Block I/O Cgroup，blkcg）与服务质量（Quality of Service，QoS）；它们与 I/O 调度器不是同一个机制。
-- 10.11 用 NVMe PCI 与 virtio-blk 对照驱动接口；10.12 汇总观测方法并给出只针对 `null_blk` 的实验。
-- 本章涉及的软中断、工作队列、定时器、引用计数与 RCU，可分别对照第 5、7、8 章。
+## 小节索引
+
+| 小节 | 核心问题 | 与相邻小节的边界 |
+|---|---|---|
+| [10.1 块设备层概览：对象、分层与 I/O 生命周期](01-overview.md) | 块层接收什么、管理什么、何时算完成？ | 建立共同模型，不逐函数展开全部路径 |
+| [10.2 设备模型：gendisk、block_device 与队列生命周期](02-device-model.md) | 整盘与分区如何共享队列，发布、撤销和引用释放如何衔接？ | 区分对象引用、使用引用与派发同步；提交检查留给 10.4 |
+| [10.3 bio：数据描述、分配、拆分与完成链](03-bio.md) | 向量、迭代器与完成依赖如何协作？ | 描述符与数据页生命周期分开 |
+| [10.4 提交路径：检查、分区重映射与堆叠设备](04-submit.md) | 哪些检查在何时进行，如何避免递归加深？ | 到达 blk-mq 不代表已取得请求 |
+| [10.5 blk-mq：从 bio 到 request、队列映射与标签](05-blk-mq.md) | 请求对象、标签和队列引用如何交接？ | 终点是绑定请求，派发顺序留给后两节 |
+| [10.6 plug、请求合并与派发](06-merge-dispatch.md) | 如何批处理，资源不足时谁负责重跑？ | 通用机制，不推导调度器内部算法 |
+| [10.7 I/O 调度器：mq-deadline、Kyber 与 BFQ](07-iosched.md) | 顺序、时延反馈与预算公平各控制什么？ | 调度器与 blkcg / QoS 策略不混用 |
+| [10.8 请求完成、超时与轮询](08-completion.md) | 完成路由、字节推进与请求归还如何区分？ | 通用结束协议，不等于持久化保证 |
+| [10.9 写入持久化：缓存刷新、FUA 与 flush 序列](09-flush.md) | 为什么数据已完成还不能通知上层？ | 原请求与合成 flush 请求分开 |
+| [10.10 范围操作：discard、清零与安全擦除](10-range-ops.md) | 无数据向量的范围操作如何构造与回退？ | 丢弃、读回零与不可恢复不是同一语义 |
+| [10.11 分区存储设备：zone、append 与写入暂存](11-zoned.md) | 谁选择写入位置，谁协调同一 zone 的写？ | zone 不是 partition，zone 暂存不是任务 plug |
+| [10.12 块 I/O 控制组与服务质量](12-blkcg-qos.md) | I/O 属于谁，限制施加在哪个阶段？ | 归属、绝对限速、权重和时延保护分开 |
+| [10.13 驱动衔接：NVMe 与 virtio-blk](13-drivers.md) | 请求如何变成协议命令，再从完成项找回？ | 命令尝试与逻辑请求生命周期分开 |
+| [10.14 可观测性与 null_blk 实验](14-observability.md) | 如何把事件与统计变成可验证的判断？ | 只读路径实验，不证明真实介质性能或掉电安全 |
 
 ## 本章配置
 
-取值已核对仓库的 [`linux/.config`](../../linux/.config)。编译启用并不等于运行时生效：模块要加载，设备能力要协商，cgroup 控制器要启用。
+取值已核对仓库的 [`linux/.config`](../../linux/.config)。编译启用不等于运行时生效：模块要加载，设备能力要协商，cgroup 控制器要启用。实验前还必须核对虚拟机实际运行的内核。
 
 | 配置 | 取值 | 本章含义 |
 |---|---|---|
@@ -44,39 +67,24 @@ flowchart TD
 | `CONFIG_BLK_CGROUP_IOCOST` | y | I/O 成本控制器 |
 | `CONFIG_BLK_CGROUP_IOLATENCY` | n | 本配置不提供 `io.latency` 策略 |
 | `CONFIG_BLK_DEV_ZONED` | y | 分区存储设备支持 |
-| `CONFIG_BLK_RQ_ALLOC_TIME` | y | 支持记录请求分配起始时间，仍受队列运行时设置控制 |
+| `CONFIG_BLK_RQ_ALLOC_TIME` | y | 请求分配起始时间，仍受队列运行时设置控制 |
 | `CONFIG_BLK_DEV_NULL_BLK` | m | 实验设备 `null_blk` |
 | `CONFIG_VIRTIO_BLK` | y | virtio-blk 驱动 |
 | `CONFIG_BLK_DEV_NVME` / `CONFIG_NVME_CORE` | m / m | NVMe PCI 与公共核心 |
-| `CONFIG_NVME_MULTIPATH` | y | NVMe 多路径支持；10.11 以单路径为主 |
-| `CONFIG_TRACEPOINTS` / `CONFIG_TRACING` / `CONFIG_BLK_DEV_IO_TRACE` | y / y / y | 块事件与 blktrace 支持 |
+| `CONFIG_NVME_MULTIPATH` | y | NVMe 多路径支持；10.13 以单路径为主 |
+| `CONFIG_TRACEPOINTS` / `CONFIG_EVENT_TRACING` / `CONFIG_TRACING` | y / y / y | 块跟踪点及 tracefs 事件接口 |
+| `CONFIG_BLK_DEV_IO_TRACE` | y | blktrace 支持 |
 | `CONFIG_BLK_DEBUG_FS` / `CONFIG_DEBUG_FS` | y / y | 队列内部状态的 debugfs 入口 |
 | `CONFIG_SYSFS` / `CONFIG_PROC_FS` | y / y | 队列属性、设备统计 |
-| `CONFIG_KPROBES` / `CONFIG_KPROBE_EVENTS` | y / y | 动态函数探针，实际可挂载性须运行时确认 |
-
-## 小节索引
-
-| 小节 | 内容 |
-|---|---|
-| [10.1 块设备层概览：对象、分层与 I/O 生命周期](01-overview.md) | 职责边界、对象关系、提交与完成、地址口径及最小观测入口 |
-| [10.2 设备模型](02-device-model.md) | 磁盘、分区、队列及注册与退出 |
-| [10.3 bio](03-bio.md) | 向量、迭代器、内存池、拆分和完成链 |
-| [10.4 提交路径](04-submit.md) | 检查、重映射、递归转迭代 |
-| [10.5 blk-mq](05-blk-mq.md) | 软件 / 硬件上下文、队列映射与两类标签 |
-| [10.6 合并与派发](06-merge-dispatch.md) | plug、合并条件、背压与重启 |
-| [10.7 I/O 调度器](07-iosched.md) | mq-deadline、Kyber、BFQ 与 `none` |
-| [10.8 完成、超时与轮询](08-completion.md) | 部分完成、完成 CPU、超时工作与轮询 |
-| [10.9 持久化与空间操作](09-flush-discard.md) | flush / FUA、discard、清零及 zone 写入约束 |
-| [10.10 blkcg 与 QoS](10-blkcg-qos.md) | 归属、限速、WBT、IOCost 与计数口径 |
-| [10.11 驱动衔接](11-drivers.md) | NVMe PCI 与 virtio-blk 的命令和完成路径 |
-| [10.12 可观测性与实验](12-observability.md) | 事件、统计、时延分段与 `null_blk` |
+| `CONFIG_KPROBES` / `CONFIG_KPROBE_EVENTS` | y / y | 动态探针；实际可挂载性须运行时确认 |
 
 ## 范围与待完善
 
-- 本章覆盖通用块层与两种代表性驱动的主路径；不展开 SCSI 错误恢复、设备映射器各 target、MD RAID、完整的 NVMe 多路径与 fabrics 协议。
-- BFQ 与 IOCost 给出数据模型、控制目标及主要入口，不逐行推导其全部调度或反馈算法。
-- zone 写入约束已纳入 10.9；原子写、端到端数据完整性、内联加密只标明主路径位置，不作为完整专题。
-- [ ] 10.12 的命令已按源码与参数定义核对，但尚未在 `dev` 虚拟机中运行；后续补充内核版本、vCPU 数、队列配置和真实输出，不以推测输出代替测量。
+- 本章覆盖通用块层和两种代表性驱动，不展开 SCSI 错误恢复、设备映射器各 target、MD RAID、完整 NVMe 多路径与 fabrics 协议。
+- BFQ 与 IOCost 给出数据模型、控制目标和主要入口，不逐行推导全部调度与反馈算法。
+- 持久化、范围操作和 zone 写入已分为独立专题；原子写、端到端数据完整性、内联加密仅标明与主路径有关的位置，不作为完整专题。
+- 实验只操作本会话创建的 `null_blk`，使用只读负载和独立 trace 实例；不对系统盘执行 discard、清零、zone reset 或调度器切换。
+- [ ] 10.14 的脚本已按源码参数核对，但尚未在 `dev` 虚拟机中运行；需补充内核版本、vCPU、队列设置、跟踪丢失情况和真实输出，不以推测输出代替测量。
 - [ ] Mermaid 图尚需在最终出版渲染器中检查布局。
 
 ## 参考
@@ -85,3 +93,4 @@ flowchart TD
 - [`Documentation/block/biovecs.rst`](../../linux/Documentation/block/biovecs.rst)
 - [`Documentation/block/writeback_cache_control.rst`](../../linux/Documentation/block/writeback_cache_control.rst)
 - [`Documentation/admin-guide/cgroup-v2.rst`](../../linux/Documentation/admin-guide/cgroup-v2.rst)
+- [`Documentation/block/null_blk.rst`](../../linux/Documentation/block/null_blk.rst)

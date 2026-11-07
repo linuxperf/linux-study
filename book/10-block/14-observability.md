@@ -1,8 +1,8 @@
-# 10.12 可观测性与 null_blk 实验
+# 10.14 可观测性与 null_blk 实验
 
 > **本节源码**：[`include/trace/events/block.h`](../../linux/include/trace/events/block.h)、[`block/genhd.c`](../../linux/block/genhd.c)、[`block/blk-mq.c`](../../linux/block/blk-mq.c)、[`block/blk-mq-debugfs.c`](../../linux/block/blk-mq-debugfs.c)、[`drivers/block/null_blk/main.c`](../../linux/drivers/block/null_blk/main.c)
 > **关键函数**：`part_stat_show()`、`diskstats_show()`、`blk_account_io_start()`、`blk_account_io_done()`、`null_queue_rq()`
-> **前置知识**：10.4～10.10，tracefs 与 shell 的基本用法
+> **前置知识**：[10.4 提交路径](04-submit.md)～[10.8 完成](08-completion.md)、[10.12 资源控制](12-blkcg-qos.md)，tracefs 与 Bash 的基本用法
 
 ## 概述
 
@@ -47,7 +47,7 @@
 |---|---|---|
 | 上层入口 → 取得请求 | 节流、请求资源分配等前段等待 | 所有时间都在 I/O 调度器中 |
 | 请求插入 → issue | 该插入路径之后的排队与派发 | 每条请求都有此插入事件；包含全部 plug 等待 |
-| issue → 本次完成 | 驱动接收后的执行与完成处理时间 | 纯介质时间、完整系统调用时间 |
+| issue → 本次完成 | 驱动声明开始处理之后的尝试与完成处理时间 | 纯介质时间、完整系统调用时间；issue 本身也不证明设备入队成功 |
 | 首次进入 → 最终结束 | 若用可靠对象身份关联，可测完整请求生命周期 | 对应某个应用调用的完整时延 |
 
 `block_rq_complete` 可以表示部分完成，重排后也可能再次 issue；flush 还会有多个阶段。测量工具必须明确定义首次 / 最近一次 issue、是否跨重试累计、何时删除对象状态。仅靠文本事件做相邻行相减，不能给出一般并发场景下的准确时延。
@@ -74,6 +74,18 @@
 
 对多队列设备，活动时间占满一个采样窗口不能单独证明所有硬件资源都已饱和。应同时观察吞吐、尾延迟、深度、CPU 开销与控制器状态。
 
+### 3. 先形成可验证的诊断假设
+
+| 现象 | 先检查 | 不能直接下的结论 |
+|---|---|---|
+| 应用很慢，issue → complete 很短 | `io.max`、QoS、标签等待与 plug 阶段 | 设备快，所以块层一定没有等待 |
+| `stat` 在途量高，独立 `inflight` 低 | 请求是否已绑定但尚未派发 | 两个接口之一一定统计错误 |
+| issue 很多但完整请求数较少 | 重排、驱动入队失败、flush 阶段 | 上层重复提交或发生丢 I/O |
+| 有 issue，缺少普通 insert | 直接派发与 plug 批量分支 | 跟踪必然丢事件 |
+| `io.stat` 与设备统计次数不同 | bio / request 层级、拆分合并、根组统计路径 | 两者应按请求逐条对应 |
+
+这些假设分别回到 [10.5](05-blk-mq.md)、[10.6](06-merge-dispatch.md)、[10.9](09-flush.md)、[10.12](12-blkcg-qos.md) 的源码边界验证。不要在不知道事件是否覆盖目标区间时先给等待命名。
+
 ## 关键细节 / 设计考量
 
 - 设备统计应做两次采样取差值，而不是把开机累计值当成当前速率；设备重建、计数回绕与热拔除需要处理。
@@ -83,23 +95,25 @@
 
 ## 可观测性
 
-本配置启用 `CONFIG_SYSFS=y`、`CONFIG_PROC_FS=y`、`CONFIG_TRACEPOINTS=y`、`CONFIG_TRACING=y`、`CONFIG_BLK_DEV_IO_TRACE=y`、`CONFIG_DEBUG_FS=y`、`CONFIG_BLK_DEBUG_FS=y`。
+本配置启用 `CONFIG_SYSFS=y`、`CONFIG_PROC_FS=y`、`CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`、`CONFIG_BLK_DEV_IO_TRACE=y`、`CONFIG_DEBUG_FS=y`、`CONFIG_BLK_DEBUG_FS=y`。tracefs 事件不要求先运行 blktrace；两者是不同的采集入口。
 
 | 入口 | 最适合观察的问题 | 定义 |
 |---|---|---|
 | tracefs `events/block/*` | 提交、拆分、合并、插入、执行和完成的相对顺序 | [`include/trace/events/block.h`](../../linux/include/trace/events/block.h) |
 | `stat`、`/proc/diskstats` | 长期吞吐、合并与累计时延趋势 | [`block/genhd.c:1066-1107`](../../linux/block/genhd.c#L1066-L1107)、[`block/genhd.c:1361-1418`](../../linux/block/genhd.c#L1361-L1418) |
 | debugfs `block/<disk>/hctx<n>/dispatch`、`tags`、`sched_tags` | 遗留派发、驱动 / 调度器标签压力 | [`block/blk-mq-debugfs.c:588-601`](../../linux/block/blk-mq-debugfs.c#L588-L601) |
-| `io.stat`、`io.max`、`wbt:*` | 归属与策略等待 | [10.10](10-blkcg-qos.md) |
+| `io.stat`、`io.max`、`wbt:*` | 归属与策略等待 | [10.12](12-blkcg-qos.md) |
 | `null_queue_rq()` | 模拟设备的接收、故障注入与定时完成入口 | [`drivers/block/null_blk/main.c:1669-1723`](../../linux/drivers/block/null_blk/main.c#L1669-L1723) |
 
 ## 动手实验
 
 ### 实验环境与安全边界
 
-以下均在 **`dev` 虚拟机内，以 root 执行**；需要与运行内核匹配的 `null_blk` 模块、`fio` 和已挂载的 tracefs。先用 `uname -r` 核对，宿主机上存在源码不代表虚拟机正在运行这份内核。以下脚本为本书编写，**不是内核代码原文，也未在本次写作中实测**。
+以下均在 **`dev` 虚拟机内，以 root 在同一个 Bash 会话中按顺序执行**；不要在宿主机执行。需要与运行内核匹配的 `null_blk` 模块（本配置 `CONFIG_BLK_DEV_NULL_BLK=m`）、支持 `libaio` 引擎的 `fio`，以及可挂载的 tracefs。先用 `uname -r` 核对，宿主机有源码不代表虚拟机正运行这份内核。脚本是本书编写的实验程序，**不是内核源码原文，也尚未在 `dev` 虚拟机实测**。
 
-只操作本实验新建的 `/dev/nullb0`，不要替换为 `/dev/sda`、系统盘或生产逻辑卷。默认非内存后备模式不保存数据，不做数据正确性校验、文件系统或掉电持久化实验。
+只操作本会话新建的 `/dev/nullb0`，不要替换为系统盘或生产逻辑卷，也不要与其他会话共享这块实验设备。显式选择非内存后备、非 zoned 模式，设备不保存写入数据；所有负载均为只读，不测试数据正确性、discard、zone 管理或掉电持久化。
+
+目标不是给出性能排名，而是观察请求是否跳过普通插入路径，以及调度器切换后的事件和统计变化。前文解释的统计起点差异仍须结合源码判断；下面只在负载前后采样 `stat`，不会凭这两次采样重建完整的在途时间线。结果必须同时保存内核、CPU、模块参数和队列设置。
 
 ### 1. 建立可控的模拟设备
 
@@ -107,23 +121,35 @@
 
 ```bash
 set -eu
+test "$(id -u)" -eq 0
+for cmd in modprobe fio udevadm lsblk lscpu mountpoint mktemp; do
+    command -v "$cmd" >/dev/null
+done
+fio --enghelp=libaio >/dev/null
 if [ -d /sys/module/null_blk ] || [ -e /sys/class/block/nullb0 ]; then
     echo '已有 null_blk / nullb0，停止，避免影响其他实验。' >&2
     exit 1
 fi
+CH10_OUT=$(mktemp -d /tmp/ch10-block.XXXXXX)
 modprobe null_blk nr_devices=1 queue_mode=2 gb=1 bs=4096 \
-    submit_queues=2 hw_queue_depth=64 irqmode=2 completion_nsec=1000000
+    submit_queues=2 hw_queue_depth=64 irqmode=2 completion_nsec=1000000 \
+    memory_backed=0 cache_size=0 discard=0 zoned=0
 udevadm settle
 test -b /dev/nullb0
-lsblk -o NAME,MAJ:MIN,SIZE,TYPE,MOUNTPOINTS /dev/nullb0
-cat /sys/block/nullb0/queue/scheduler
-cat /sys/block/nullb0/queue/logical_block_size
-for f in /sys/block/nullb0/mq/*/cpu_list; do
-    printf '%s: ' "$f"; cat "$f"
-done
+cat /sys/class/block/nullb0/dev > "$CH10_OUT/dev"
+{
+    uname -a
+    lscpu
+    fio --version
+    lsblk -o NAME,MAJ:MIN,SIZE,TYPE,MOUNTPOINTS /dev/nullb0
+    grep -H . /sys/module/null_blk/parameters/*
+    grep -H . /sys/block/nullb0/queue/{scheduler,logical_block_size,nr_requests}
+    grep -H . /sys/block/nullb0/mq/*/cpu_list
+} > "$CH10_OUT/environment.txt"
+printf '本次记录目录：%s\n' "$CH10_OUT"
 ```
 
-这里选择 blk-mq、4 KB 逻辑块、两条提交队列与 1 ms 定时完成。实际可用队列及 CPU 映射应以 sysfs 为准。`irqmode=2` 模拟完成延迟，不模拟真实介质并行和带宽，也不保证每条 I/O 的用户可见时延恰为 1 ms。
+这里选择 blk-mq、4 KB 逻辑块、两条提交队列与 1 ms 定时完成。`submit_queues` 的参数定义见 [`drivers/block/null_blk/main.c:88-90`](../../linux/drivers/block/null_blk/main.c#L88-L90)。实际可用队列及 CPU 映射应以 sysfs 为准。若模块加载后步骤失败，先确认没有使用者，再按本节清理步骤处理；不要靠强制卸载掩盖错误。`irqmode=2` 模拟完成延迟，不模拟真实介质并行和带宽，也不保证每条 I/O 的用户可见时延恰为 1 ms。
 
 ### 2. 在独立 trace 实例中观察读请求
 
@@ -132,11 +158,16 @@ done
 ```bash
 (
 set -eu
+: "${CH10_OUT:?请先在本会话建立实验设备}"
+test "$(cat /sys/class/block/nullb0/dev)" = "$(cat "$CH10_OUT/dev")"
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs tracefs "$T"
 I="$T/instances/ch10-$$"
 mkdir "$I"
 trap 'echo 0 > "$I/tracing_on"; rmdir "$I"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+echo 0 > "$I/tracing_on"
 IFS=: read -r major minor < /sys/class/block/nullb0/dev
 dev=$((major * 1048576 + minor))
 for e in block_bio_queue block_split block_bio_backmerge \
@@ -147,14 +178,15 @@ done
 echo 1 > "$I/tracing_on"
 fio --name=ch10-read --filename=/dev/nullb0 --readonly \
     --rw=randread --bs=4k --direct=1 --ioengine=libaio \
-    --iodepth=32 --numjobs=1 --size=128m --time_based=1 --runtime=5
+    --iodepth=32 --numjobs=1 --size=128m --time_based=1 --runtime=5 \
+    --output-format=json --output="$CH10_OUT/fio-trace.json"
 echo 0 > "$I/tracing_on"
-cat "$I/trace" > /tmp/ch10-block-trace.txt
-cat "$I"/per_cpu/cpu*/stats
+cat "$I/trace" > "$CH10_OUT/trace.txt"
+grep -H . "$I"/per_cpu/cpu*/stats > "$CH10_OUT/trace-stats.txt"
 )
 ```
 
-读取 `/tmp/ch10-block-trace.txt`，检查：
+读取 `$CH10_OUT/trace.txt` 与 `$CH10_OUT/trace-stats.txt`，检查：
 
 - `block_getrq`、`block_rq_issue` 和完成之间的关系；有没有直接派发导致的普通插入事件缺席。
 - 完成是否跨 CPU；事件当前任务名是否与提交进程一致。
@@ -170,17 +202,24 @@ cat "$I"/per_cpu/cpu*/stats
 ```bash
 (
 set -eu
+: "${CH10_OUT:?请先在本会话建立实验设备}"
+test "$(cat /sys/class/block/nullb0/dev)" = "$(cat "$CH10_OUT/dev")"
 S=/sys/block/nullb0/queue/scheduler
+grep -qw mq-deadline "$S"
 old=$(awk -F'[][]' '{print $2}' "$S")
+test -n "$old"
 trap 'printf "%s\n" "$old" > "$S"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 for policy in none mq-deadline; do
     printf '%s\n' "$policy" > "$S"
-    cat "$S"
-    cat /sys/block/nullb0/stat
+    cat "$S" > "$CH10_OUT/scheduler-$policy.txt"
+    cat /sys/block/nullb0/stat > "$CH10_OUT/stat-$policy-before.txt"
     fio --name="ch10-$policy" --filename=/dev/nullb0 --readonly \
         --rw=randread --bs=4k --direct=1 --ioengine=libaio \
-        --iodepth=64 --numjobs=1 --size=128m --time_based=1 --runtime=10
-    cat /sys/block/nullb0/stat
+        --iodepth=64 --numjobs=1 --size=128m --time_based=1 --runtime=10 \
+        --output-format=json --output="$CH10_OUT/fio-$policy.json"
+    cat /sys/block/nullb0/stat > "$CH10_OUT/stat-$policy-after.txt"
 done
 )
 ```
@@ -193,15 +232,20 @@ done
 
 若要观察 `io.max`，应在已正确委派 `io` 控制器的实验 cgroup 中运行同一只读负载，同时记录 `io.stat` 和块事件。不要直接修改系统服务所在组或为了启用控制器迁移宿主系统进程；cgroup 的创建和委派要求见 [`Documentation/admin-guide/cgroup-v2.rst`](../../linux/Documentation/admin-guide/cgroup-v2.rst)。
 
-### 5. 清理
+### 5. 记录结论与清理
 
-确认 fio 已退出、没有其他使用者，且实验确实由本节创建模块后执行：
+记录中应明确：实际队列 / CPU 映射、当前调度器、fio 版本与并发度、跟踪是否丢事件、两次 `stat` 的差值，以及观察到了哪些旁路或合并。预期现象不是实测输出；未见拆分、跨 CPU 完成或性能差异，都要先核对负载与配置，不能补写推测结果。
+
+确认 fio 已退出、没有其他使用者，且模块确实由本会话创建后执行。此处只卸载实验模块，不删除记录：
 
 ```bash
+: "${CH10_OUT:?请先核对创建实验设备的会话}"
+test "$(cat /sys/class/block/nullb0/dev)" = "$(cat "$CH10_OUT/dev")"
 modprobe -r null_blk
+printf '记录保留在 %s\n' "$CH10_OUT"
 ```
 
-不使用强制卸载。tracefs 若原本已挂载则保留；脚本建立的实例已删除，`/tmp/ch10-block-trace.txt` 可按需保存或移除。
+不使用强制卸载。tracefs 保持挂载；正常退出或收到 INT / TERM 时，脚本会删除自己建立的实例并恢复调度器。进程被强制杀死或虚拟机异常时这些清理不保证执行，应核对遗留实例和设备状态，再人工清理自己创建的对象。
 
 ## 小结
 

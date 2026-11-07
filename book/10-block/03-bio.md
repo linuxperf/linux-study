@@ -51,6 +51,8 @@ struct bvec_iter {
 
 ## 主流程分析
 
+[`block/bio.c:475-597`](../../linux/block/bio.c#L475-L597)、[`block/bio.c:1631-1734`](../../linux/block/bio.c#L1631-L1734)、[`block/blk-merge.c:119-158`](../../linux/block/blk-merge.c#L119-L158)、[`block/blk-merge.c:414-419`](../../linux/block/blk-merge.c#L414-L419)（v6.18.60）
+
 ```text
 构造 bio
 ├── bio_alloc_bioset()                    block/bio.c
@@ -59,11 +61,12 @@ struct bvec_iter {
     └── blk_mq_submit_bio()               block/blk-mq.c
         └── __bio_split_to_limits()       block/blk.h
             └── bio_split_rw() 等         block/blk-merge.c
-                └── bio_submit_split_bioset()
-                    ├── bio_split()      block/bio.c
-                    │   └── bio_alloc_clone()
-                    ├── bio_chain()      block/bio.c
-                    └── 重提交原 bio 的剩余范围
+                └── bio_submit_split()   block/blk-merge.c
+                    └── bio_submit_split_bioset()  block/blk-merge.c
+                        ├── bio_split()  block/bio.c
+                        │   └── bio_alloc_clone()
+                        ├── bio_chain()  block/bio.c
+                        └── 重提交原 bio 的剩余范围
 完成时
 bio_endio()                              block/bio.c
 ├── 等待 __bi_remaining 归零
@@ -106,6 +109,22 @@ void bio_chain(struct bio *bio, struct bio *parent)
 
 `bio_endio()` 用循环展开标准完成链，避免大量拆分造成无界递归。它还处理完整性、zone、QoS 和跟踪，再调用最终上层回调，见 [`block/bio.c:1631-1677`](../../linux/block/bio.c#L1631-L1677)。
 
+### 5. 用一次拆分检查三个独立生命周期
+
+设一个普通读 bio `B` 覆盖 128 KB，按设备限制把前 64 KB 拆成 `S`。`S` 有自己的迭代器，但共享 `B` 的向量；`B` 的迭代器已经推进到后 64 KB。下面只是关系示意，不是完整的内存布局：
+
+```mermaid
+flowchart LR
+    S[子 bio S：前 64 KB] -->|共享向量| V[原向量数组与数据页]
+    B[原 bio B：后 64 KB] -->|持有向量| V
+    S -. 完成依赖 .-> B
+    B -->|自身和子项均完成| C[原上层回调]
+```
+
+*图 10-2：拆分后的范围、共享数据与完成依赖是三种不同关系*
+
+先完成 `B` 自身时，它仍须等待 `S`；先完成 `S` 时，释放的是子描述符，不是共享的数据页。最终回调只触发一次。这个例子对应 `bio_split()`、`bio_chain()` 和 `bio_endio()` 的组合，不能仅通过增加 `__bi_cnt` 引用计数替代它。
+
 ## 关键细节 / 设计考量
 
 - **不要直接调用别人的 `bi_end_io()`。** `bio_endio()` 才会处理完成依赖及公共收尾，接口约定见 [`block/bio.c:1619-1630`](../../linux/block/bio.c#L1619-L1630)。
@@ -114,7 +133,7 @@ void bio_chain(struct bio *bio, struct bio *parent)
 
 ## 可观测性
 
-事件依赖 `CONFIG_TRACEPOINTS=y`、`CONFIG_TRACING=y`，本配置已启用；操作方法见 [10.12](12-observability.md)。
+事件依赖 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`，本配置已启用；操作方法见 [10.14](14-observability.md)。动态探针还依赖 `CONFIG_KPROBES=y`、`CONFIG_KPROBE_EVENTS=y` 及运行时符号可挂载性。
 
 | 事件 / 函数 | 观察内容 | 定义或调用位置 |
 |---|---|---|

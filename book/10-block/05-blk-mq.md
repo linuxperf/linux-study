@@ -1,16 +1,31 @@
-# 10.5 blk-mq：上下文、队列映射与标签
+# 10.5 blk-mq：从 bio 到 request、队列映射与标签
 
 > **本节源码**：[`include/linux/blk-mq.h`](../../linux/include/linux/blk-mq.h)、[`block/blk-mq.h`](../../linux/block/blk-mq.h)、[`block/blk-mq.c`](../../linux/block/blk-mq.c)、[`block/blk-mq-tag.c`](../../linux/block/blk-mq-tag.c)
-> **关键函数**：`blk_mq_alloc_tag_set()`、`__blk_mq_alloc_requests()`、`blk_mq_get_tag()`、`blk_mq_rq_ctx_init()`、`blk_mq_start_request()`
+> **关键函数**：`blk_mq_submit_bio()`、`blk_mq_bio_to_request()`、`blk_mq_alloc_tag_set()`、`__blk_mq_alloc_requests()`、`blk_mq_get_tag()`
 > **前置知识**：10.2 设备模型、10.3 bio、per-CPU 数据与位图
 
 ## 概述
 
 高速设备能并行处理大量请求，块层若仍依靠单一共享队列，就容易把竞争集中到 CPU 之间。blk-mq 通过 per-CPU 提交上下文与面向驱动的硬件上下文分摊组织成本，再用标签限制并发并快速定位完成请求。标签不仅是编号，也是对有限请求资源的占用凭证。启用 I/O 调度器后，排队资源与设备执行资源还需要分开管理。
 
+本节的终点是“bio 已绑定到拥有队列资源的请求”，不展开选择哪个请求先执行；合并与派发由 [10.6](06-merge-dispatch.md) 接续。先读清 `request` 比 `bio` 多了什么，再分析这些资源从哪里取得。
+
 ## 核心数据结构
 
-### 1. 软件上下文与硬件上下文
+### 1. request：数据链之外的执行上下文
+
+| 字段 | 含义与生命周期 |
+|---|---|
+| `q`、`mq_ctx`、`mq_hctx` | 所属队列、软件上下文与硬件上下文 |
+| `bio`、`biotail` | 串接请求的数据描述；合并可延长链，完成可消耗链 |
+| `__sector`、`__data_len`、`nr_phys_segments` | 当前范围与物理段数；由块层助手维护，不能当作不变的原始长度 |
+| `tag`、`internal_tag` | 驱动标签与调度器内部标签，各有分配和归还时机 |
+| `cmd_flags`、`rq_flags` | 操作语义与块层请求管理状态，不能混用 |
+| `state`、`deadline`、`end_io` | 执行状态、超时点与请求级完成方法，见 [10.8](08-completion.md) |
+
+定义见 [`include/linux/blk-mq.h:103-171`](../../linux/include/linux/blk-mq.h#L103-L171)。驱动可以用请求覆盖的 bio 数据构造设备命令，但 `request` 本身不是硬件命令格式。
+
+### 2. 软件上下文与硬件上下文
 
 `blk_mq_ctx` 是每个队列的 per-CPU 对象，不是每进程一份。
 
@@ -31,7 +46,7 @@ struct blk_mq_ctx {
 
 `blk_mq_hw_ctx` 简称 `hctx`。其中 `dispatch` 保存已经准备派发却暂时受阻的请求，`ctxs` / `ctx_map` 组织关联的软件上下文，`driver_data` 联系驱动队列，`tags` / `sched_tags` 分别指向驱动与调度器标签集合，见 [`include/linux/blk-mq.h:314-440`](../../linux/include/linux/blk-mq.h#L314-L440)。`hctx` 本身仍是软件结构，不是设备直接消费的 DMA 环。
 
-### 2. 标签集合与请求对象
+### 3. 标签集合与请求对象
 
 [`include/linux/blk-mq.h:772-790`](../../linux/include/linux/blk-mq.h#L772-L790)（v6.18.60）
 
@@ -55,17 +70,26 @@ struct blk_mq_tags {
 
 ## 主流程分析
 
+以下限定为普通读写，省略完整性、加密和 zone 专用分支。缓存请求是已经占用资源的对象，不是再复制一份请求数据。
+
+[`block/blk-mq.c:552-606`](../../linux/block/blk-mq.c#L552-L606)、[`block/blk-mq.c:3058-3260`](../../linux/block/blk-mq.c#L3058-L3260)（v6.18.60）
+
 ```text
 blk_mq_submit_bio()                       block/blk-mq.c
-└── blk_mq_get_new_requests()              block/blk-mq.c
-    ├── rq_qos_throttle()                 block/blk-rq-qos.h
-    └── __blk_mq_alloc_requests()          block/blk-mq.c
-        ├── blk_mq_get_ctx()              block/blk-mq.h
-        ├── blk_mq_map_queue()            block/blk-mq.h
-        ├── blk_mq_limit_depth()          block/blk-mq.c
-        ├── blk_mq_get_tag()              block/blk-mq-tag.c
-        ├── blk_mq_rq_ctx_init()          block/blk-mq.c
-        └── blk_mq_rq_late_init()         block/blk-mq.c
+├── blk_mq_get_cached_request()           尝试取 plug 缓存请求
+├── 无缓存时 bio_queue_enter()           取得队列使用引用
+├── 按限制拆分、尝试合并                  成功合并则不新建绑定
+├── 取得请求（两条分支）
+│   ├── 缓存命中：rq_qos_throttle() → blk_mq_rq_late_init()
+│   └── blk_mq_get_new_requests()         block/blk-mq.c
+│       ├── rq_qos_throttle()             block/blk-rq-qos.h
+│       └── __blk_mq_alloc_requests()     block/blk-mq.c
+│           ├── 选择 ctx / hctx、设置深度限制
+│           ├── blk_mq_get_tag()          block/blk-mq-tag.c（单标签路径）
+│           └── 初始化请求对象
+├── trace_block_getrq() → rq_qos_track()
+└── blk_mq_bio_to_request()               block/blk-mq.c
+    └── blk_account_io_start()           随后才进入 plug / 派发
 ```
 
 ### 1. 由 CPU 与操作类型选择 hctx
@@ -78,7 +102,7 @@ blk_mq_submit_bio()                       block/blk-mq.c
 
 没有调度器时，分配使用 `hctx->tags`；取得标签后，直接从 `tags->static_rqs[tag]` 取出预分配对象，而不是每个 I/O 都临时 `kmalloc()` 一个 `request`，见 [`block/blk-mq.c:410-451`](../../linux/block/blk-mq.c#L410-L451)。
 
-驱动私有区的大小由 `cmd_size` 预先指定，和请求对象共同分配。驱动可通过 `blk_mq_rq_to_pdu()` 获取该空间，不必为每条命令再分配一份基本上下文；分配布局见 [`block/blk-mq.c:3609-3682`](../../linux/block/blk-mq.c#L3609-L3682)。
+请求私有区（Protocol Data Unit，PDU）的大小由 `cmd_size` 预先指定，和请求对象共同分配。驱动可通过 `blk_mq_rq_to_pdu()` 获取该空间，不必为每条命令再分配一份基本上下文；分配布局见 [`block/blk-mq.c:3609-3682`](../../linux/block/blk-mq.c#L3609-L3682)。
 
 ### 3. 有调度器：先内部标签，后驱动标签
 
@@ -106,6 +130,35 @@ blk_mq_submit_bio()                       block/blk-mq.c
 
 这意味着“设备没有更多 issue 事件”不一定是调度器没有派发；提交线程可能尚在等待请求资源。只测 `issue → complete` 会漏掉这段等待。
 
+### 5. 把 bio 绑定到请求，同时接续队列引用
+
+取得请求后，`blk_mq_bio_to_request()` 设置数据链、扇区、字节数及段数，并开始设备 I/O 记账：
+
+[`block/blk-mq.c:2705-2710`](../../linux/block/blk-mq.c#L2705-L2710)（v6.18.60）
+
+```c
+	rq->bio = rq->biotail = bio;
+	rq->__sector = bio->bi_iter.bi_sector;
+	rq->__data_len = bio->bi_iter.bi_size;
+	rq->phys_gap_bit = bio->bi_bvec_gap_bit;
+
+	rq->nr_phys_segments = nr_segs;
+```
+
+它没有复制数据页。函数尾部调用的 `blk_account_io_start()` 还早于设备 issue；这正是 [10.14](14-observability.md) 中 `stat` 在途量与驱动在途量不同的原因，见 [`block/blk-mq.c:2697-2720`](../../linux/block/blk-mq.c#L2697-L2720)。
+
+队列冻结依赖 `q_usage_counter`，所以每条退出路径都要回答“这次使用引用由谁持有”。普通路径可按下表检查：
+
+| 分支 | 队列使用引用如何处理 |
+|---|---|
+| 无缓存请求，进入成功 | `bio_queue_enter()` 取得引用，成功构造请求后由请求生命周期接续 |
+| 已有缓存请求 | 请求已持有引用，不重复进入；不用它时放回 `plug->cached_rqs` |
+| 检查失败或合并成功，且无缓存请求 | 当前提交不再需要独立引用，走 `blk_queue_exit()` |
+| 批量分配多个请求 | 为额外的缓存请求增加相应引用 |
+| 请求最终归还资源 | 归还标签并调用 `blk_queue_exit()` |
+
+对应实现见 [`block/blk-mq.c:475-483`](../../linux/block/blk-mq.c#L475-L483)、[`block/blk-mq.c:3164-3170`](../../linux/block/blk-mq.c#L3164-L3170)、[`block/blk-mq.c:3255-3259`](../../linux/block/blk-mq.c#L3255-L3259)、[`block/blk-mq.c:809-829`](../../linux/block/blk-mq.c#L809-L829)。zone 暂存保留引用的特殊情况另见 [10.11](11-zoned.md)。
+
 ## 关键细节 / 设计考量
 
 - `nr_requests`、`queue_depth`、保留标签数、应用 `iodepth` 与控制器深度有不同作用域，不能当成同一数值。
@@ -114,6 +167,8 @@ blk_mq_submit_bio()                       block/blk-mq.c
 - 批量分配和 plug 的 `cached_rqs` 可以复用已占用的请求；探针看到分配对象与实际 `bio` 绑定的时刻可能不同，见 [`block/blk-mq.c:453-485`](../../linux/block/blk-mq.c#L453-L485)。
 
 ## 可观测性
+
+下表的配置均按 [`linux/.config`](../../linux/.config) 核对。使用 tracefs 动态函数探针时还需要本配置的 `CONFIG_KPROBE_EVENTS=y`；函数是否保留为独立符号仍以运行内核为准。
 
 | 入口 | 内容与解释 | 源码 / 配置 |
 |---|---|---|
@@ -130,6 +185,7 @@ blk_mq_submit_bio()                       block/blk-mq.c
 - 映射可按默认、读、轮询类型区分，也可共享队列。
 - 无调度器时分配驱动标签；有调度器时先分配内部标签，派发再拿驱动标签。
 - 标签限制并发、关联预分配请求，并为完成路径提供快速索引。
+- bio 绑定请求只组织描述信息；成功、合并、失败和缓存分支都必须保持队列使用引用平衡。
 - 资源等待可能发生在请求入队事件之前，必须纳入性能分析。
 
 ## 参考

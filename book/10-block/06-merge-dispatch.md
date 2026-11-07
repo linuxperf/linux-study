@@ -16,6 +16,10 @@
 
 ## 主流程分析
 
+以下先看选择分支，再看资源不足如何退回等待；“重跑队列”不是重新创建一个 bio。
+
+[`block/blk-mq.c:3035-3056`](../../linux/block/blk-mq.c#L3035-L3056)、[`block/blk-mq.c:3238-3253`](../../linux/block/blk-mq.c#L3238-L3253)、[`block/blk-mq-sched.c:266-315`](../../linux/block/blk-mq-sched.c#L266-L315)（v6.18.60）
+
 ```text
 blk_mq_submit_bio()                       block/blk-mq.c
 ├── blk_mq_attempt_bio_merge()             block/blk-mq.c
@@ -94,6 +98,16 @@ blk_mq_submit_bio()                       block/blk-mq.c
 
 未能派发的请求进入 `hctx->dispatch`，并根据标签等待、调度重启标志与资源状态安排重跑，见 [`block/blk-mq.c:2182-2255`](../../linux/block/blk-mq.c#L2182-L2255)。这就是背压（Backpressure）：下游不能接收时保留工作，而不是无限分配或把暂时短缺当成永久 I/O 错误。
 
+### 5. 区分“未被接收”与“接收后的重试”
+
+| 边界 | 谁负责下一步 | 不能做的推断 |
+|---|---|---|
+| `queue_rq()` 返回 `BLK_STS_OK` | 驱动按完成 / 重排协议接续请求 | 不等于已完成，调用者也不能假设请求仍可任意访问 |
+| 返回 `BLK_STS_RESOURCE` / `BLK_STS_DEV_RESOURCE` | 驱动清理本次未交接的私有资源，块层保留请求并协调重跑 | 不等于最终 I/O 错误，也不保证此前没有 issue 事件 |
+| 驱动接受命令后决定重试 | 驱动与块层重排路径协作 | 不是上层重新提交了一次业务操作 |
+
+例如 virtio-blk 先调用 `blk_mq_start_request()`，再尝试加入 virtqueue；空间不足时仍会解除数据映射、停止相应队列并返回资源不足，见 [`drivers/block/virtio_blk.c:403-453`](../../linux/drivers/block/virtio_blk.c#L403-L453)。所以一次 issue 可能只对应一次未成功发布给设备的尝试。需要把驱动返回值、重排和后续 issue 合起来解释，不能以 issue 次数直接计设备成功接收数。
+
 ## 关键细节 / 设计考量
 
 - **插入与 issue 不是同一事件。** 直接派发可以没有普通插入事件；plug 中等待也不等同于调度器等待。
@@ -102,7 +116,7 @@ blk_mq_submit_bio()                       block/blk-mq.c
 
 ## 可观测性
 
-`CONFIG_TRACEPOINTS=y`、`CONFIG_TRACING=y` 下可用的事件：
+本配置 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y` 下可用的事件：
 
 | 事件 | 对应机制 | 定义 |
 |---|---|---|
@@ -118,7 +132,7 @@ blk_mq_submit_bio()                       block/blk-mq.c
 - plug 提供任务本地批处理窗口，可以因数量、大小或调度提前冲刷。
 - 合并要求地址相邻、属性兼容且不突破硬件限制，不复制数据内容。
 - 无调度器也有合并、批处理、软件排队和背压。
-- 驱动返回成功代表接受请求；资源不足请求必须正确回队并重启。
+- 驱动返回成功代表接受请求；资源不足请求必须正确回队并重启，issue 事件也可能早于失败的设备入队尝试。
 - `hctx->dispatch` 与调度器队列、软件上下文链表是不同阶段的积压。
 
 ## 参考

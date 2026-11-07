@@ -16,6 +16,8 @@
 
 ## 主流程分析
 
+[`block/blk-mq.c:967-1080`](../../linux/block/blk-mq.c#L967-L1080)、[`block/blk-mq.c:1172-1195`](../../linux/block/blk-mq.c#L1172-L1195)、[`block/blk-mq.c:1285-1407`](../../linux/block/blk-mq.c#L1285-L1407)（v6.18.60）
+
 ```text
 驱动接收请求
 └── blk_mq_start_request()                block/blk-mq.c
@@ -58,7 +60,7 @@ EXPORT_SYMBOL(blk_mq_complete_request);
 
 `blk_mq_complete_request_remote()` 先标记完成状态，再根据轮询、CPU 关系和队列属性选择就地处理、IPI 或本地 `BLOCK_SOFTIRQ`。轮询请求通常就地完成；是否转移还受共享缓存、CPU 算力和强制中断线程化影响，见 [`block/blk-mq.c:1285-1355`](../../linux/block/blk-mq.c#L1285-L1355)。本配置 `CONFIG_SMP=y`，但不能据此断言每次完成都发送 IPI。
 
-随后调用的是驱动注册的 `complete` 方法，它可能处理重试或故障转移，而不是立刻释放请求。NVMe 的例子见 [10.11](11-drivers.md)。
+随后调用的是驱动注册的 `complete` 方法，它可能处理重试或故障转移，而不是立刻释放请求。NVMe 的例子见 [10.13](13-drivers.md)。
 
 ### 3. 字节完成与请求生命周期结束分开
 
@@ -80,6 +82,18 @@ EXPORT_SYMBOL(blk_mq_end_request);
 
 最终收尾处理统计、调度器反馈、请求完成回调及标签资源。若存在 `rq->end_io`，其返回值决定是否由块层释放请求，见 [`block/blk-mq.c:1163-1187`](../../linux/block/blk-mq.c#L1163-L1187)。所以 `bio_endio()`、请求 `end_io()` 和请求对象资源归还也不是同一时刻。
 
+以普通请求包含两个 4 KB bio 为例：第一次只完成 2 KB 时，第一个 bio 的迭代器推进，但两个上层回调均不执行，请求仍有 6 KB；第二次再完成 2 KB 时，第一个 bio 才结束，第二个仍待处理。即使字节全部消耗，也要执行请求级收尾，才能按协议归还标签和队列引用。这个例子直接对应 [`block/blk-mq.c:1001-1053`](../../linux/block/blk-mq.c#L1001-L1053) 的循环与返回值，不适用于不允许部分完成的 append。
+
+可把“完成”拆成三个问题：
+
+| 问题 | 主要入口 | 是否必然归还请求资源 |
+|---|---|---|
+| 在哪个 CPU 调驱动完成方法？ | `blk_mq_complete_request()` | 否，驱动还可能重试 |
+| 本次有多少字节结束？ | `blk_update_request()` | 否，它不结束请求对象 |
+| 谁接管最终收尾和资源归还？ | `__blk_mq_end_request()`、`rq->end_io()` | 按回调返回协议决定 |
+
+此外，批量完成有独立的快速路径；仅给 `blk_mq_end_request()` 挂探针并不能保证覆盖所有正常请求结束，见 [`block/blk-mq.c:1197-1278`](../../linux/block/blk-mq.c#L1197-L1278)。
+
 ### 4. 超时由共享定时器触发工作扫描
 
 `blk_add_timer()` 计算请求 `deadline`，并按需提前队列共享定时器，见 [`block/blk-timeout.c:128-167`](../../linux/block/blk-timeout.c#L128-L167)。定时器回调把 `timeout_work` 交给块层工作队列，见 [`block/blk-core.c:381-386`](../../linux/block/blk-core.c#L381-L386)。
@@ -99,9 +113,11 @@ EXPORT_SYMBOL(blk_mq_end_request);
 - 完成回调可能在中断或软中断上下文运行，不能假设可以睡眠，也不能假设是原提交线程。
 - 标签会复用，动态观测必须在结束时删除关联；仅用标签数值跨队列匹配会关联错请求。
 - 超时可能触发控制器恢复或重试，诊断时要同时看队列重排和驱动日志。
-- flush 序列的数据阶段会消耗 bio 数据，但暂不通知上层完成；最终语义见 [10.9](09-flush-discard.md)。
+- flush 序列的数据阶段会消耗 bio 数据，但暂不通知上层完成；最终语义见 [10.9](09-flush.md)。
 
 ## 可观测性
+
+事件接口依赖本配置的 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`；动态探针还依赖 `CONFIG_KPROBES=y`、`CONFIG_KPROBE_EVENTS=y` 及实际符号可挂载性。
 
 | 入口 | 解释与注意事项 | 源码 / 配置 |
 |---|---|---|
@@ -112,7 +128,7 @@ EXPORT_SYMBOL(blk_mq_end_request);
 | 同目录 `io_timeout`、`io_poll` | 队列超时与轮询相关属性；支持性仍取决于驱动 | [`block/blk-sysfs.c:585-591`](../../linux/block/blk-sysfs.c#L585-L591) |
 | `blk_mq_start_request()`、`blk_mq_end_request()`、驱动 timeout 方法探针 | 以请求指针关联执行、结束和恢复 | 依赖 `CONFIG_KPROBES=y` 等运行条件，须确认实际符号 |
 
-普通 tracefs 的 `block_rq_complete` 字段不导出请求指针，不能只凭相同扇区唯一匹配，详见 [10.12](12-observability.md)。
+普通 tracefs 的 `block_rq_complete` 字段不导出请求指针，不能只凭相同扇区唯一匹配，详见 [10.14](14-observability.md)。
 
 ## 小结
 

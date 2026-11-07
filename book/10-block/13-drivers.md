@@ -1,4 +1,4 @@
-# 10.11 驱动衔接：NVMe 与 virtio-blk
+# 10.13 驱动衔接：NVMe 与 virtio-blk
 
 > **本节源码**：[`drivers/nvme/host/pci.c`](../../linux/drivers/nvme/host/pci.c)、[`drivers/nvme/host/core.c`](../../linux/drivers/nvme/host/core.c)、[`drivers/nvme/host/nvme.h`](../../linux/drivers/nvme/host/nvme.h)、[`drivers/block/virtio_blk.c`](../../linux/drivers/block/virtio_blk.c)
 > **关键函数**：`nvme_queue_rq()`、`nvme_prep_rq()`、`nvme_handle_cqe()`、`nvme_complete_rq()`、`virtio_queue_rq()`、`virtblk_done()`
@@ -21,7 +21,11 @@
 
 ## 主流程分析
 
+前文已经说明通用请求的资源和完成协议。本节只追踪驱动增加的三项职责：编码设备命令、建立数据映射、关联协议完成，不再把通用完成链逐层展开。
+
 ### 1. NVMe PCI：构造命令，再通知控制器
+
+[`drivers/nvme/host/pci.c:1194-1259`](../../linux/drivers/nvme/host/pci.c#L1194-L1259)（v6.18.60）
 
 ```text
 nvme_queue_rq()                           drivers/nvme/host/pci.c
@@ -42,6 +46,8 @@ nvme_queue_rq()                           drivers/nvme/host/pci.c
 命令写入 SQ 后更新 doorbell；`bd->last` 允许批量通知，而不是每条命令都立即进行一次 MMIO。`queue_rqs()` 还提供批量提交路径，所以逐条 `queue_rq()` 探针不是请求总数的可靠计数器。
 
 ### 2. NVMe：用完成项定位请求，并决定是否最终结束
+
+[`drivers/nvme/host/pci.c:1370-1423`](../../linux/drivers/nvme/host/pci.c#L1370-L1423)、[`drivers/nvme/host/core.c:447-494`](../../linux/drivers/nvme/host/core.c#L447-L494)（v6.18.60）
 
 ```text
 nvme_irq() / nvme_poll()                  drivers/nvme/host/pci.c
@@ -81,6 +87,8 @@ static inline u16 nvme_cid(struct request *rq)
 
 ### 3. virtio-blk：以 virtqueue cookie 找回驱动私有区
 
+[`drivers/block/virtio_blk.c:334-376`](../../linux/drivers/block/virtio_blk.c#L334-L376)、[`drivers/block/virtio_blk.c:403-463`](../../linux/drivers/block/virtio_blk.c#L403-L463)（v6.18.60）
+
 ```text
 virtio_queue_rq()                         drivers/block/virtio_blk.c
 ├── virtblk_prep_rq()
@@ -102,14 +110,27 @@ virtblk_done()                            drivers/block/virtio_blk.c
 
 virtqueue 没有空间时，驱动停止相应硬件队列并返回设备资源不足；完成取回缓冲区后重启停止队列，见 [`drivers/block/virtio_blk.c:442-453`](../../linux/drivers/block/virtio_blk.c#L442-L453) 与 [`drivers/block/virtio_blk.c:371-374`](../../linux/drivers/block/virtio_blk.c#L371-L374)。它对应的正是 [10.6](06-merge-dispatch.md) 中的背压协议。
 
+### 4. 用交接边界对照两种驱动
+
+| 阶段 | NVMe PCI | virtio-blk | 通用要求 |
+|---|---|---|---|
+| 准备 | `nvme_prep_rq()` 构造命令并映射数据 | `virtblk_prep_rq()` 准备协议头与散集描述 | 准备失败要撤销本次已取得的私有资源 |
+| 发布 | 拷入 SQ，按批次更新 doorbell | 加入 virtqueue，按需通知后端 | `start_request()` 可能早于实际发布 |
+| 找回请求 | 队列上下文 + command ID | virtqueue 返回 PDU cookie | 不能用扇区号唯一定位请求 |
+| 收尾 | 解除 DMA 映射，再进入 NVMe 结果 / 重试决策 | 清理映射和命令，转换状态后结束 | 在通知上层复用数据前完成必要清理 |
+
+前两行对应上述提交源码，NVMe 收尾见 [`drivers/nvme/host/pci.c:1314-1326`](../../linux/drivers/nvme/host/pci.c#L1314-L1326)，virtio-blk 收尾见 [`drivers/block/virtio_blk.c:334-348`](../../linux/drivers/block/virtio_blk.c#L334-L348)。追踪同一请求时应同时记录“逻辑请求生命周期”与“第几次协议尝试”，不能把重试重新计作上层发起的新 I/O。
+
 ## 关键细节 / 设计考量
 
 - **hctx 不等于 SQ / virtqueue 内存。** 它负责与驱动关联和调度，设备协议环由驱动与传输层维护。
 - **数据描述不等于数据复制。** DMA 映射和散集描述允许直接引用数据页，但是否需要额外映射、反弹或转换取决于平台能力。
-- **虚拟机完成不自动证明宿主持久化。** 持久化要求仍要通过 flush / FUA 及后端正确实现传递，见 [10.9](09-flush-discard.md)。
+- **虚拟机完成不自动证明宿主持久化。** 持久化要求仍要通过 flush / FUA 及后端正确实现传递，见 [10.9](09-flush.md)。
 - **本节不展开 NVMe 多路径。** 当前 `CONFIG_NVME_MULTIPATH=y`，启用后可能增加重映射与故障转移，不能把单路径事件数直接套用到多路径设备。
 
 ## 可观测性
+
+事件依赖本配置的 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`；动态探针还依赖 `CONFIG_KPROBES=y`、`CONFIG_KPROBE_EVENTS=y`。驱动模块配置如下，加载与设备绑定仍须运行时确认。
 
 | 入口 | 内容与解释 | 配置 / 源码 |
 |---|---|---|

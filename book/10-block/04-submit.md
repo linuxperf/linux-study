@@ -20,6 +20,8 @@
 
 ## 主流程分析
 
+[`block/blk-core.c:626-757`](../../linux/block/blk-core.c#L626-L757)、[`block/blk-core.c:780-920`](../../linux/block/blk-core.c#L780-L920)（v6.18.60）
+
 ```text
 submit_bio()                              block/blk-core.c
 ├── 读写 VM 计数、I/O 优先级初始化
@@ -82,11 +84,15 @@ static int blk_partition_remap(struct bio *bio)
 
 一般堆叠路径进一步区分“相同队列”和“其他队列”产生的 `bio`，优先处理下层项，再处理同层项和之前遗留项，见 [`block/blk-core.c:674-712`](../../linux/block/blk-core.c#L674-L712)。这是局部提交顺序，不是全局设备拓扑排序，也不意味着完成顺序被固定。
 
+需要区分列表维护与设备执行：递归调用只是把 bio 交给最外层循环，并不表示驱动已接收。普通重提交放到列表尾；拆分剩余部分通过 `submit_bio_noacct_nocheck(bio, true)` 放到列表头，见 [`block/blk-core.c:746-750`](../../linux/block/blk-core.c#L746-L750)。这个 `split` 参数解释了拆分后的局部推进顺序，不能在调用链里省略后再推断成一般 FIFO。
+
 ### 5. 到达 blk-mq 后仍要拆分
 
 `blk_mq_submit_bio()` 在持有队列使用引用后检查逻辑块对齐、轮询支持，再调用 `__bio_split_to_limits()`，见 [`block/blk-mq.c:3168-3190`](../../linux/block/blk-mq.c#L3168-L3190)。普通读写按长度、物理段和边界限制计算拆分点；不合法或无法安全拆分时完成错误，而不是无限向下尝试。
 
-拆分助手将原 `bio` 缩为剩余部分并重提交，返回可立即处理的前半段，见 [`block/blk-merge.c:108-140`](../../linux/block/blk-merge.c#L108-L140)。当前迭代框架保证这种重提交不会不断加深栈。
+拆分助手将原 `bio` 缩为剩余部分并重提交，返回可立即处理的前半段，见 [`block/blk-merge.c:108-140`](../../linux/block/blk-merge.c#L108-L140)。当前迭代框架保证这种重提交不会不断加深栈。拆分助手对剩余部分重新经过故障注入与 blk-throttle，但不重新走完整的公共地址检查，见 [`block/blk-merge.c:128-138`](../../linux/block/blk-merge.c#L128-L138)。因此它使用内部 `nocheck` 入口，并非所有下层重提交都可以照搬该入口。
+
+到这里，bio 的设备范围已通过相应检查，但还不一定有独立请求：随后合并可能直接消费它。未合并时如何取得标签、绑定请求并接续队列引用，由 [10.5](05-blk-mq.md) 展开。
 
 ## 关键细节 / 设计考量
 
@@ -96,7 +102,7 @@ static int blk_partition_remap(struct bio *bio)
 
 ## 可观测性
 
-事件依赖本配置的 `CONFIG_TRACEPOINTS=y`、`CONFIG_TRACING=y`。
+事件依赖本配置的 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`；动态探针还依赖 `CONFIG_KPROBES=y`、`CONFIG_KPROBE_EVENTS=y`。
 
 | 入口 | 对应边界 | 解读 |
 |---|---|---|

@@ -24,6 +24,8 @@
 
 以下表示调度框架的插入与取出关系，而不是一次调用中嵌套完成全部步骤。
 
+[`block/blk-mq.c:2923-2966`](../../linux/block/blk-mq.c#L2923-L2966)、[`block/blk-mq-sched.c:85-188`](../../linux/block/blk-mq-sched.c#L85-L188)、[`block/elevator.h:57-89`](../../linux/block/elevator.h#L57-L89)（v6.18.60）
+
 ```text
 请求插入
 blk_mq_dispatch_list()                    block/blk-mq.c
@@ -33,12 +35,13 @@ blk_mq_dispatch_list()                    block/blk-mq.c
     └── bfq_insert_requests()             block/bfq-iosched.c
 队列运行
 blk_mq_sched_dispatch_requests()          block/blk-mq-sched.c
-└── blk_mq_do_dispatch_sched()
-    └── elevator->type->ops.dispatch_request()
-        ├── dd_dispatch_request()
-        ├── kyber_dispatch_request()
-        └── bfq_dispatch_request()
-    随后：取得驱动标签并交给 blk_mq_dispatch_rq_list()
+└── blk_mq_do_dispatch_sched()            block/blk-mq-sched.c
+    └── __blk_mq_do_dispatch_sched()      block/blk-mq-sched.c
+        ├── elevator->type->ops.dispatch_request()
+        │   ├── dd_dispatch_request()    block/mq-deadline.c
+        │   ├── kyber_dispatch_request() block/kyber-iosched.c
+        │   └── bfq_dispatch_request()   block/bfq-iosched.c
+        └── 取得驱动标签，再经 blk_mq_dispatch_rq_list() 派发
 ```
 
 ### 1. mq-deadline：两种排序同时存在
@@ -84,6 +87,17 @@ BFQ 不把“占用设备多久”直接作为唯一服务单位，而是为队�
 
 ## 关键细节 / 设计考量
 
+### 用控制目标对照，而不是把三种算法混成一种
+
+| 策略 | 首要组织单位 | 主要控制方式 | 观测重点 |
+|---|---|---|---|
+| `none` | 通用 blk-mq 请求 | 不安装 elevator 策略 | 标签与驱动资源等待，不能假设没有排队 |
+| mq-deadline | 优先级 / 方向中的请求 | 地址顺序、FIFO 软到期与批次 | 请求等待、读写饥饿和批量派发 |
+| Kyber | 操作域中的请求 | 域令牌与时延反馈 | 令牌深度、throttled 事件与时延分布 |
+| BFQ | 队列与层次实体 | 服务预算、权重及低延迟启发式 | 各队列 / 组得到的服务与尾延迟 |
+
+本节前面三个算法小节已经给出对应实现。比较时还要记录 [10.12](12-blkcg-qos.md) 的设备级 / cgroup 控制器，避免把进入调度器前的限速误算为调度算法本身的效果。
+
 ### none 的准确含义
 
 `none` 表示 `q->elevator` 为空，不安装上述调度策略。它保留 blk-mq 的标签、合并、plug、软件队列与资源重试。当前调度器输出在 [`block/elevator.c:834-865`](../../linux/block/elevator.c#L834-L865) 中通过方括号标识。
@@ -98,7 +112,7 @@ BFQ 不把“占用设备多久”直接作为唯一服务单位，而是为队�
 
 ## 可观测性
 
-配置为 `CONFIG_MQ_IOSCHED_DEADLINE=y`、`CONFIG_MQ_IOSCHED_KYBER=m`、`CONFIG_IOSCHED_BFQ=m`；BFQ 组调度依赖本配置的 `CONFIG_BFQ_GROUP_IOSCHED=y`。sysfs 还依赖 `CONFIG_SYSFS=y`。
+配置为 `CONFIG_MQ_IOSCHED_DEADLINE=y`、`CONFIG_MQ_IOSCHED_KYBER=m`、`CONFIG_IOSCHED_BFQ=m`；BFQ 组调度依赖本配置的 `CONFIG_BFQ_GROUP_IOSCHED=y`。sysfs 还依赖 `CONFIG_SYSFS=y`；事件接口依赖 `CONFIG_TRACEPOINTS=y`、`CONFIG_EVENT_TRACING=y`、`CONFIG_TRACING=y`。
 
 | 入口 | 看什么 | 实现 |
 |---|---|---|
@@ -107,7 +121,7 @@ BFQ 不把“占用设备多久”直接作为唯一服务单位，而是为队�
 | `kyber:kyber_latency`、`kyber:kyber_adjust`、`kyber:kyber_throttled` | 域时延、令牌深度调整、令牌短缺 | [`include/trace/events/kyber.h:14-92`](../../linux/include/trace/events/kyber.h#L14-L92)，另依赖 `CONFIG_TRACING=y` |
 | BFQ 的 `queue/iosched` 属性 | `low_latency`、`slice_idle` 等启发式设置 | [`block/bfq-iosched.c:7588-7600`](../../linux/block/bfq-iosched.c#L7588-L7600) 中的 `bfq_attrs` |
 
-切换策略会协调队列冻结与调度器状态，不能在生产设备上把频繁切换当成无影响观测。实验只在 [10.12](12-observability.md) 的专用 `null_blk` 上进行。
+切换策略会协调队列冻结与调度器状态，不能在生产设备上把频繁切换当成无影响观测。实验只在 [10.14](14-observability.md) 的专用 `null_blk` 上进行；固定延时的模拟设备只验证路径差异，不用于给三种策略排通用名次。
 
 ## 小结
 

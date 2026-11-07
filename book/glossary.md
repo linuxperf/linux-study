@@ -12,11 +12,12 @@
 | BPF 文件系统 | BPF Filesystem，bpffs | 通过 inode 保存 BPF 对象引用的伪文件系统；pin 不会让对象跨重启恢复 | 13.2 |
 | BPF 映射 | BPF Map | 独立于程序实例的状态或专用协议容器，包括键值表、程序数组与 ringbuf 等，系统分析见 13.4 | 3.11 |
 | BPF 环形缓冲区 | BPF Ring Buffer | 多生产者、单消费者的结构化事件通道，以预留、提交和消费位置管理记录 | 13.4 |
+| cgroup 回写 | Cgroup Writeback | 通过 inode 与回写上下文把异步写回归属传递到 bio，避免按工作线程身份计费；块层归属分析见 10.12 | 9.10 |
 | CPU 带宽控制 | CFS Bandwidth Control | 以 quota / period 为任务组设置 CPU 时间上限 | 3.10 |
 | CPU 热插拔 | CPU Hotplug | 通过状态机协调 CPU 的准备、上线与下线，启动 AP 也复用这套机制 | 1.8 |
 | EFI stub | EFI Boot Stub | 内嵌于内核镜像的 EFI 启动适配代码，本版本 x86 路径可自行解压并直接进入未压缩内核 | 1.2 |
 | fork / exec 均衡 | Fork / Exec Balancing | 新任务第一次入队前（`WF_FORK`）或 `execve()` 时（`WF_EXEC`）为任务选择 CPU | 3.4 |
-| I/O 成本控制器 | I/O Cost Controller，IOCost | 按访问模式与长度估算设备时间成本，并按层次权重分配 I/O 能力的控制器 | 10.10 |
+| I/O 成本控制器 | I/O Cost Controller，IOCost | 按访问模式与长度估算设备时间成本，并按层次权重分配 I/O 能力的控制器 | 10.12 |
 | I/O 调度器 | I/O Scheduler | 请求交给驱动前选择执行顺序或控制并发的可插拔块层策略；系统分析见 10.7 | 10.1 |
 | I/O APIC | I/O Advanced Programmable Interrupt Controller | 把传统中断引脚翻译为中断消息的芯片组中断控制器 | 5.5 |
 | managed 中断 | Managed Interrupt | 亲和性由内核按拓扑计算且不可修改的多队列设备中断 | 5.8 |
@@ -28,6 +29,7 @@
 | tick 广播 | Tick Broadcast | 本地时钟事件设备在深度 C-state 中停止时，由全局设备（如 HPET）代为到期并经 IPI 唤醒的机制 | 8.6 |
 | tick 依赖 | Tick Dependency | 阻止 `NO_HZ_FULL` CPU 停 tick 的原因位掩码，如 `TICK_DEP_BIT_SCHED` | 3.5 |
 | TSC-deadline 模式 | TSC-Deadline Mode | LAPIC 定时器以 TSC 绝对值作为到期时刻编程的模式，无需校准 | 5.5 |
+| 安全擦除 | Secure Erase | 独立于 discard 和清零的设备操作，块层以 `REQ_OP_SECURE_ERASE` 表达；实际保障依赖设备协议与实现 | 10.10 |
 | 按需分配 | Demand Paging | mmap 只建立 VMA，物理页在首次访问的缺页中分配 | 4.7 |
 | 保护模式 | Protected Mode | x86 启用 `CR0.PE` 后的保护执行模式；进入 32 位保护模式不等于已经进入 64 位模式 | 1.3 |
 | 标签 | Tag | 在标签集合内标识并限制请求资源的编号，可用于由设备完成定位请求 | 10.1 |
@@ -78,13 +80,13 @@
 | 调度组 | Scheduling Group | 调度域内参与负载比较的 CPU 子集，`struct sched_group` | 3.9 |
 | 定时器迁移层次 | Timer Migration Hierarchy | 空闲 CPU 把最早的全局定时器登记到按拓扑组织的层次中、由活跃 CPU 代为执行的机制（v6.9） | 8.7 |
 | 定时器松弛 | Timer Slack | hrtimer 允许推迟到期的区间，用于合并唤醒；任务的默认值为 `timer_slack_ns` | 8.9 |
-| 丢弃 | Discard | 通知设备某范围数据不再需要，不等同于写零或安全擦除 | 10.9 |
+| 丢弃 | Discard | 通知设备某范围数据不再需要，不等同于写零或安全擦除 | 10.10 |
 | 丢失唤醒 | Lost Wakeup | 等待方检查条件与睡眠之间错过唤醒的竞态 | 3.2 |
 | 动态抢占 | Dynamic Preemption | `CONFIG_PREEMPT_DYNAMIC`，用 static call / static key 在启动或运行时切换抢占模型 | 3.5 |
 | 动态时钟 | Dynamic POSIX Clock | 以文件描述符编码时钟 ID 的 POSIX 时钟，如 PTP 硬件时钟 | 8.11 |
 | 抖动 | Thrashing | 工作集超过内存，频繁回收与重新读入导致系统几乎停滞 | 4.10 |
-| 队列冻结 | Queue Freeze | 阻止新的常规队列使用入口，并等待已有使用引用退出的协议 | 10.2 |
-| 队列静止 | Queue Quiesce | 停止新的请求派发并等待进行中的派发临界区退出，不等于所有命令已完成 | 10.2 |
+| 队列冻结 | Queue Freeze | 通过 `q_usage_counter` 阻止新的常规队列使用；开始冻结与等待已有使用引用耗尽是两个步骤，不等于释放队列对象 | 10.2 |
+| 队列静止 | Queue Quiesce | 停止新的请求派发并等待进行中的派发临界区退出，不等待所有在途命令完成，也不阻止完成回调运行 | 10.2 |
 | 队列映射 | Queue Mapping | 按提交 CPU 与操作类型选择 blk-mq 硬件上下文的映射 | 10.5 |
 | 读拷贝更新 | Read-Copy Update，RCU | 读者无锁、写者发布新版本并在宽限期后回收旧版本的同步机制 | 7.9 |
 | 独立构建目录 | Out-of-tree Build | 用 `O=` 将配置和构建产物与干净源码树分离；本书另建仓库外源码副本以保护只读基线 | 0.2 |
@@ -103,12 +105,13 @@
 | 翻译单元 | Translation Unit | 一个源文件及其包含内容经过预处理后形成的编译单位，其解析受真实编译参数约束 | 0.3 |
 | 非对称算力 | Asymmetric CPU Capacity | 各 CPU 最大算力不同的系统，如大小核 | 3.12 |
 | 非自愿上下文切换 | Involuntary Context Switch | 因抢占发生的切换，计入 `nivcsw` | 3.2 |
-| 分区存储设备 | Zoned Block Device，ZBD | 以 zone 管理容量与写入约束的块设备，zone 不等同于分区表中的 partition | 10.9 |
+| 分区 | Partition | 磁盘中的独立地址范围，由 `block_device` 记录起始扇区和容量；同一磁盘的分区共享 `gendisk` 与 `request_queue`，详见 10.2 | 10.1 |
+| 分区存储设备 | Zoned Block Device，ZBD | 以 zone 管理容量与写入约束的块设备，zone 不等同于分区表中的 partition | 10.11 |
 | 分层中断域 | Hierarchical IRQ Domain | 以父子关系串联多级中断控制器的 `irq_domain` 结构 | 5.6 |
 | 复合页 | Compound Page | 多个连续页组成的整体，由头页与尾页构成 | 4.1 |
 | 负载均衡 | Load Balancing | 在 CPU 之间迁移任务以纠正负载不均 | 3.9 |
 | 负载均值 | Load Average | `/proc/loadavg` 中可运行与不可中断睡眠任务数的 1、5、15 分钟指数平均 | 3.5 |
-| 服务质量 | Quality of Service，QoS | 对共享资源的时延、吞吐或公平性施加控制；块层通过请求生命周期钩子实现多种策略 | 10.10 |
+| 服务质量 | Quality of Service，QoS | 对共享资源的时延、吞吐或公平性施加控制；块层通过请求生命周期钩子实现多种策略 | 10.12 |
 | 辅助时钟 | Auxiliary Clock | 自 `CLOCK_AUX` 起、各有独立 timekeeper 的可设置与调频的 POSIX 时钟（`CONFIG_POSIX_AUX_CLOCKS`，v6.17） | 8.1 |
 | 辅助向量 | Auxiliary Vector，auxv | ELF 用户栈上的类型和值条目，向程序及动态链接器传递入口、程序头和安全状态等信息 | 2.6 |
 | 高精度定时器 | High-Resolution Timer，hrtimer | 纳秒精度的内核定时器，模拟的周期 tick 与 hrtick 都基于它实现 | 3.2 |
@@ -135,7 +138,8 @@
 | 互斥锁 | Mutex | 可睡眠的互斥锁，`struct mutex`，支持乐观自旋 | 7.6 |
 | 唤醒队列 | Wake List | `TTWU_QUEUE` 机制下挂在目标 CPU 上、经 IPI 处理的待唤醒任务链表 | 3.4 |
 | 唤醒亲和 | Wake Affine | 唤醒时在唤醒者所在 CPU 与任务原 CPU 之间选定搜索空闲 CPU 的区域 | 3.12 |
-| 回写节流 | Writeback Throttling，WBT | 利用设备时延反馈控制相关写入在途深度的设备级块层策略 | 10.10 |
+| 缓存刷新 | Cache Flush | 要求设备将先前已完成写入的易失缓存内容持久化；块层用 PREFLUSH 与数据阶段组合表达顺序 | 10.9 |
+| 回写节流 | Writeback Throttling，WBT | 利用设备时延反馈控制相关写入在途深度的设备级块层策略 | 10.12 |
 | 回收 | Reclaim | 释放已用页以补充空闲内存，执行者为 kswapd 与直接回收 | 4.4 |
 | 会话 | Session | 与作业控制和控制终端相关的进程组集合 | 2.1 |
 | 会话标识符 | Session ID，SID | 标识会话的编号，使用 `PIDTYPE_SID` 关系 | 2.3 |
@@ -169,7 +173,7 @@
 | 局部向量表 | Local Vector Table，LVT | 本地 APIC 中为定时器、性能计数器等本地中断源配置向量的寄存器组 | 5.5 |
 | 快速数据路径 | eXpress Data Path，XDP | 网络 BPF 接入点，需区分驱动原生、通用与卸载模式；返回值为 XDP 动作 | 13.9 |
 | 可延迟定时器 | Deferrable Timer | 带 `TIMER_DEFERRABLE` 标志、不会唤醒空闲 CPU 的时间轮定时器 | 8.7 |
-| 块 I/O 控制组 | Block I/O Cgroup，blkcg | 为块访问提供控制组归属、统计及资源控制的基础框架 | 10.10 |
+| 块 I/O 控制组 | Block I/O Cgroup，blkcg | 为块访问提供控制组归属、统计及资源控制的基础框架 | 10.12 |
 | 空闲核 | Idle Core | 所有 SMT 兄弟线程都空闲的物理核 | 3.12 |
 | 宽限期 | Grace Period | 所有 CPU 都至少经历一次静止状态的时间段 | 7.9 |
 | 扩展静止状态 | Extended Quiescent State，EQS | CPU 处于 idle 或 NO_HZ_FULL 用户态，RCU 不关注它 | 7.10 |
@@ -180,7 +184,7 @@
 | 灵活返回与事件投递 | Flexible Return and Event Delivery，FRED | 取代 IDT 事件投递与 IRET 的新架构（`CONFIG_X86_FRED`，v6.9） | 1.6 |
 | 零松弛 | Zero-Laxity | 延迟 dl_server 的激活时刻 `deadline − runtime`，即再推迟就无法在截止时间前用完预算 | 3.7 |
 | 零页 | Zero Page | 全局共享的全零只读页，匿名读缺页映射到它 | 4.8 |
-| 逻辑块地址 | Logical Block Address，LBA | 设备协议中的逻辑块编号，NVMe 中需由块层扇区按命名空间块大小转换 | 10.11 |
+| 逻辑块地址 | Logical Block Address，LBA | 设备协议中的逻辑块编号，NVMe 中需由块层扇区按命名空间块大小转换 | 10.13 |
 | 逻辑块大小 | Logical Block Size | 设备接受普通块访问的基本对齐单位，不改变块层扇区固定为 512 字节的约定 | 10.1 |
 | 路径名查找 | Pathname Lookup | 把路径字符串解析为挂载树中位置的过程，涉及路径分量、符号链接与挂载点；见 [`Documentation/filesystems/path-lookup.rst`](../linux/Documentation/filesystems/path-lookup.rst) | 9.3 |
 | 轮询 | Polling | 主动检查完成队列以发现 I/O 完成，仍须遵守状态与生命周期协议 | 10.8 |
@@ -221,8 +225,8 @@
 | 抢占点 | Preemption Point | 检查重调度标志并可能进入调度器的位置，如 `preempt_enable()`、中断返回、返回用户态 | 3.2 |
 | 强制单元访问 | Force Unit Access，FUA | 要求本次写的数据达到非易失存储后才报告完成的语义，块层标志为 `REQ_FUA` | 10.9 |
 | 强制线程化 | Forced Threading | 把普通中断处理函数放到中断线程中执行（`threadirqs`） | 5.7 |
-| 请求私有区 | Protocol Data Unit，PDU | blk-mq 请求对象后为驱动预留的附加上下文空间，由 tag set 的 `cmd_size` 指定大小 | 10.11 |
-| 清零 | Write Zeroes | 令设备范围呈现零填充语义的操作，可由硬件卸载或显式写零页实现 | 10.9 |
+| 请求私有区 | Protocol Data Unit，PDU | blk-mq 请求对象后为驱动预留的附加上下文空间，由 tag set 的 `cmd_size` 指定大小 | 10.5 |
+| 清零 | Write Zeroes | 令设备范围呈现零填充语义的操作，可由硬件卸载或显式写零页实现 | 10.10 |
 | 亲和性范围 | Affinity Scope | unbound 工作队列按 CPU 拓扑划分 pod 的粒度（v6.5） | 5.12 |
 | 区间树 | Interval Tree | 按区间重叠查询的增强红黑树，用于 `i_mmap` 与 anon_vma | 4.9 |
 | 驱动标签 | Driver Tag | 请求占用驱动执行侧资源时使用的标签；安装调度器时通常在派发阶段取得 | 10.5 |
@@ -263,7 +267,7 @@
 | 双重故障 | Double Fault，#DF | 投递异常过程中再次发生异常，x86_64 上常由栈溢出引起 | 5.1 |
 | 水位线 | Watermark | zone 的 min/low/high 空闲页阈值 | 4.4 |
 | 顺序锁 | Sequence Lock | 读者凭序号检测并发写入后重试的读写同步机制，`seqlock_t` / `seqcount_t` | 7.5 |
-| 散集列表 | Scatter-Gather List，SGL | 由多个地址与长度组成的数据描述，供设备访问不连续内存 | 10.11 |
+| 散集列表 | Scatter-Gather List，SGL | 由多个地址与长度组成的数据描述，供设备访问不连续内存 | 10.13 |
 | 扇区 | Sector | Linux 块层固定为 512 字节的地址与容量单位，与设备逻辑块大小独立 | 10.1 |
 | 算力不变性 | CPU Invariance | 按 CPU 的相对最大算力缩放 PELT 时间，使任务利用率能在不同算力的 CPU 之间比较 | 3.8 |
 | 私有映射 | Private Mapping | 以文件为初始数据源，写入后通过 COW 建立私有匿名副本，不把该副本按原文件写回；系统分析见 9.11 | 4.7 |
@@ -273,7 +277,7 @@
 | 锁相环 / 锁频环 | Phase-Locked Loop，PLL / Frequency-Locked Loop，FLL | NTP 内核时钟规程依据相位偏差调整频率的两种算法 | 8.5 |
 | 锁依赖验证器 | Lock Dependency Validator，lockdep | 运行时记录加锁顺序并检测潜在死锁的调试工具 | 7.11 |
 | 特殊状态 | Special State | 不使用条件循环、必须在 `pi_lock` 下设置的任务状态，如 `TASK_STOPPED`、`TASK_DEAD`、`TASK_FROZEN` | 3.4 |
-| 提交队列 | Submission Queue，SQ | NVMe 驱动向控制器发布协议命令的设备侧队列，不同于 blk-mq 软件上下文 | 10.11 |
+| 提交队列 | Submission Queue，SQ | NVMe 驱动向控制器发布协议命令的设备侧队列，不同于 blk-mq 软件上下文 | 10.13 |
 | 提交记账 | Commit Accounting | 统计私有可写映射承诺的内存量，`Committed_AS` | 4.7 |
 | 统一可扩展固件接口 | Unified Extensible Firmware Interface，UEFI | 定义固件执行环境与服务的接口规范，内核可通过 EFI stub 接入 | 1.2 |
 | 透明大页 | Transparent Huge Page，THP | 缺页时自动尝试分配大页，失败回退 | 4.13 |
@@ -281,7 +285,7 @@
 | 头页 / 尾页 | Head Page / Tail Page | 复合页的第一页与其余页 | 4.1 |
 | 推 / 拉 | Push / Pull | 实时与 Deadline 类在 CPU 间主动迁移任务的两种操作 | 3.6 |
 | 外部碎片 | External Fragmentation | 空闲页总量足够但缺少连续块 | 4.12 |
-| 完成队列 | Completion Queue，CQ | NVMe 控制器发布命令完成项的设备侧队列 | 10.11 |
+| 完成队列 | Completion Queue，CQ | NVMe 控制器发布命令完成项的设备侧队列 | 10.13 |
 | 完全公平调度器 | Completely Fair Scheduler，CFS | v2.6.23～v6.5 的公平调度算法 | 3.3 |
 | 完全抢占 | Full Preemption | full 抢占模型：立即重调度请求可在抢占计数为 0、现场允许的内核抢占点被响应；`CONFIG_PREEMPT` 可选为默认值，动态内核也可运行时切入 | 3.5 |
 | 网络时间协议 | Network Time Protocol，NTP | 与外部时间源同步本机时钟的协议，内核提供 `adjtimex()` 时钟规程接口 | 8.5 |
@@ -291,7 +295,7 @@
 | 文件内存映射 | File-backed Memory Mapping | 把文件范围关联到进程虚拟地址空间，通过缺页获取文件页并建立页表；通用路径见 9.11 | 4.7 |
 | 文件预读 | File Readahead | 根据访问历史提前把文件内容读入 page cache；窗口由 `file_ra_state` 跟踪，系统分析见 9.9 | 4.8 |
 | 物理块大小 | Physical Block Size | 设备报告的物理块粒度，与逻辑块及块层 512 字节扇区单位区分 | 10.1 |
-| 物理区域页 | Physical Region Page，PRP | NVMe 协议中描述数据页范围的一种形式，使用设备可访问的 DMA 地址 | 10.11 |
+| 物理区域页 | Physical Region Page，PRP | NVMe 协议中描述数据页范围的一种形式，使用设备可访问的 DMA 地址 | 10.13 |
 | 尾调用（BPF） | Tail Call | 通过程序数组切换程序；成功不返回调用点，失败继续原程序，受链式执行上限约束 | 13.5 |
 | 伪共享 | False Sharing | 不同 CPU 频繁写入同一缓存行中的不同数据，导致该缓存行在 CPU 间反复迁移 | 3.1 |
 | 伪唤醒 | Spurious Wakeup | 被唤醒时等待条件并不成立的唤醒，等待方须在循环中重新检查条件 | 3.2 |
@@ -307,7 +311,7 @@
 | 线程组标识符 | Thread Group ID，TGID | 标识线程组的编号，Linux `getpid()` 返回调用者视图中的 TGID | 2.3 |
 | 向量 | Vector | x86 标识中断与异常的 0～255 编号，用于索引 IDT | 5.1 |
 | 消息信号中断 | Message Signaled Interrupts，MSI / MSI-X | 设备通过写特定地址触发中断的机制 | 5.5 |
-| 写指针 | Write Pointer | 顺序写 zone 中的当前写入位置，块层 zone 描述符以 512 字节扇区报告 | 10.9 |
+| 写指针 | Write Pointer | 顺序写 zone 中的当前写入位置，块层 zone 描述符以 512 字节扇区报告 | 10.11 |
 | 写时复制 | Copy-On-Write，COW | 普通私有页在 fork 后共享并受写保护，写入时按条件复制或独占复用；系统分析见 4.9 | 2.5 |
 | 信号 | Signal | 执行主体之间的异步通知协议，动作可为忽略、用户处理、停止 / 继续或终止等 | 2.1 |
 | 信号帧 | Signal Frame | 用户信号处理前建立的上下文保存区域，经 `rt_sigreturn` 恢复原执行现场 | 2.9 |
@@ -377,7 +381,7 @@
 | 自愿抢占 | Voluntary Preemption | voluntary 抢占模型：内核态只在 `cond_resched()`、`might_sleep()` 等显式抢占点让出 CPU | 3.5 |
 | 自愿上下文切换 | Voluntary Context Switch | 任务主动睡眠引起的切换，计入 `nvcsw` | 3.2 |
 | 组调度 | Group Scheduling | 以任务组为单位分配 CPU（`CONFIG_FAIR_GROUP_SCHED`） | 3.10 |
-| zone 写入暂存 | Zone Write Plugging | 块层按 zone 协调顺序写、清零与模拟 append 的机制，不同于任务本地 plug | 10.9 |
+| zone 写入暂存 | Zone Write Plugging | 块层按 zone 协调顺序写、清零与模拟 append 的机制，不同于任务本地 plug | 10.11 |
 | 组合树 | Combining Tree | Tree RCU 中汇总静止状态报告的 `rcu_node` 层级结构 | 7.10 |
 | 子收割者 | Child Subreaper | 在 PID 命名空间内接管后代孤儿回收责任的祖先进程，区别于无条件交给宿主 PID 1 | 2.7 |
 | 阻塞（信号） | Blocked | 信号掩码暂时阻止普通投递，不等于采用忽略处理方式 | 2.8 |
