@@ -104,7 +104,7 @@
 | 反向映射 | Reverse Mapping，rmap | 由物理页找到所有映射它的页表项 | 4.9 |
 | 翻译单元 | Translation Unit | 一个源文件及其包含内容经过预处理后形成的编译单位，其解析受真实编译参数约束 | 0.3 |
 | 非对称算力 | Asymmetric CPU Capacity | 各 CPU 最大算力不同的系统，如大小核 | 3.12 |
-| 非自愿上下文切换 | Involuntary Context Switch | 因抢占发生的切换，计入 `nivcsw` | 3.2 |
+| 非自愿上下文切换 | Involuntary Context Switch | 抢占或以 `TASK_RUNNING` 状态让出 CPU 时的实际切换，计入 `nivcsw`；也包括 `sched_yield()`，不只取决于入口函数名 | 3.2 |
 | 分区 | Partition | 磁盘中的独立地址范围，由 `block_device` 记录起始扇区和容量；同一磁盘的分区共享 `gendisk` 与 `request_queue`，详见 10.2 | 10.1 |
 | 分区存储设备 | Zoned Block Device，ZBD | 以 zone 管理容量与写入约束的块设备，zone 不等同于分区表中的 partition | 10.11 |
 | 分层中断域 | Hierarchical IRQ Domain | 以父子关系串联多级中断控制器的 `irq_domain` 结构 | 5.6 |
@@ -136,7 +136,8 @@
 | 后备设备信息 | Backing Device Information，BDI | 描述预读与写回等能力，`bdi_writeback` 在其下组织具体写回域；见 [`include/linux/backing-dev-defs.h`](../linux/include/linux/backing-dev-defs.h) | 9.10 |
 | 忽略（信号） | Ignored | 信号处理方式之一，不等于把信号阻塞后留待以后处理 | 2.8 |
 | 互斥锁 | Mutex | 可睡眠的互斥锁，`struct mutex`，支持乐观自旋 | 7.6 |
-| 唤醒队列 | Wake List | `TTWU_QUEUE` 机制下挂在目标 CPU 上、经 IPI 处理的待唤醒任务链表 | 3.4 |
+| 唤醒队列 | Wake List | `TTWU_QUEUE` 经每 CPU 的 `call_single_queue` 投递待激活任务，由目标 CPU 批量入队；可合并通知或省略 IPI，不等于等待队列或调用者局部的 `wake_q` | 3.4 |
+| 唤醒批处理队列 | Wake Queue，wake_q | 调用者暂存待唤醒任务、持有任务引用并由 `wake_up_q()` 消费的队列；用于将实际唤醒移出临界区，但不承诺任务在登记后一定延迟唤醒 | 3.4 |
 | 唤醒亲和 | Wake Affine | 唤醒时在唤醒者所在 CPU 与任务原 CPU 之间选定搜索空闲 CPU 的区域 | 3.12 |
 | 缓存刷新 | Cache Flush | 要求设备将先前已完成写入的易失缓存内容持久化；块层用 PREFLUSH 与数据阶段组合表达顺序 | 10.9 |
 | 回写节流 | Writeback Throttling，WBT | 利用设备时延反馈控制相关写入在途深度的设备级块层策略 | 10.12 |
@@ -212,7 +213,7 @@
 | 内核地址空间布局随机化 | Kernel Address Space Layout Randomization，KASLR | 随机化内核镜像放置或运行布局；物理地址选择与虚拟布局选择需分别理解 | 1.4 |
 | 能力 | Capability | 对传统超级用户权限的细分授权，须结合能力集合和目标用户命名空间解释 | 2.11 |
 | 能效感知调度 | Energy Aware Scheduling，EAS | 在非对称算力平台上按能耗选择 CPU | 3.8 |
-| 排他等待 | Exclusive Wait | 带 `WQ_FLAG_EXCLUSIVE` 的等待队列项，`wake_up()` 每次只唤醒一个此类等待者 | 3.4 |
+| 排他等待 | Exclusive Wait | 带 `WQ_FLAG_EXCLUSIVE` 的等待队列项；`wake_up()` 默认给一个成功唤醒名额，回调未成功不消耗名额，非排他项不计入该限额 | 3.4 |
 | 票号锁 | Ticket Lock | 按取号顺序获取的公平自旋锁，x86 上已被 qspinlock 取代 | 7.4 |
 | 频率不变性 | Frequency Invariance | 按当前频率与最大频率的比例缩放 PELT 时间，使同一工作需求可在不同频率下比较 | 3.8 |
 | 前向合并 | Front Merge | 把紧邻已有请求起始位置之前的 bio 并入请求，并更新请求起始扇区 | 10.6 |
@@ -379,7 +380,7 @@
 | 自动 NUMA 平衡 | Automatic NUMA Balancing | 以 PROTNONE 缺页采样访问，把页迁到访问者所在节点（`CONFIG_NUMA_BALANCING`） | 4.12 |
 | 自旋锁 | Spinlock | 获取失败时原地循环等待的锁，`spinlock_t` / `raw_spinlock_t` | 7.4 |
 | 自愿抢占 | Voluntary Preemption | voluntary 抢占模型：内核态只在 `cond_resched()`、`might_sleep()` 等显式抢占点让出 CPU | 3.5 |
-| 自愿上下文切换 | Voluntary Context Switch | 任务主动睡眠引起的切换，计入 `nvcsw` | 3.2 |
+| 自愿上下文切换 | Voluntary Context Switch | `__schedule()` 进入非抢占的阻塞尝试分支后发生的实际切换，计入 `nvcsw`；即使因挂起信号取消睡眠，统计口径也不改变 | 3.2 |
 | 组调度 | Group Scheduling | 以任务组为单位分配 CPU（`CONFIG_FAIR_GROUP_SCHED`） | 3.10 |
 | zone 写入暂存 | Zone Write Plugging | 块层按 zone 协调顺序写、清零与模拟 append 的机制，不同于任务本地 plug | 10.11 |
 | 组合树 | Combining Tree | Tree RCU 中汇总静止状态报告的 `rcu_node` 层级结构 | 7.10 |
